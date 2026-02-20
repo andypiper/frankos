@@ -17,6 +17,35 @@
 #include "sys/fcntl.h"
 #include "sys/stat.h"
 #include "signal.h"
+#include "../drivers/psram/psram.h"
+
+/* Defined in app.c */
+extern void task_mem_defer_free(void* ptr);
+
+/* PSRAM-backed static task memory (matches app.c definition) */
+typedef struct {
+    StackType_t stack[2048];
+    StaticTask_t tcb;
+} app_task_mem_t;
+
+#define APP_TASK_PRIORITY 1
+
+static TaskHandle_t create_process_task_psram(
+    TaskFunction_t fn, const char* name, void* param,
+    UBaseType_t priority, app_task_mem_t** out_mem)
+{
+    app_task_mem_t* mem = (app_task_mem_t*)psram_alloc(sizeof(app_task_mem_t));
+    if (mem) {
+        memset(mem, 0, sizeof(app_task_mem_t));
+        *out_mem = mem;
+        return xTaskCreateStatic(fn, name, 2048, param, priority,
+                                 mem->stack, &mem->tcb);
+    }
+    *out_mem = NULL;
+    TaskHandle_t h;
+    xTaskCreate(fn, name, 2048, param, priority, &h);
+    return h;
+}
 
 typedef struct FDESC_s {
     FIL* fp;
@@ -513,6 +542,7 @@ static void vProcessTask(void *pv) {
     deliver_signals(ctx);
     exec_sync(ctx);
     ctx->stage = ZOMBIE;
+    void* mem = ctx->task_mem;
     if (ctx->parent_task) {
         xTaskNotifyGive(ctx->parent_task);
     } else if (ctx->ppid && ctx->ppid < pids->size && pids->p[ctx->ppid]) {
@@ -521,6 +551,7 @@ static void vProcessTask(void *pv) {
     #if DEBUG_APP_LOAD
     goutf("vProcessTask: [%p] <<<\n", ctx);
     #endif
+    if (mem) task_mem_defer_free(mem);
     vTaskDelete(NULL);
     __unreachable();
 }
@@ -669,7 +700,9 @@ int __posix_spawn(
         remove_ctx(child);
         return err;
     }
-    xTaskCreate(vProcessTask, child->argv[0], 1024/*x 4 = 4096*/, child, configMAX_PRIORITIES - 1, 0);
+    app_task_mem_t* tmem;
+    create_process_task_psram(vProcessTask, child->argv[0], child, APP_TASK_PRIORITY, &tmem);
+    child->task_mem = tmem;
 
     if (pid_out)
         *pid_out = (pid_t)child->pid;

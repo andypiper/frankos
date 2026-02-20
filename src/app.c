@@ -22,6 +22,9 @@
 #include "unistd.h"
 #include "elf32.h"
 #include "../api/m-os-api-c-hash.h"
+#include "../drivers/psram/psram.h"
+
+#define APP_TASK_PRIORITY 1
 
 extern const char TEMP[];
 const char _flash_me[] = ".flash_me";
@@ -223,7 +226,7 @@ void __in_hfa() vAppTask(void *pv) {
 }
 
 void __in_hfa() run_app(char * name) {
-    xTaskCreate(vAppTask, name, 2048, NULL, configMAX_PRIORITIES - 1, NULL);
+    xTaskCreate(vAppTask, name, 2048, NULL, APP_TASK_PRIORITY, NULL);
 }
 
 // Декодирование и обновление инструкции BL для ссылки типа R_ARM_THM_PC22
@@ -425,14 +428,25 @@ static void __in_hfa() add_sec(load_sec_ctx* ctx, char* del_addr, char* prg_addr
     list_push_back(ctx->sections_lst, se);
 }
 
+static uint8_t* alloc_zeroed(size_t sz) {
+    uint8_t* p = NULL;
+    if (psram_is_available()) {
+        p = (uint8_t*)psram_alloc(sz);
+        if (p) memset(p, 0, sz);
+    }
+    if (!p)
+        p = (uint8_t*)pvPortCalloc(1, sz);
+    return p;
+}
+
 inline static uint8_t* __in_hfa() sec_align(uint32_t sz, uint8_t* *pdel_addr, uint8_t* *real_addr, uint32_t a, bool write_access) {
-    uint8_t* res = (uint8_t*)pvPortCalloc(1, sz);
+    uint8_t* res = alloc_zeroed(sz);
     if (a == 0 || a == 1) {
         *pdel_addr = res;
     }
     else if ((uint32_t)res & (a - 1)) {
-        vPortFree(res);
-        res = (uint8_t*)pvPortCalloc(1, sz + (a - 1));
+        psram_free(res);
+        res = alloc_zeroed(sz + (a - 1));
         *pdel_addr = res;
         if ((uint32_t)res & (a - 1)) {
             res = (uint8_t*)(((uint32_t)res & (0xFFFFFFFF ^ (a - 1))) + a);
@@ -603,7 +617,7 @@ static uint8_t* __in_hfa() load_sec2mem(load_sec_ctx * c, uint16_t sec_num, bool
         f_read(c->f2, psh, sizeof(elf32_shdr), &rb) == FR_OK && rb == sizeof(elf32_shdr)
     ) {
         // goutf("free_sz: %d; psh->sh_size: %d\n", free_sz, psh->sh_size);
-        if (psh->sh_size + psh->sh_addralign + RESERVED_RAM > xPortGetFreeHeapSize()) {
+        if (!psram_is_available() && psh->sh_size + psh->sh_addralign + RESERVED_RAM > xPortGetFreeHeapSize()) {
             gouta("Not enough RAM.\n");
             goto e1;
         }
@@ -1161,6 +1175,44 @@ void __in_hfa() exec_sync(cmd_ctx_t* ctx) {
     ctx->ret_code = res;
 }
 
+/* ---- Deferred PSRAM cleanup for self-deleting static tasks ---- */
+#define TASK_MEM_CLEANUP_SLOTS 16
+void* volatile task_mem_cleanup[TASK_MEM_CLEANUP_SLOTS];
+
+void task_mem_defer_free(void* ptr) {
+    for (int i = 0; i < TASK_MEM_CLEANUP_SLOTS; i++) {
+        if (!task_mem_cleanup[i]) {
+            task_mem_cleanup[i] = ptr;
+            return;
+        }
+    }
+}
+
+
+/* ---- Static task creation with PSRAM stack ---- */
+typedef struct {
+    StackType_t stack[2048];   /* 8KB on ARM (StackType_t = uint32_t) */
+    StaticTask_t tcb;
+} app_task_mem_t;
+
+static TaskHandle_t create_app_task_psram(
+    TaskFunction_t fn, const char* name, void* param,
+    UBaseType_t priority, app_task_mem_t** out_mem)
+{
+    app_task_mem_t* mem = (app_task_mem_t*)psram_alloc(sizeof(app_task_mem_t));
+    if (mem) {
+        memset(mem, 0, sizeof(app_task_mem_t));
+        *out_mem = mem;
+        return xTaskCreateStatic(fn, name, 2048, param, priority,
+                                 mem->stack, &mem->tcb);
+    }
+    /* PSRAM full — fall back to dynamic SRAM allocation */
+    *out_mem = NULL;
+    TaskHandle_t h;
+    xTaskCreate(fn, name, 2048, param, priority, &h);
+    return h;
+}
+
 static void __in_hfa() vAppDetachedTask(void *pv) {
     cmd_ctx_t* ctx = (cmd_ctx_t*)pv;
     const TaskHandle_t th = xTaskGetCurrentTaskHandle();
@@ -1192,10 +1244,12 @@ static void __in_hfa() vAppDetachedTask(void *pv) {
     set_scancode_handler(0);
     set_cp866_handler(0);
     /* ================================== */
+    void* mem = ctx->task_mem;
     remove_ctx(ctx);
     #if DEBUG_APP_LOAD
     goutf("vAppDetachedTask: [%p] <<<\n", ctx);
     #endif
+    if (mem) task_mem_defer_free(mem);
     vTaskDelete( NULL );
     __unreachable();
 }
@@ -1216,10 +1270,12 @@ static void __in_hfa() vAppAttachedTask(void *pv) {
     #if DEBUG_APP_LOAD
     goutf("xTaskNotifyGive [%p]->[%p]\n", ctx, ctx->parent_task);
     #endif
+    void* mem = ctx->task_mem;
     xTaskNotifyGive(ctx->parent_task);
     #if DEBUG_APP_LOAD
     goutf("vAppAttachedTask: [%p] <<<\n", ctx);
     #endif
+    if (mem) task_mem_defer_free(mem);
     vTaskDelete( NULL );
     __unreachable();
 }
@@ -1227,6 +1283,7 @@ static void __in_hfa() vAppAttachedTask(void *pv) {
 void __in_hfa() __exit(int status) {
     const TaskHandle_t th = xTaskGetCurrentTaskHandle();
     cmd_ctx_t* ctx = (cmd_ctx_t*)pvTaskGetThreadLocalStoragePointer(th, 0);
+    void* mem = ctx ? ctx->task_mem : NULL;
     if (ctx) {
         bootb_ctx_t* bootb_ctx = ctx->pboot_ctx;
         #if DEBUG_APP_LOAD
@@ -1245,6 +1302,7 @@ void __in_hfa() __exit(int status) {
             remove_ctx(ctx); // detached case, noboty can cleanup it except there
         }
     }
+    if (mem) task_mem_defer_free(mem);
     vTaskDelete( NULL );
     __unreachable();
 }
@@ -1265,7 +1323,9 @@ void __in_hfa() exec(cmd_ctx_t* ctx) { // like init proc flow
             #if DEBUG_APP_LOAD
             goutf("Clone ctx [%p]->[%p]\n", ctx, ctxi);
             #endif
-            xTaskCreate(vAppDetachedTask, ctxi->argv[0], 2048/*x 4 = 8192*/, ctxi, configMAX_PRIORITIES - 1, NULL);
+            app_task_mem_t* tmem;
+            create_app_task_psram(vAppDetachedTask, ctxi->argv[0], ctxi, APP_TASK_PRIORITY, &tmem);
+            ctxi->task_mem = tmem;
             cleanup_ctx(ctx);
         } else {
             #if DEBUG_APP_LOAD
@@ -1273,7 +1333,9 @@ void __in_hfa() exec(cmd_ctx_t* ctx) { // like init proc flow
             #endif
             ctx->parent_task = xTaskGetCurrentTaskHandle();
             kbd_set_stdin_owner(ctx->pid);
-            xTaskCreate(vAppAttachedTask, ctx->argv[0], 2048/*x 4 = 8192*/, ctx, configMAX_PRIORITIES - 1, NULL);
+            app_task_mem_t* tmem;
+            create_app_task_psram(vAppAttachedTask, ctx->argv[0], ctx, APP_TASK_PRIORITY, &tmem);
+            ctx->task_mem = tmem;
             #if DEBUG_APP_LOAD
             goutf("ctx [%p], ulTaskNotifyTake[%p]\n", ctx, ctx->parent_task);
             #endif

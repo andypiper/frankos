@@ -19,6 +19,7 @@ extern "C" {
 #include "task.h"
 #include "../api/m-os-api-c-list.h"
 #include "../api/m-os-api-c-array.h"
+#include "../drivers/psram/psram.h"
 
 /* Forward declaration — terminal_t is defined in terminal.h */
 #ifndef TERMINAL_T_DEFINED
@@ -41,7 +42,7 @@ typedef struct {
 } sect_entry_t;
 
 static void sect_entry_deallocator(sect_entry_t* s) {
-    if (s->del_addr) vPortFree(s->del_addr);
+    if (s->del_addr) psram_free(s->del_addr);
     vPortFree(s);
 }
 
@@ -124,6 +125,7 @@ typedef struct cmd_ctx {
     list_t /*of void*/ *pallocs; // related to the process allocations
     int proc_errno;
     terminal_t *term;   /* owning terminal for this process */
+    void* task_mem;     /* PSRAM block for static task (stack + TCB), freed on exit */
 } cmd_ctx_t;
 
 cmd_ctx_t* get_cmd_startup_ctx(); // system

@@ -63,6 +63,12 @@
 #endif
 
 #include "hooks.h"
+#include "../drivers/psram/psram.h"
+
+/* Deferred PSRAM cleanup queue — filled by task_mem_defer_free() in app.c,
+ * drained here in the idle hook after the self-deleting task has switched out. */
+#define TASK_MEM_CLEANUP_SLOTS 16
+extern void* volatile task_mem_cleanup[TASK_MEM_CLEANUP_SLOTS];
 
 static vApplicationMallocFailedHookPtr _vApplicationMallocFailedHookPtr = NULL;
 
@@ -127,6 +133,15 @@ void vApplicationIdleHook( void )
 
     /* Remove compiler warning about xFreeHeapSpace being set but never used. */
     ( void ) xFreeHeapSpace;
+
+    /* Drain deferred PSRAM cleanup queue (static task stacks/TCBs) */
+    for (int i = 0; i < TASK_MEM_CLEANUP_SLOTS; i++) {
+        void* p = task_mem_cleanup[i];
+        if (p) {
+            task_mem_cleanup[i] = NULL;
+            psram_free(p);
+        }
+    }
 }
 /*-----------------------------------------------------------*/
 void vApplicationTickHook( void )

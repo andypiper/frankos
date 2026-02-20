@@ -40,6 +40,29 @@
 
 #define LED_PIN PICO_DEFAULT_LED_PIN
 
+/* ---- Static allocation support for FreeRTOS ---- */
+static StaticTask_t idle_tcb;
+static StackType_t  idle_stack[configMINIMAL_STACK_SIZE];
+
+void vApplicationGetIdleTaskMemory(StaticTask_t **ppxIdleTaskTCBBuffer,
+                                   StackType_t **ppxIdleTaskStackBuffer,
+                                   configSTACK_DEPTH_TYPE *puxIdleTaskStackSize) {
+    *ppxIdleTaskTCBBuffer   = &idle_tcb;
+    *ppxIdleTaskStackBuffer = idle_stack;
+    *puxIdleTaskStackSize   = configMINIMAL_STACK_SIZE;
+}
+
+static StaticTask_t timer_tcb;
+static StackType_t  timer_stack[configTIMER_TASK_STACK_DEPTH];
+
+void vApplicationGetTimerTaskMemory(StaticTask_t **ppxTimerTaskTCBBuffer,
+                                    StackType_t **ppxTimerTaskStackBuffer,
+                                    configSTACK_DEPTH_TYPE *puxTimerTaskStackSize) {
+    *ppxTimerTaskTCBBuffer   = &timer_tcb;
+    *ppxTimerTaskStackBuffer = timer_stack;
+    *puxTimerTaskStackSize   = configTIMER_TASK_STACK_DEPTH;
+}
+
 /* Dirty flag — set by input_task, read by compositor_task (both on Core 0) */
 static volatile bool g_video_dirty = true;
 
