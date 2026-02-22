@@ -279,6 +279,20 @@ bool wm_needs_composite(void);
 uint8_t wm_get_pressed_titlebar_btn(hwnd_t hwnd);
 
 /*==========================================================================
+ * Keyboard window move mode
+ *=========================================================================*/
+
+/* Begin keyboard move mode for a window (arrow keys move, Enter/Esc exits) */
+void wm_begin_keyboard_move(hwnd_t hwnd);
+
+/* Process a key event during keyboard move mode.
+ * Returns true if the key was consumed. */
+bool wm_keyboard_move_key(uint8_t hid_code);
+
+/* Check if keyboard move mode is active */
+bool wm_is_keyboard_move_active(void);
+
+/*==========================================================================
  * Modal dialog support
  *=========================================================================*/
 

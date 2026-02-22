@@ -33,4 +33,12 @@ int16_t taskbar_work_area_height(void);
 /* Force taskbar repaint (call when windows are created/destroyed/minimized) */
 void taskbar_invalidate(void);
 
+/* Right-click context menu on taskbar buttons */
+bool taskbar_mouse_rclick(int16_t x, int16_t y);
+void taskbar_popup_draw(void);
+bool taskbar_popup_mouse(uint8_t type, int16_t x, int16_t y);
+bool taskbar_popup_handle_key(uint8_t hid_code, uint8_t modifiers);
+bool taskbar_popup_is_open(void);
+void taskbar_popup_close(void);
+
 #endif /* TASKBAR_H */

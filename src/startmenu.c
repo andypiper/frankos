@@ -19,6 +19,7 @@
 #include "display.h"
 #include "sdcard_init.h"
 #include "ff.h"
+#include "hardware/watchdog.h"
 #include <string.h>
 #include <ctype.h>
 
@@ -243,7 +244,7 @@ static void execute_item(uint8_t id) {
         /* Stub — will have submenu in the future */
         break;
     case SM_ID_REBOOT:
-        /* Stub — could call watchdog_reboot() */
+        watchdog_reboot(0, 0, 0);
         break;
     }
 }
@@ -251,6 +252,96 @@ static void execute_item(uint8_t id) {
 /*==========================================================================
  * Rendering
  *=========================================================================*/
+
+/*==========================================================================
+ * "FRANK" sidebar logo — pre-rendered 11×49 bold bitmap.
+ * Stored top-to-bottom as F,R,A,N,K so it reads "FRANK" downward.
+ * Each uint16_t is one row, MSB (bit 15) = leftmost pixel.
+ *
+ *  F: XXXXXXXXXXX    R: XXXXXXXXX__    A: ___XXXXX___
+ *     XXXXXXXXXXX       XXX____XXX_       __XXXXXXX__
+ *     XXX________       XXX____XXX_       XXX_____XXX
+ *     XXX________       XXXXXXXXXX_       XXX_____XXX
+ *     XXXXXXXXX__       XXXXXXXXX__       XXXXXXXXXXX
+ *     XXXXXXXXX__       XXX_XXX____       XXXXXXXXXXX
+ *     XXX________       XXX__XXX___       XXX_____XXX
+ *     XXX________       XXX___XXX__       XXX_____XXX
+ *     XXX________       XXX____XXX_       XXX_____XXX
+ *
+ *  N: XXXX____XXX    K: XXX____XXX_
+ *     XXXX____XXX       XXX___XXX__
+ *     XXXXX___XXX       XXX__XXX___
+ *     XXX_XX__XXX       XXX_XXX____
+ *     XXX__XX_XXX       XXXXXX_____
+ *     XXX__XX_XXX       XXX_XXX____
+ *     XXX___XXXXX       XXX__XXX___
+ *     XXX____XXXX       XXX___XXX__
+ *     XXX_____XXX       XXX____XXX_
+ *=========================================================================*/
+#define FRANK_LOGO_W  11
+#define FRANK_LOGO_H  49
+
+static const uint16_t frank_logo[FRANK_LOGO_H] = {
+    /* F — 9 rows */
+    0xFFE0, 0xFFE0, 0xE000, 0xE000, 0xFF80,
+    0xFF80, 0xE000, 0xE000, 0xE000,
+    /* gap */  0x0000,
+    /* R — 9 rows */
+    0xFF80, 0xE1C0, 0xE1C0, 0xFFC0, 0xFF80,
+    0xEE00, 0xE700, 0xE380, 0xE1C0,
+    /* gap */  0x0000,
+    /* A — 9 rows */
+    0x1F00, 0x3F80, 0xE0E0, 0xE0E0, 0xFFE0,
+    0xFFE0, 0xE0E0, 0xE0E0, 0xE0E0,
+    /* gap */  0x0000,
+    /* N — 9 rows */
+    0xF0E0, 0xF0E0, 0xF8E0, 0xECE0, 0xE6E0,
+    0xE6E0, 0xE3E0, 0xE1E0, 0xE0E0,
+    /* gap */  0x0000,
+    /* K — 9 rows */
+    0xE1C0, 0xE380, 0xE700, 0xEE00, 0xFC00,
+    0xEE00, 0xE700, 0xE380, 0xE1C0,
+};
+
+/* Blit "FRANK" into the blue sidebar — each letter rotated 90° CCW,
+ * reading bottom-to-top (F at bottom, K at top), aligned to bottom.
+ * Original letters are 11 wide × 9 tall.  Rotated: 9 wide × 11 tall. */
+static void draw_sidebar_logo(int sx, int sy, int bar_w, int bar_h) {
+    #define LETTER_SRC_W  11  /* original letter width  */
+    #define LETTER_SRC_H   9  /* original letter height */
+    #define LETTER_ROT_W   9  /* rotated width  (= src height) */
+    #define LETTER_ROT_H  11  /* rotated height (= src width)  */
+    #define LETTER_GAP     1
+    #define LETTER_COUNT   5
+    #define LOGO_TOTAL_H  (LETTER_COUNT * LETTER_ROT_H + (LETTER_COUNT - 1) * LETTER_GAP)
+
+    int logo_x = sx + (bar_w - LETTER_ROT_W) / 2;
+    /* Bottom-align with 4px margin */
+    int py = sy + bar_h - LOGO_TOTAL_H - 4;
+
+    /* Draw letters in reverse order: K(4), N(3), A(2), R(1), F(0)
+     * so "FRANK" reads bottom-to-top in the sidebar */
+    for (int li = LETTER_COUNT - 1; li >= 0; li--) {
+        int base = li * (LETTER_SRC_H + 1); /* +1 for gap entry */
+
+        /* Rotated 90° CCW: screen (nx, ny) ← source (col=SRC_W-1-ny, row=nx) */
+        for (int ny = 0; ny < LETTER_ROT_H; ny++) {
+            int src_col = LETTER_SRC_W - 1 - ny;
+            for (int nx = 0; nx < LETTER_ROT_W; nx++) {
+                uint16_t row_bits = frank_logo[base + nx];
+                if (row_bits & (1u << (15 - src_col))) {
+                    int px = logo_x + nx;
+                    int spy = py + ny;
+                    if ((unsigned)px < (unsigned)DISPLAY_WIDTH &&
+                        (unsigned)spy < (unsigned)DISPLAY_HEIGHT)
+                        display_set_pixel_fast(px, spy, COLOR_WHITE);
+                }
+            }
+        }
+
+        py += LETTER_ROT_H + LETTER_GAP;
+    }
+}
 
 void startmenu_draw(void) {
     if (!sm_open) return;
@@ -266,6 +357,7 @@ void startmenu_draw(void) {
 
     /* Blue side bar (Win95 branding strip) */
     gfx_fill_rect(sm_x + 2, sm_y + 2, 22, sm_h - 4, COLOR_BLUE);
+    draw_sidebar_logo(sm_x + 2, sm_y + 2, 22, sm_h - 4);
 
     /* Draw items */
     int iy = sm_y + 2;

@@ -23,6 +23,8 @@
 #include "elf32.h"
 #include "../api/m-os-api-c-hash.h"
 #include "../drivers/psram/psram.h"
+#include "dialog.h"
+#include "window.h"
 
 #define APP_TASK_PRIORITY 1
 
@@ -1549,6 +1551,14 @@ void __in_hfa() launch_elf_app(const char *path) {
     ctx->detached = true;
     if (is_new_app(ctx) && load_app(ctx)) {
         exec(ctx);
+    } else {
+        /* Show error to user */
+        hwnd_t focus = wm_get_focus();
+        dialog_show(focus != HWND_NULL ? focus : HWND_NULL,
+                    "Error",
+                    "Failed to start application.\n"
+                    "Not enough memory or file not found.",
+                    DLG_ICON_ERROR, DLG_BTN_OK);
     }
 }
 

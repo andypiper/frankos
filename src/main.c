@@ -32,6 +32,7 @@
 #include "sysmenu.h"
 #include "filemanager.h"
 #include "cursor.h"
+#include "font.h"
 #include "disphstx.h"
 #include "psram.h"
 #ifdef PSRAM_MAX_FREQ_MHZ
@@ -103,6 +104,27 @@ void __attribute__((used, naked)) isr_hardfault(void) {
     );
 }
 
+/* Render a string at character grid (col, row) on the BSOD blue screen */
+static void bsod_text(int col, int row, const char *s) {
+    int x = col * 8, y = row * 16;
+    while (*s) {
+        const uint8_t *g = font8x16_get_glyph((uint8_t)*s);
+        display_blit_glyph_8wide(x, y, g, 16, COLOR_WHITE, COLOR_BLUE);
+        x += 8;
+        s++;
+    }
+}
+
+/* Render a 32-bit hex value into buf (must hold 9 bytes) */
+static void hex32(char *buf, uint32_t v) {
+    static const char hex[] = "0123456789ABCDEF";
+    for (int i = 7; i >= 0; i--) {
+        buf[i] = hex[v & 0xF];
+        v >>= 4;
+    }
+    buf[8] = '\0';
+}
+
 void __attribute__((used)) hardfault_c_handler(uint32_t *stack, uint32_t lr_val) {
     g_crash_dump.magic  = 0xDEAD0001;
     g_crash_dump.pc     = stack[6];
@@ -118,9 +140,67 @@ void __attribute__((used)) hardfault_c_handler(uint32_t *stack, uint32_t lr_val)
     g_crash_dump.r3     = stack[3];
     g_crash_dump.r12    = stack[4];
     __asm volatile ("dsb 0xF" ::: "memory");
-    // Reboot via watchdog in ~2 seconds.  SDK function handles RP2350's
-    // separate TICKS peripheral for the watchdog tick source.
-    watchdog_enable(2000, false);
+
+    /* ---- Blue Screen of Death ---- */
+    display_clear(COLOR_BLUE);
+
+    char h[9];
+
+    bsod_text(2, 2, "FRANK OS");
+    bsod_text(2, 4, "A fatal exception has occurred at 0x");
+    hex32(h, g_crash_dump.pc);
+    bsod_text(38, 4, h);
+
+    bsod_text(2, 6, "* Press reset to restart the computer.");
+    bsod_text(2, 7, "* The system will auto-restart in 10 seconds.");
+
+    bsod_text(2, 9, "Technical information:");
+
+    /* PC  LR  SP */
+    {
+        char line[80];
+        memset(line, 0, sizeof(line));
+        memcpy(line, "PC=", 3);
+        hex32(line + 3, g_crash_dump.pc);
+        memcpy(line + 11, "  LR=", 5);
+        hex32(line + 16, g_crash_dump.lr);
+        memcpy(line + 24, "  SP=", 5);
+        hex32(line + 29, g_crash_dump.sp);
+        bsod_text(2, 11, line);
+    }
+
+    /* CFSR  HFSR  BFAR */
+    {
+        char line[80];
+        memset(line, 0, sizeof(line));
+        memcpy(line, "CFSR=", 5);
+        hex32(line + 5, g_crash_dump.cfsr);
+        memcpy(line + 13, "  HFSR=", 7);
+        hex32(line + 20, g_crash_dump.hfsr);
+        memcpy(line + 28, "  BFAR=", 7);
+        hex32(line + 35, g_crash_dump.bfar);
+        bsod_text(2, 12, line);
+    }
+
+    /* R0  R1  R2  R3 */
+    {
+        char line[80];
+        memset(line, 0, sizeof(line));
+        memcpy(line, "R0=", 3);
+        hex32(line + 3, g_crash_dump.r0);
+        memcpy(line + 11, "  R1=", 5);
+        hex32(line + 16, g_crash_dump.r1);
+        memcpy(line + 24, "  R2=", 5);
+        hex32(line + 29, g_crash_dump.r2);
+        memcpy(line + 37, "  R3=", 5);
+        hex32(line + 42, g_crash_dump.r3);
+        bsod_text(2, 13, line);
+    }
+
+    display_swap_buffers();
+
+    // Reboot via watchdog in ~10 seconds so the user can read the BSOD.
+    watchdog_enable(10000, false);
     // Blink LED until watchdog fires
     *(volatile unsigned int *)0xd0000038 = (1u << 25);
     for (;;) {
@@ -259,6 +339,11 @@ static void input_task(void *params) {
                     g_video_dirty = true;
                     continue;
                 }
+                if (taskbar_popup_is_open() &&
+                    taskbar_popup_handle_key(kev.hid_code, kev.modifiers)) {
+                    g_video_dirty = true;
+                    continue;
+                }
                 if (menu_popup_is_open() &&
                     menu_popup_handle_key(kev.hid_code, kev.modifiers)) {
                     g_video_dirty = true;
@@ -266,6 +351,16 @@ static void input_task(void *params) {
                 }
                 if (menu_is_open() &&
                     menu_handle_key(kev.hid_code, kev.modifiers)) {
+                    g_video_dirty = true;
+                    continue;
+                }
+            }
+
+            /* Keyboard move mode: arrow keys move window, Enter/Esc exits.
+             * Only handle key-down events so the Enter key-up from the
+             * sysmenu "Move" selection doesn't immediately deactivate. */
+            if (kev.pressed && wm_is_keyboard_move_active()) {
+                if (wm_keyboard_move_key(kev.hid_code)) {
                     g_video_dirty = true;
                     continue;
                 }

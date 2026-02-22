@@ -35,6 +35,21 @@ extern const uint8_t default_icon_16x16[256];
 
 static bool taskbar_ready = false;
 
+/* Compute the button width based on how many task buttons are visible */
+static int taskbar_btn_width(void) {
+    int count = 0;
+    for (uint8_t i = 1; i <= WM_MAX_WINDOWS; i++) {
+        window_t *w = wm_get_window(i);
+        if (w && (w->flags & WF_ALIVE) && (w->flags & WF_BORDER)) count++;
+    }
+    if (count == 0) return TASK_BUTTON_W;
+    int avail = TASK_AREA_W - (count - 1) * TASK_BUTTON_PAD;
+    int w = avail / count;
+    if (w > TASK_BUTTON_W) w = TASK_BUTTON_W;
+    if (w < 30) w = 30;
+    return w;
+}
+
 /*==========================================================================
  * Helpers
  *=========================================================================*/
@@ -105,17 +120,14 @@ void taskbar_draw(void) {
     /* Per-window task buttons */
     hwnd_t focus = wm_get_focus();
     int btn_x = TASK_AREA_X;
-    int max_x = DISPLAY_WIDTH - 4;
+    int btn_w = taskbar_btn_width();
 
     for (uint8_t i = 1; i <= WM_MAX_WINDOWS; i++) {
         window_t *win = wm_get_window(i);
         if (!win || !(win->flags & WF_ALIVE)) continue;
         if (!(win->flags & WF_BORDER)) continue; /* skip borderless popups */
 
-        /* Calculate button width: fit remaining space or use max width */
-        int btn_w = TASK_BUTTON_W;
-        if (btn_x + btn_w > max_x) btn_w = max_x - btn_x;
-        if (btn_w < 30) break; /* no room for more buttons */
+        if (btn_x + btn_w > DISPLAY_WIDTH) break; /* no room for more buttons */
 
         bool is_focused = (i == focus) && (win->flags & WF_VISIBLE);
 
@@ -157,16 +169,14 @@ bool taskbar_mouse_click(int16_t x, int16_t y) {
 
     /* Per-window task buttons */
     int btn_x = TASK_AREA_X;
-    int max_x = DISPLAY_WIDTH - 4;
+    int btn_w = taskbar_btn_width();
 
     for (uint8_t i = 1; i <= WM_MAX_WINDOWS; i++) {
         window_t *win = wm_get_window(i);
         if (!win || !(win->flags & WF_ALIVE)) continue;
         if (!(win->flags & WF_BORDER)) continue;
 
-        int btn_w = TASK_BUTTON_W;
-        if (btn_x + btn_w > max_x) btn_w = max_x - btn_x;
-        if (btn_w < 30) break;
+        if (btn_x + btn_w > DISPLAY_WIDTH) break;
 
         if (x >= btn_x && x < btn_x + btn_w &&
             y >= BUTTON_Y && y < BUTTON_Y + BUTTON_HEIGHT) {
@@ -183,4 +193,197 @@ bool taskbar_mouse_click(int16_t x, int16_t y) {
     }
 
     return true; /* consumed the click (was in taskbar area) */
+}
+
+/*==========================================================================
+ * Taskbar right-click context menu (standalone popup, like sysmenu)
+ *=========================================================================*/
+
+#define TB_ITEM_HEIGHT  20
+#define TB_MENU_WIDTH  100
+#define TB_MAX_ITEMS     3
+
+#define TB_ID_RESTORE    1
+#define TB_ID_MINIMIZE   2
+#define TB_ID_CLOSE      3
+
+typedef struct {
+    const char *text;
+    uint8_t     id;
+} tb_popup_item_t;
+
+static bool   tb_popup_open_flag = false;
+static hwnd_t tb_popup_hwnd = HWND_NULL;
+static int8_t tb_popup_hover = -1;
+static int16_t tb_popup_x, tb_popup_y;
+static tb_popup_item_t tb_items[TB_MAX_ITEMS];
+static int tb_item_count = 0;
+
+bool taskbar_popup_is_open(void) {
+    return tb_popup_open_flag;
+}
+
+void taskbar_popup_close(void) {
+    tb_popup_open_flag = false;
+    tb_popup_hwnd = HWND_NULL;
+    tb_popup_hover = -1;
+    wm_mark_dirty();
+}
+
+bool taskbar_mouse_rclick(int16_t x, int16_t y) {
+    if (y < TASKBAR_Y) return false;
+
+    int btn_x = TASK_AREA_X;
+    int btn_w = taskbar_btn_width();
+
+    for (uint8_t i = 1; i <= WM_MAX_WINDOWS; i++) {
+        window_t *win = wm_get_window(i);
+        if (!win || !(win->flags & WF_ALIVE) || !(win->flags & WF_BORDER))
+            continue;
+
+        if (x >= btn_x && x < btn_x + btn_w &&
+            y >= BUTTON_Y && y < BUTTON_Y + BUTTON_HEIGHT) {
+            /* Build popup items for this window */
+            tb_popup_hwnd = (hwnd_t)i;
+            tb_item_count = 0;
+
+            if (win->state == WS_MINIMIZED) {
+                tb_items[tb_item_count++] = (tb_popup_item_t){ "Restore", TB_ID_RESTORE };
+            } else {
+                tb_items[tb_item_count++] = (tb_popup_item_t){ "Minimize", TB_ID_MINIMIZE };
+            }
+            tb_items[tb_item_count++] = (tb_popup_item_t){ "Close", TB_ID_CLOSE };
+
+            /* Position popup above the clicked button */
+            int menu_h = 4 + tb_item_count * TB_ITEM_HEIGHT;
+            tb_popup_x = btn_x;
+            tb_popup_y = TASKBAR_Y - menu_h;
+            if (tb_popup_x + TB_MENU_WIDTH > DISPLAY_WIDTH)
+                tb_popup_x = DISPLAY_WIDTH - TB_MENU_WIDTH;
+
+            tb_popup_hover = 0;
+            tb_popup_open_flag = true;
+            wm_mark_dirty();
+            return true;
+        }
+
+        btn_x += btn_w + TASK_BUTTON_PAD;
+    }
+
+    return true; /* consumed (was in taskbar area) */
+}
+
+static void tb_popup_execute(uint8_t id) {
+    hwnd_t hwnd = tb_popup_hwnd;
+    taskbar_popup_close();
+
+    switch (id) {
+    case TB_ID_RESTORE:
+        wm_restore_window(hwnd);
+        wm_set_focus(hwnd);
+        break;
+    case TB_ID_MINIMIZE:
+        wm_minimize_window(hwnd);
+        break;
+    case TB_ID_CLOSE: {
+        window_event_t ev;
+        memset(&ev, 0, sizeof(ev));
+        ev.type = WM_CLOSE;
+        wm_post_event(hwnd, &ev);
+        break;
+    }
+    }
+    wm_mark_dirty();
+}
+
+void taskbar_popup_draw(void) {
+    if (!tb_popup_open_flag) return;
+
+    int menu_h = 4 + tb_item_count * TB_ITEM_HEIGHT;
+
+    /* Shadow */
+    gfx_fill_rect_dithered(tb_popup_x + 1, tb_popup_y + 1,
+                           TB_MENU_WIDTH, menu_h, COLOR_BLACK);
+
+    /* Background */
+    gfx_fill_rect(tb_popup_x, tb_popup_y, TB_MENU_WIDTH, menu_h, THEME_BUTTON_FACE);
+
+    /* Border */
+    gfx_hline(tb_popup_x, tb_popup_y, TB_MENU_WIDTH, COLOR_WHITE);
+    gfx_vline(tb_popup_x, tb_popup_y, menu_h, COLOR_WHITE);
+    gfx_hline(tb_popup_x, tb_popup_y + menu_h - 1, TB_MENU_WIDTH, COLOR_BLACK);
+    gfx_vline(tb_popup_x + TB_MENU_WIDTH - 1, tb_popup_y, menu_h, COLOR_BLACK);
+    gfx_hline(tb_popup_x + 1, tb_popup_y + menu_h - 2, TB_MENU_WIDTH - 2, COLOR_DARK_GRAY);
+    gfx_vline(tb_popup_x + TB_MENU_WIDTH - 2, tb_popup_y + 1, menu_h - 2, COLOR_DARK_GRAY);
+
+    /* Items */
+    int iy = tb_popup_y + 2;
+    for (int i = 0; i < tb_item_count; i++) {
+        bool hovered = (i == tb_popup_hover);
+        uint8_t bg = hovered ? COLOR_BLUE : THEME_BUTTON_FACE;
+        uint8_t fg = hovered ? COLOR_WHITE : COLOR_BLACK;
+
+        gfx_fill_rect(tb_popup_x + 2, iy, TB_MENU_WIDTH - 4, TB_ITEM_HEIGHT, bg);
+        gfx_text_ui(tb_popup_x + 6, iy + (TB_ITEM_HEIGHT - FONT_UI_HEIGHT) / 2,
+                    tb_items[i].text, fg, bg);
+        iy += TB_ITEM_HEIGHT;
+    }
+}
+
+bool taskbar_popup_mouse(uint8_t type, int16_t x, int16_t y) {
+    if (!tb_popup_open_flag) return false;
+
+    int menu_h = 4 + tb_item_count * TB_ITEM_HEIGHT;
+
+    if (x >= tb_popup_x && x < tb_popup_x + TB_MENU_WIDTH &&
+        y >= tb_popup_y && y < tb_popup_y + menu_h) {
+        if (type == WM_MOUSEMOVE || type == WM_LBUTTONDOWN) {
+            int iy = tb_popup_y + 2;
+            tb_popup_hover = -1;
+            for (int i = 0; i < tb_item_count; i++) {
+                if (y >= iy && y < iy + TB_ITEM_HEIGHT) {
+                    tb_popup_hover = i;
+                    break;
+                }
+                iy += TB_ITEM_HEIGHT;
+            }
+            wm_mark_dirty();
+        }
+        if (type == WM_LBUTTONUP && tb_popup_hover >= 0) {
+            tb_popup_execute(tb_items[tb_popup_hover].id);
+        }
+        return true;
+    }
+
+    /* Click outside — close */
+    if (type == WM_LBUTTONDOWN || type == WM_RBUTTONDOWN) {
+        taskbar_popup_close();
+        return false;
+    }
+    return false;
+}
+
+bool taskbar_popup_handle_key(uint8_t hid_code, uint8_t modifiers) {
+    if (!tb_popup_open_flag) return false;
+    (void)modifiers;
+
+    switch (hid_code) {
+    case 0x52: /* UP */
+        tb_popup_hover--;
+        if (tb_popup_hover < 0) tb_popup_hover = tb_item_count - 1;
+        wm_mark_dirty();
+        return true;
+    case 0x51: /* DOWN */
+        tb_popup_hover++;
+        if (tb_popup_hover >= tb_item_count) tb_popup_hover = 0;
+        wm_mark_dirty();
+        return true;
+    case 0x28: /* ENTER */
+        if (tb_popup_hover >= 0) tb_popup_execute(tb_items[tb_popup_hover].id);
+        return true;
+    case 0x29: /* ESC */
+        taskbar_popup_close();
+        return true;
+    }
+    return false;
 }

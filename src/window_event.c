@@ -339,6 +339,11 @@ void wm_handle_mouse_input(uint8_t type, int16_t x, int16_t y, uint8_t buttons) 
     }
 
     /* ---- Overlay mouse routing priority ---- */
+    /* Taskbar popup context menu */
+    if (taskbar_popup_is_open()) {
+        if (taskbar_popup_mouse(type, x, y)) return;
+    }
+
     /* Start menu first */
     if (startmenu_is_open()) {
         if (startmenu_mouse(type, x, y)) return;
@@ -364,6 +369,7 @@ void wm_handle_mouse_input(uint8_t type, int16_t x, int16_t y, uint8_t buttons) 
 
     /* Close menus on desktop click */
     if (type == WM_LBUTTONDOWN) {
+        if (taskbar_popup_is_open()) taskbar_popup_close();
         if (startmenu_is_open()) startmenu_close();
         if (sysmenu_is_open()) sysmenu_close();
         if (menu_is_open()) menu_close();
@@ -542,8 +548,21 @@ void wm_handle_mouse_input(uint8_t type, int16_t x, int16_t y, uint8_t buttons) 
         return;
     }
 
-    /* ---- Right button events: forward to window under cursor ---- */
-    if (type == WM_RBUTTONDOWN || type == WM_RBUTTONUP) {
+    /* ---- Right button events ---- */
+    if (type == WM_RBUTTONDOWN) {
+        /* Close taskbar popup if open and click is outside */
+        if (taskbar_popup_is_open()) {
+            if (taskbar_popup_mouse(type, x, y)) return;
+        }
+        /* Right-click on taskbar: show context menu */
+        if (taskbar_mouse_rclick(x, y)) return;
+        /* Forward to window under cursor */
+        hwnd_t target = wm_window_at_point(x, y);
+        if (target != HWND_NULL)
+            forward_mouse_event(type, x, y, buttons, target);
+        return;
+    }
+    if (type == WM_RBUTTONUP) {
         hwnd_t target = wm_window_at_point(x, y);
         if (target != HWND_NULL)
             forward_mouse_event(type, x, y, buttons, target);
@@ -565,6 +584,56 @@ uint8_t wm_get_pressed_titlebar_btn(hwnd_t hwnd) {
     if (titlebar_btn_hwnd == hwnd && titlebar_btn_shown)
         return titlebar_btn_zone;
     return HT_NOWHERE;
+}
+
+/*==========================================================================
+ * Keyboard window move mode
+ *=========================================================================*/
+
+static bool    kb_move_active = false;
+static hwnd_t  kb_move_hwnd   = HWND_NULL;
+#define KB_MOVE_STEP 8
+
+void wm_begin_keyboard_move(hwnd_t hwnd) {
+    window_t *win = wm_get_window(hwnd);
+    if (!win || !(win->flags & WF_MOVABLE) || win->state == WS_MAXIMIZED) return;
+    kb_move_active = true;
+    kb_move_hwnd = hwnd;
+    cursor_set_type(CURSOR_ARROW);
+}
+
+bool wm_keyboard_move_key(uint8_t hid_code) {
+    if (!kb_move_active) return false;
+    window_t *win = wm_get_window(kb_move_hwnd);
+    if (!win) { kb_move_active = false; return false; }
+
+    switch (hid_code) {
+    case 0x50: /* LEFT */
+        wm_move_window(kb_move_hwnd, win->frame.x - KB_MOVE_STEP, win->frame.y);
+        break;
+    case 0x4F: /* RIGHT */
+        wm_move_window(kb_move_hwnd, win->frame.x + KB_MOVE_STEP, win->frame.y);
+        break;
+    case 0x52: /* UP */
+        wm_move_window(kb_move_hwnd, win->frame.x, win->frame.y - KB_MOVE_STEP);
+        break;
+    case 0x51: /* DOWN */
+        wm_move_window(kb_move_hwnd, win->frame.x, win->frame.y + KB_MOVE_STEP);
+        break;
+    case 0x28: /* Enter */
+    case 0x29: /* Esc */
+        kb_move_active = false;
+        kb_move_hwnd = HWND_NULL;
+        break;
+    default:
+        return false;
+    }
+    compositor_dirty = 1;
+    return true;
+}
+
+bool wm_is_keyboard_move_active(void) {
+    return kb_move_active;
 }
 
 /*==========================================================================

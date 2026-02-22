@@ -22,6 +22,7 @@
 #define SYS_ID_MAXIMIZE   2
 #define SYS_ID_RESTORE    3
 #define SYS_ID_CLOSE      4
+#define SYS_ID_MOVE       5
 
 #define SYS_ITEM_HEIGHT  20
 #define SYS_SEPARATOR_H   8
@@ -35,7 +36,7 @@ typedef struct {
 } sys_item_t;
 
 /* Items change based on window state */
-static sys_item_t sys_items[4];
+static sys_item_t sys_items[5];
 static int sys_item_count;
 
 /*==========================================================================
@@ -55,6 +56,9 @@ static void build_items(void) {
 
     if (win->state == WS_MAXIMIZED && (win->flags & WF_RESIZABLE)) {
         sys_items[sys_item_count++] = (sys_item_t){ "Restore", SYS_ID_RESTORE, false };
+    }
+    if ((win->flags & WF_MOVABLE) && win->state != WS_MAXIMIZED) {
+        sys_items[sys_item_count++] = (sys_item_t){ "Move", SYS_ID_MOVE, false };
     }
     if ((win->flags & WF_RESIZABLE) && win->state != WS_MAXIMIZED) {
         sys_items[sys_item_count++] = (sys_item_t){ "Maximize", SYS_ID_MAXIMIZE, false };
@@ -127,6 +131,9 @@ static void execute(uint8_t id) {
         break;
     case SYS_ID_RESTORE:
         wm_restore_window(hwnd);
+        break;
+    case SYS_ID_MOVE:
+        wm_begin_keyboard_move(hwnd);
         break;
     case SYS_ID_CLOSE: {
         window_event_t ev;

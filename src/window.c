@@ -29,6 +29,12 @@ static hwnd_t    z_stack[WM_MAX_WINDOWS];      /* z-order: bottom to top */
 static uint8_t   z_count;                       /* number of entries in z_stack */
 static hwnd_t    focus_hwnd;                    /* currently focused window */
 
+/* Cascade counter for new window positioning */
+static uint8_t cascade_counter = 0;
+#define CASCADE_STEP_X  20
+#define CASCADE_STEP_Y  20
+#define CASCADE_MAX      8  /* wrap after 8 steps */
+
 /* Per-window icon storage — copied here so icons survive fos_apps[] rescan */
 #define ICON16_SIZE 256
 static uint8_t   icon_pool[WM_MAX_WINDOWS][ICON16_SIZE];
@@ -86,6 +92,20 @@ hwnd_t wm_create_window(int16_t x, int16_t y, int16_t w, int16_t h,
                 pending_icon = NULL;
             } else {
                 win->icon = NULL;
+            }
+
+            /* Cascade bordered windows so they don't stack on top of each other */
+            if (style & WF_BORDER) {
+                int16_t offset = (cascade_counter % CASCADE_MAX) * CASCADE_STEP_X;
+                win->frame.x += offset;
+                win->frame.y += offset;
+                /* Clamp to keep on screen */
+                int16_t max_x = DISPLAY_WIDTH - win->frame.w;
+                int16_t max_y = taskbar_work_area_height() - win->frame.h;
+                if (win->frame.x > max_x) win->frame.x = max_x > 0 ? max_x : 0;
+                if (win->frame.y > max_y) win->frame.y = max_y > 0 ? max_y : 0;
+                win->restore_rect = win->frame;
+                cascade_counter++;
             }
 
             hwnd_t hwnd = (hwnd_t)(i + 1);
@@ -239,13 +259,17 @@ hwnd_t wm_get_focus(void) {
 }
 
 void wm_cycle_focus(void) {
-    if (z_count == 0) return;
+    if (z_count < 2) return;
 
-    /* Find next visible window below current top */
-    for (uint8_t i = z_count; i > 0; i--) {
-        hwnd_t h = z_stack[i - 1];
+    /* Pick the bottom-most visible, non-minimized window and bring it
+     * to the top.  Since wm_set_focus() raises the target to the top
+     * of z_stack, repeated Alt-Tab naturally rotates through ALL
+     * windows:  [C,B,A] → focus C → [B,A,C] → focus B → [A,C,B] … */
+    for (int i = 0; i < z_count; i++) {
+        hwnd_t h = z_stack[i];
         if (h != focus_hwnd && valid_hwnd(h) &&
-            (windows[h - 1].flags & WF_VISIBLE)) {
+            (windows[h - 1].flags & WF_VISIBLE) &&
+            windows[h - 1].state != WS_MINIMIZED) {
             wm_set_focus(h);
             return;
         }
@@ -557,6 +581,7 @@ void wm_composite(void) {
     menu_draw_dropdown();
     menu_popup_draw();
     sysmenu_draw();
+    taskbar_popup_draw();
 
     /* Draw drag/resize outline */
     {
