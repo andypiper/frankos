@@ -148,9 +148,6 @@ target_compile_definitions(frankos PRIVATE
     RESERVED_RAM=512
     OS_FLASH_SIZE=256
     OVERCLOCKING=378
-    PWM_PIN0=20
-    PWM_PIN1=21
-    BEEPER_PIN=22
     I2S_SOUND=1
 )
 
@@ -164,7 +161,6 @@ target_link_libraries(frankos
     hardware_clocks
     hardware_gpio
     hardware_spi
-    hardware_pwm
     hardware_pio
     hardware_dma
     hardware_flash

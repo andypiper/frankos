@@ -35,6 +35,7 @@
 #include "hardware/clocks.h"
 #include "hardware/sync.h"
 #include "hardware/irq.h"
+#include "hardware/resets.h"
 
 /*==========================================================================
  * Constants — keep audio away from DispHSTX (DMA 14/15, DMA_IRQ_1)
@@ -79,8 +80,9 @@ void i2s_init(i2s_config_t *config) {
     audio_pio = config->pio;
     dma_transfer_count = config->dma_trans_count;
 
-    /* NOTE: Do NOT reset PIO1 — other peripherals may share the reset domain.
-     * We simply claim an SM and load our program. */
+    /* Full hardware reset of PIO1 (PS/2 uses PIO0, HSTX is separate) */
+    reset_block(RESETS_RESET_PIO1_BITS);
+    unreset_block_wait(RESETS_RESET_PIO1_BITS);
 
     /* Clear audio DMA IRQ flags */
     dma_hw->ints0 = (1u << AUDIO_DMA_CH_A) | (1u << AUDIO_DMA_CH_B);

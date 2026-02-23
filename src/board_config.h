@@ -17,9 +17,12 @@
  * M2-only build (M1 is no longer supported).
  *
  * M2 GPIO Layout:
- *   HDMI (HSTX): CLK-=12, CLK+=13, D0-=14, D0+=15, D1-=16, D1+=17, D2-=18, D2+=19
- *   PS/2 Kbd:    CLK=2, DATA=3
  *   PS/2 Mouse:  CLK=0, DATA=1
+ *   PS/2 Kbd:    CLK=2, DATA=3
+ *   SD Card:     MISO=4, CSn=5, SCK=6, MOSI=7
+ *   PSRAM:       CS=8
+ *   I2S Audio:   DATA=9, BCLK=10, LRCLK=11
+ *   HDMI (HSTX): CLK-=12, CLK+=13, D0-=14, D0+=15, D1-=16, D1+=17, D2-=18, D2+=19
  */
 
 #define BOARD_M2
@@ -73,13 +76,9 @@ static inline uint get_psram_pin(void) {
 #endif
 
 //=============================================================================
-// Audio (PWM + I2S share the same pins)
+// Audio — I2S via PIO1 (GPIO 9/10/11, matching M2 board layout)
 //=============================================================================
-#define PWM_PIN0    20
-#define PWM_PIN1    21
-#define BEEPER_PIN  22
-
-#define I2S_DATA_PIN       PWM_PIN0   /* GPIO 20 */
-#define I2S_CLOCK_PIN_BASE PWM_PIN1   /* GPIO 21 (BCLK), +1=22 (LRCLK) */
+#define I2S_DATA_PIN       9    /* I2S serial data */
+#define I2S_CLOCK_PIN_BASE 10   /* BCLK=10, LRCLK=11 */
 
 #endif // BOARD_CONFIG_H

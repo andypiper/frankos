@@ -1080,6 +1080,11 @@ inline static void MP3GetLastFrameInfo(HMP3Decoder hMP3Decoder, MP3FrameInfo *in
     typedef void (*fn_ptr_t)(HMP3Decoder, MP3FrameInfo *);
     ((fn_ptr_t)_sys_table_ptrs[447])(hMP3Decoder, info);
 }
+inline static int MP3GetNextFrameInfo(HMP3Decoder hMP3Decoder, MP3FrameInfo *info,
+                                      unsigned char *buf) { // 448
+    typedef int (*fn_ptr_t)(HMP3Decoder, MP3FrameInfo *, unsigned char *);
+    return ((fn_ptr_t)_sys_table_ptrs[448])(hMP3Decoder, info, buf);
+}
 
 #define abs(x) (x > 0 ? x : -x)
 
