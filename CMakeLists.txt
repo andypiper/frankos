@@ -78,6 +78,9 @@ add_executable(frankos
     src/overclock.c
     src/ram_page.c
     src/sound.c
+    src/audio.c
+    src/startup_sound.c
+    src/startup_wav.S
     src/freertos_ext.c
     src/mos2_stubs.c
 
@@ -89,6 +92,12 @@ add_executable(frankos
     # PSRAM allocator (always compiled — returns NULL when no HW present)
     drivers/psram/psram.c
 )
+
+# Helix fixed-point MP3 decoder
+add_subdirectory(lib/helix)
+
+# I2S audio PIO program (generates audio_i2s.pio.h)
+add_subdirectory(drivers/audio)
 target_include_directories(frankos PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/src
     ${CMAKE_CURRENT_LIST_DIR}/drivers/ps2
@@ -134,7 +143,7 @@ endif()
 target_compile_definitions(frankos PRIVATE
     FRANK_VERSION_STR="${FRANK_VERSION_STR}"
     FIRMWARE_OFFSET=256
-    M_API_VERSION=27
+    M_API_VERSION=28
     MIN_API_VERSION=14
     RESERVED_RAM=512
     OS_FLASH_SIZE=256
@@ -142,18 +151,22 @@ target_compile_definitions(frankos PRIVATE
     PWM_PIN0=20
     PWM_PIN1=21
     BEEPER_PIN=22
+    I2S_SOUND=1
 )
 
 target_link_libraries(frankos
     DispHSTX
     ps2_driver
     sdcard
+    helix
     pico_stdlib
     pico_multicore
     hardware_clocks
     hardware_gpio
     hardware_spi
     hardware_pwm
+    hardware_pio
+    hardware_dma
     hardware_flash
     hardware_watchdog
     FreeRTOS-Kernel-Heap4

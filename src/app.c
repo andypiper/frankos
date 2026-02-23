@@ -1238,6 +1238,7 @@ static void __in_hfa() vAppDetachedTask(void *pv) {
     ctx->task = th;
     ctx->pgid = 1; // like init is owner for detached tasks
     __setsid(); // ensure detached
+    taskENTER_CRITICAL();
     int pid = 0;
     for (size_t i = 1; i < pids->size; ++i) {
         if (!pids->p[i]) {
@@ -1250,6 +1251,7 @@ static void __in_hfa() vAppDetachedTask(void *pv) {
         pid = array_push_back(pids, ctx);
     }
     ctx->pid = pid;
+    taskEXIT_CRITICAL();
     ctx->ppid = 1;
     #if DEBUG_APP_LOAD
     goutf("vAppDetachedTask: %s [%p]\n", ctx->orig_cmd, ctx);

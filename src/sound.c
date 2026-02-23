@@ -170,7 +170,7 @@ void pcm_set_buffer(int16_t* buff, uint8_t channels, size_t size, pcm_end_callba
     i2s_config.channel_count = channels;
     i2s_config.dma_trans_count = i2s_config.sample_freq / (size << 1); // Number of 32 bits words to transfer
     i2s_config.dma_buf = buff;
-    i2s_volume(&i2s_config, 16);
+    i2s_volume(&i2s_config, 0);
     i2s_init(&i2s_config);
     i2s_dma_write(&i2s_config, buff);
 	add_repeating_timer_us(1000000 * size * channels / i2s_config.sample_freq, timer_callback, NULL, &m_timer);

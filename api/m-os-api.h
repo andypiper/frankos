@@ -1047,6 +1047,40 @@ inline static size_t free_app_flash(void) {
     return ((fn_ptr_t)_sys_table_ptrs[255])();
 }
 
+// since API v.28 — MP3 decoding (helix)
+typedef void* HMP3Decoder;
+typedef struct {
+    int bitrate;
+    int nChans;
+    int samprate;
+    int bitsPerSample;
+    int outputSamps;
+    int layer;
+    int version;
+} MP3FrameInfo;
+
+inline static HMP3Decoder MP3InitDecoder(void) { // 443
+    typedef HMP3Decoder (*fn_ptr_t)(void);
+    return ((fn_ptr_t)_sys_table_ptrs[443])();
+}
+inline static void MP3FreeDecoder(HMP3Decoder hMP3Decoder) { // 444
+    typedef void (*fn_ptr_t)(HMP3Decoder);
+    ((fn_ptr_t)_sys_table_ptrs[444])(hMP3Decoder);
+}
+inline static int MP3FindSyncWord(unsigned char *buf, int nBytes) { // 445
+    typedef int (*fn_ptr_t)(unsigned char *, int);
+    return ((fn_ptr_t)_sys_table_ptrs[445])(buf, nBytes);
+}
+inline static int MP3Decode(HMP3Decoder hMP3Decoder, unsigned char **inbuf,
+                            int *bytesLeft, short *outbuf, int useSize) { // 446
+    typedef int (*fn_ptr_t)(HMP3Decoder, unsigned char **, int *, short *, int);
+    return ((fn_ptr_t)_sys_table_ptrs[446])(hMP3Decoder, inbuf, bytesLeft, outbuf, useSize);
+}
+inline static void MP3GetLastFrameInfo(HMP3Decoder hMP3Decoder, MP3FrameInfo *info) { // 447
+    typedef void (*fn_ptr_t)(HMP3Decoder, MP3FrameInfo *);
+    ((fn_ptr_t)_sys_table_ptrs[447])(hMP3Decoder, info);
+}
+
 #define abs(x) (x > 0 ? x : -x)
 
 extern volatile bool marked_to_exit;

@@ -73,10 +73,13 @@ static inline uint get_psram_pin(void) {
 #endif
 
 //=============================================================================
-// Audio (not connected on FRANK OS — stubs for MOS2 compat)
+// Audio (PWM + I2S share the same pins)
 //=============================================================================
 #define PWM_PIN0    20
 #define PWM_PIN1    21
 #define BEEPER_PIN  22
+
+#define I2S_DATA_PIN       PWM_PIN0   /* GPIO 20 */
+#define I2S_CLOCK_PIN_BASE PWM_PIN1   /* GPIO 21 (BCLK), +1=22 (LRCLK) */
 
 #endif // BOARD_CONFIG_H

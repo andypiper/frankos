@@ -35,6 +35,8 @@
 #include "font.h"
 #include "disphstx.h"
 #include "psram.h"
+#include "sound.h"
+#include "startup_sound.h"
 #ifdef PSRAM_MAX_FREQ_MHZ
 #include "psram_init.h"
 #endif
@@ -553,11 +555,17 @@ int main(void) {
     }
     stdio_flush();
 
+    /* Initialize I2S audio subsystem */
+    init_sound();
+
     /* Install multicore lockout handler on Core 1 so flash_block() can
      * safely pause Core 1 during flash erase/program operations.
      * Done after SD mount to avoid SIO FIFO IRQ interfering with SPI init. */
     DispHstxCore1Exec(multicore_lockout_victim_init);
     DispHstxCore1Wait();
+
+    /* Play startup sound (spawns a one-shot FreeRTOS task) */
+    startup_sound_start();
 
     /* Show hourglass cursor during startup — taskbar appears after delay */
     cursor_set_type(CURSOR_WAIT);

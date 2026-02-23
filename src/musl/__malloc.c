@@ -101,26 +101,28 @@ void __free_ctx(void* ctx) {
     if (!ctx)
         return;
     cmd_ctx_t* c = (cmd_ctx_t*)ctx;
-    if (c->pallocs) {
-        printf("[__free_ctx] pallocs=%p size=%u\n", c->pallocs, (unsigned)c->pallocs->size);
-        delete_list(c->pallocs);
-        c->pallocs = 0;
-        printf("[__free_ctx] delete_list done\n");
-    }
-    if (c->pid) {
+    /* Clear pids entry BEFORE freeing pallocs — pallocs cleanup may
+     * trigger heap operations that invalidate cached pids pointers. */
+    if (c->pid && pids && (size_t)c->pid < pids->size) {
+        taskENTER_CRITICAL();
         pids->p[c->pid] = 0;
         if (c->pid > 1) {
             for (size_t i = 0; i < pids->size; ++i) {
                 cmd_ctx_t* c2 = (cmd_ctx_t*)pids->p[i];
                 if (!c2) continue;
                 if (c2->ppid == c->pid) {
-                    c2->parent_task = 0; // like old "detached" style
-                    c2->ppid = 1; // assign to init proc
+                    c2->parent_task = 0;
+                    c2->ppid = 1;
                 }
             }
         }
+        taskEXIT_CRITICAL();
     }
-    printf("[__free_ctx] done\n");
+    c->pid = 0;
+    if (c->pallocs) {
+        delete_list(c->pallocs);
+        c->pallocs = 0;
+    }
 }
 
 void* __malloc(size_t sz) {

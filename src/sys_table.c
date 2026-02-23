@@ -41,6 +41,7 @@
 #include "usb.h"
 #include "nespad.h"
 #include "sound.h"
+#include "mp3dec.h"
 #include <math.h>
 
 #include "sys/fcntl.h"
@@ -592,6 +593,12 @@ unsigned long __in_systable() __aligned(4096) sys_table_ptrs[] = {
     file_dialog_get_path, // 440
     wd_button, // 441
     wd_fb_ptr, // 442
+    // API v.28 — MP3 decoding (helix)
+    MP3InitDecoder, // 443
+    MP3FreeDecoder, // 444
+    MP3FindSyncWord, // 445
+    MP3Decode, // 446
+    MP3GetLastFrameInfo, // 447
     // TODO:
     0
 };
