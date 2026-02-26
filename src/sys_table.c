@@ -42,6 +42,8 @@
 #include "nespad.h"
 #include "sound.h"
 #include "snd.h"
+#include "hxcmod.h"
+#include "psram.h"
 #include "mp3dec.h"
 #include "clipboard.h"
 #include "controls.h"
@@ -647,6 +649,16 @@ unsigned long __in_systable() __aligned(4096) sys_table_ptrs[] = {
     snd_open,  // 483
     snd_write, // 484
     snd_close, // 485
+    // API v.30 — MOD playback (HxCModPlayer)
+    hxcmod_init,        // 486
+    hxcmod_setcfg,      // 487
+    hxcmod_load,        // 488
+    hxcmod_fillbuffer,  // 489
+    hxcmod_unload,      // 490
+    // API v.30 — PSRAM allocator
+    psram_alloc,        // 491
+    psram_free,         // 492
+    psram_is_available, // 493
     // TODO:
     0
 };

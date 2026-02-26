@@ -111,7 +111,7 @@ static hwnd_t   fd_hwnd   = HWND_NULL;
 static hwnd_t   fd_parent = HWND_NULL;
 static char     fd_path[FD_PATH_MAX];
 static char     fd_result[FD_PATH_MAX];
-static char     fd_filter[8];
+static char     fd_filter[24];
 static char     fd_names[FD_MAX_ENTRIES][FD_NAME_LEN];
 static uint8_t  fd_is_dir[FD_MAX_ENTRIES];
 static int16_t  fd_count;
@@ -145,16 +145,26 @@ static bool fd_match_ext(const char *name) {
     if (fd_filter[0] == '\0') return true;
     const char *dot = strrchr(name, '.');
     if (!dot) return false;
-    const char *a = dot;
-    const char *b = fd_filter;
-    while (*a && *b) {
-        char ca = *a, cb = *b;
-        if (ca >= 'A' && ca <= 'Z') ca += 32;
-        if (cb >= 'A' && cb <= 'Z') cb += 32;
-        if (ca != cb) return false;
-        a++; b++;
+    /* Check each semicolon-separated extension in fd_filter */
+    const char *f = fd_filter;
+    while (*f) {
+        const char *end = f;
+        while (*end && *end != ';') end++;
+        /* Case-insensitive compare of dot against f..end */
+        const char *a = dot;
+        const char *b = f;
+        bool match = true;
+        while (b < end && *a) {
+            char ca = *a, cb = *b;
+            if (ca >= 'A' && ca <= 'Z') ca += 32;
+            if (cb >= 'A' && cb <= 'Z') cb += 32;
+            if (ca != cb) { match = false; break; }
+            a++; b++;
+        }
+        if (match && b == end && *a == '\0') return true;
+        f = (*end == ';') ? end + 1 : end;
     }
-    return *a == *b;
+    return false;
 }
 
 /*==========================================================================
@@ -532,9 +542,19 @@ static void fd_paint(hwnd_t hwnd) {
                "Files of type:", COLOR_BLACK, THEME_BUTTON_FACE);
     fd_draw_sunken(FD_FIELD_X, FD_FTYPE_Y, FD_FIELD_W, FD_FIELD_H);
     {
-        char ft[32];
+        char ft[48];
         if (fd_filter[0]) {
-            snprintf(ft, sizeof(ft), "*%s", fd_filter);
+            /* Build "*.mp3; *.mod" from ".mp3;.mod" */
+            char *o = ft;
+            const char *f = fd_filter;
+            while (*f && o < ft + sizeof(ft) - 4) {
+                if (f != fd_filter) { *o++ = ';'; *o++ = ' '; }
+                *o++ = '*';
+                while (*f && *f != ';' && o < ft + sizeof(ft) - 1)
+                    *o++ = *f++;
+                if (*f == ';') f++;
+            }
+            *o = '\0';
         } else {
             snprintf(ft, sizeof(ft), "All Files (*.*)");
         }

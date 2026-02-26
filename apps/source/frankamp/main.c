@@ -98,6 +98,7 @@ static inline int fa_rand(void) {
  *=========================================================================*/
 
 typedef enum { PS_STOPPED, PS_PLAYING, PS_PAUSED } play_state_t;
+typedef enum { FMT_MP3, FMT_MOD } audio_format_t;
 
 typedef struct {
     char path[MAX_PATH_LEN];
@@ -110,11 +111,17 @@ typedef struct {
 
     /* Playback state */
     play_state_t    play_state;
+    audio_format_t  format;
     bool            shuffle, repeat;
     HMP3Decoder     decoder;
     FIL             mp3_file;
     bool            file_open;
     bool            audio_active;    /* pcm_init called */
+
+    /* MOD playback state */
+    modcontext      mod_ctx;
+    uint8_t        *mod_data;       /* MOD file loaded into memory */
+    uint32_t        mod_data_size;
 
     /* Audio read buffer */
     uint8_t         read_buf[READ_BUF_SIZE];
@@ -286,6 +293,41 @@ static void estimate_duration(frankamp_t *fa) {
 }
 
 /*==========================================================================
+ * Format detection
+ *=========================================================================*/
+
+static audio_format_t detect_format(const char *path) {
+    const char *dot = 0;
+    for (const char *p = path; *p; p++)
+        if (*p == '.') dot = p;
+    if (dot) {
+        if ((dot[1]=='m'||dot[1]=='M') && (dot[2]=='o'||dot[2]=='O')
+            && (dot[3]=='d'||dot[3]=='D') && dot[4]=='\0')
+            return FMT_MOD;
+    }
+    return FMT_MP3;
+}
+
+/*==========================================================================
+ * MOD decoding
+ *=========================================================================*/
+
+#define MOD_CHUNK_FRAMES  1024  /* ~23ms at 44100 Hz */
+
+static int decode_frame_mod(frankamp_t *fa) {
+    hxcmod_fillbuffer(&fa->mod_ctx, (msample *)fa->pcm_buf,
+                      MOD_CHUNK_FRAMES, 0);
+    /* Apply volume */
+    if (fa->volume < 100) {
+        int shift = ((100 - fa->volume) * 8 + 50) / 100;
+        if (shift > 0)
+            for (int i = 0; i < MOD_CHUNK_FRAMES * 2; i++)
+                fa->pcm_buf[i] >>= shift;
+    }
+    return MOD_CHUNK_FRAMES;
+}
+
+/*==========================================================================
  * Playback control
  *=========================================================================*/
 
@@ -300,14 +342,22 @@ static void play_stop(frankamp_t *fa) {
         fa->audio_active = false;
     }
 
-    if (fa->decoder) {
-        MP3FreeDecoder(fa->decoder);
-        fa->decoder = 0;
-    }
+    if (fa->format == FMT_MOD) {
+        hxcmod_unload(&fa->mod_ctx);
+        if (fa->mod_data) {
+            psram_free(fa->mod_data);  /* handles both PSRAM and SRAM */
+            fa->mod_data = 0;
+        }
+    } else {
+        if (fa->decoder) {
+            MP3FreeDecoder(fa->decoder);
+            fa->decoder = 0;
+        }
 
-    if (fa->file_open) {
-        f_close(&fa->mp3_file);
-        fa->file_open = false;
+        if (fa->file_open) {
+            f_close(&fa->mp3_file);
+            fa->file_open = false;
+        }
     }
 
     fa->elapsed_ms = 0;
@@ -321,54 +371,106 @@ static bool play_start(frankamp_t *fa, int playlist_idx) {
 
     fa->pl_current = playlist_idx;
     const char *path = fa->playlist[playlist_idx].path;
+    fa->format = detect_format(path);
 
-    /* Open file */
-    FRESULT res = f_open(&fa->mp3_file, path, FA_READ | FA_OPEN_EXISTING);
-    if (res != FR_OK) {
-        dbg_printf("[frankamp] f_open failed: %d\n", res);
-        return false;
+    if (fa->format == FMT_MOD) {
+        /* === MOD playback === */
+        FIL f;
+        FRESULT res = f_open(&f, path, FA_READ | FA_OPEN_EXISTING);
+        if (res != FR_OK) {
+            dbg_printf("[frankamp] f_open MOD failed: %d\n", res);
+            return false;
+        }
+        fa->mod_data_size = (uint32_t)f_size(&f);
+        /* MOD files can be 100KB+; use PSRAM if available */
+        if (psram_is_available())
+            fa->mod_data = (uint8_t *)psram_alloc(fa->mod_data_size);
+        else
+            fa->mod_data = (uint8_t *)malloc(fa->mod_data_size);
+        if (!fa->mod_data) {
+            dbg_printf("[frankamp] MOD alloc failed (%u bytes)\n",
+                       fa->mod_data_size);
+            f_close(&f);
+            return false;
+        }
+        UINT br;
+        res = f_read(&f, fa->mod_data, fa->mod_data_size, &br);
+        f_close(&f);
+        if (res != FR_OK || br != fa->mod_data_size) {
+            dbg_printf("[frankamp] MOD read failed\n");
+            free(fa->mod_data);
+            fa->mod_data = 0;
+            return false;
+        }
+
+        hxcmod_init(&fa->mod_ctx);
+        hxcmod_setcfg(&fa->mod_ctx, 44100, 1, 1);
+        if (!hxcmod_load(&fa->mod_ctx, fa->mod_data, (int)fa->mod_data_size)) {
+            dbg_printf("[frankamp] hxcmod_load failed\n");
+            free(fa->mod_data);
+            fa->mod_data = 0;
+            return false;
+        }
+
+        fa->info.samprate = 44100;
+        fa->info.nChans = 2;
+        fa->info.bitrate = 0;
+        fa->total_ms = 0;  /* MOD loops — no fixed duration */
+        fa->elapsed_ms = 0;
+
+        pcm_init(44100, 2);
+        fa->audio_active = true;
+        fa->play_state = PS_PLAYING;
+
+        /* Decode and write first chunk to kick off DMA */
+        int nf = decode_frame_mod(fa);
+        pcm_write(fa->pcm_buf, nf);
+
+        dbg_printf("[frankamp] playing MOD: %s (44100 Hz, stereo)\n", path);
+    } else {
+        /* === MP3 playback === */
+        FRESULT res = f_open(&fa->mp3_file, path, FA_READ | FA_OPEN_EXISTING);
+        if (res != FR_OK) {
+            dbg_printf("[frankamp] f_open failed: %d\n", res);
+            return false;
+        }
+        fa->file_open = true;
+        fa->file_size = (uint32_t)f_size(&fa->mp3_file);
+
+        fa->decoder = MP3InitDecoder();
+        if (!fa->decoder) {
+            dbg_printf("[frankamp] MP3InitDecoder failed\n");
+            f_close(&fa->mp3_file);
+            fa->file_open = false;
+            return false;
+        }
+
+        fa->read_valid = 0;
+        fa->read_offset = 0;
+        skip_id3v2(fa);
+
+        int nf = decode_frame(fa);
+        if (nf <= 0) {
+            dbg_printf("[frankamp] first decode failed\n");
+            play_stop(fa);
+            return false;
+        }
+
+        estimate_duration(fa);
+        fa->elapsed_ms = 0;
+
+        int sr = fa->info.samprate;
+        if (sr <= 0) sr = 44100;
+        pcm_init(sr, 2);
+        fa->audio_active = true;
+        fa->play_state = PS_PLAYING;
+
+        pcm_write(fa->pcm_buf, nf);
+
+        dbg_printf("[frankamp] playing: %s (%d Hz, %d kbps, %d ch)\n",
+                   path, fa->info.samprate, fa->info.bitrate / 1000,
+                   fa->info.nChans);
     }
-    fa->file_open = true;
-    fa->file_size = (uint32_t)f_size(&fa->mp3_file);
-
-    /* Init decoder */
-    fa->decoder = MP3InitDecoder();
-    if (!fa->decoder) {
-        dbg_printf("[frankamp] MP3InitDecoder failed\n");
-        f_close(&fa->mp3_file);
-        fa->file_open = false;
-        return false;
-    }
-
-    /* Reset read buffer and skip past ID3v2 tag (album art, etc.) */
-    fa->read_valid = 0;
-    fa->read_offset = 0;
-    skip_id3v2(fa);
-
-    /* Decode first frame to get stream info */
-    int nf = decode_frame(fa);
-    if (nf <= 0) {
-        dbg_printf("[frankamp] first decode failed\n");
-        play_stop(fa);
-        return false;
-    }
-
-    estimate_duration(fa);
-    fa->elapsed_ms = 0;
-
-    /* Start I2S — direct blocking writes, no timer/callback */
-    int sr = fa->info.samprate;
-    if (sr <= 0) sr = 44100;
-    pcm_init(sr, 2);
-    fa->audio_active = true;
-    fa->play_state = PS_PLAYING;
-
-    /* Write the first decoded frame to kick off DMA */
-    pcm_write(fa->pcm_buf, nf);
-
-    dbg_printf("[frankamp] playing: %s (%d Hz, %d kbps, %d ch)\n",
-               path, fa->info.samprate, fa->info.bitrate / 1000,
-               fa->info.nChans);
     return true;
 }
 
@@ -413,6 +515,12 @@ static void play_prev(frankamp_t *fa) {
 
 /* Decode one frame and push to I2S (blocking).  Returns false at EOF. */
 static bool audio_step(frankamp_t *fa) {
+    if (fa->format == FMT_MOD) {
+        int nf = decode_frame_mod(fa);
+        pcm_write(fa->pcm_buf, nf);
+        fa->elapsed_ms += MOD_CHUNK_FRAMES * 1000 / 44100;
+        return true;  /* MOD loops forever */
+    }
     int nf = decode_frame(fa);
     if (nf <= 0)
         return false;
@@ -672,13 +780,21 @@ static void main_paint(hwnd_t hwnd) {
     }
 
     /* Bitrate info line (dark gray on white) */
-    if (fa->play_state != PS_STOPPED && fa->info.bitrate > 0) {
+    if (fa->play_state != PS_STOPPED) {
         char info_str[40];
-        snprintf(info_str, sizeof(info_str), "%d kbps  %d Hz  %s",
-                 fa->info.bitrate / 1000,
-                 fa->info.samprate,
-                 fa->info.nChans == 2 ? "stereo" : "mono");
-        wd_text_ui(75, 20, info_str, COLOR_DARK_GRAY, COLOR_WHITE);
+        if (fa->format == FMT_MOD) {
+            snprintf(info_str, sizeof(info_str), "MOD  %d Hz  stereo",
+                     fa->info.samprate);
+        } else if (fa->info.bitrate > 0) {
+            snprintf(info_str, sizeof(info_str), "%d kbps  %d Hz  %s",
+                     fa->info.bitrate / 1000,
+                     fa->info.samprate,
+                     fa->info.nChans == 2 ? "stereo" : "mono");
+        } else {
+            info_str[0] = '\0';
+        }
+        if (info_str[0])
+            wd_text_ui(75, 20, info_str, COLOR_DARK_GRAY, COLOR_WHITE);
     }
 
     /* Play state indicator (green on white for active, gray for stopped) */
@@ -874,7 +990,7 @@ static void do_play(frankamp_t *fa) {
 }
 
 static void do_open(frankamp_t *fa) {
-    file_dialog_open(fa->hwnd, "Open MP3", "/", ".mp3");
+    file_dialog_open(fa->hwnd, "Open Audio", "/", ".mp3;.mod");
 }
 
 /*==========================================================================

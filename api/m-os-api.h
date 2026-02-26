@@ -1096,6 +1096,50 @@ inline static void pcm_write(const int16_t *samples, int count) { // 450
     ((fn_ptr_t)_sys_table_ptrs[450])(samples, count);
 }
 
+// since API v.30 — MOD playback (HxCModPlayer)
+#include "hxcmod.h"
+
+inline static int hxcmod_init(modcontext *modctx) { // 486
+    typedef int (*fn_ptr_t)(modcontext *);
+    return ((fn_ptr_t)_sys_table_ptrs[486])(modctx);
+}
+inline static int hxcmod_setcfg(modcontext *modctx, int samplerate,
+                                int stereo_separation, int filter) { // 487
+    typedef int (*fn_ptr_t)(modcontext *, int, int, int);
+    return ((fn_ptr_t)_sys_table_ptrs[487])(modctx, samplerate,
+                                            stereo_separation, filter);
+}
+inline static int hxcmod_load(modcontext *modctx, void *mod_data,
+                              int mod_data_size) { // 488
+    typedef int (*fn_ptr_t)(modcontext *, void *, int);
+    return ((fn_ptr_t)_sys_table_ptrs[488])(modctx, mod_data, mod_data_size);
+}
+inline static void hxcmod_fillbuffer(modcontext *modctx, msample *outbuffer,
+                                     mssize nbsample,
+                                     tracker_buffer_state *trkbuf) { // 489
+    typedef void (*fn_ptr_t)(modcontext *, msample *, mssize,
+                             tracker_buffer_state *);
+    ((fn_ptr_t)_sys_table_ptrs[489])(modctx, outbuffer, nbsample, trkbuf);
+}
+inline static void hxcmod_unload(modcontext *modctx) { // 490
+    typedef void (*fn_ptr_t)(modcontext *);
+    ((fn_ptr_t)_sys_table_ptrs[490])(modctx);
+}
+
+// since API v.30 — PSRAM allocator
+inline static void *psram_alloc(size_t size) { // 491
+    typedef void *(*fn_ptr_t)(size_t);
+    return ((fn_ptr_t)_sys_table_ptrs[491])(size);
+}
+inline static void psram_free(void *ptr) { // 492
+    typedef void (*fn_ptr_t)(void *);
+    ((fn_ptr_t)_sys_table_ptrs[492])(ptr);
+}
+inline static bool psram_is_available(void) { // 493
+    typedef bool (*fn_ptr_t)(void);
+    return ((fn_ptr_t)_sys_table_ptrs[493])();
+}
+
 #define abs(x) (x > 0 ? x : -x)
 
 extern volatile bool marked_to_exit;

@@ -105,6 +105,9 @@ add_executable(frankos
 # Helix fixed-point MP3 decoder
 add_subdirectory(lib/helix)
 
+# HxCModPlayer MOD tracker decoder
+add_subdirectory(lib/hxcmod)
+
 # I2S audio PIO program (generates audio_i2s.pio.h)
 add_subdirectory(drivers/audio)
 target_include_directories(frankos PRIVATE
@@ -170,6 +173,7 @@ target_link_libraries(frankos
     ps2_driver
     sdcard
     helix
+    hxcmod
     pico_stdlib
     pico_multicore
     hardware_clocks
