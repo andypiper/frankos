@@ -256,9 +256,10 @@ bool scrollbar_event(scrollbar_t *sb, const window_event_t *event,
         sb_get_thumb(sb, track_start, track_len, &thumb_pos, &thumb_len);
 
         if (coord >= thumb_pos && coord < thumb_pos + thumb_len) {
-            /* Start thumb drag */
+            /* Start thumb drag — position unchanged */
             sb->dragging = true;
             sb->drag_offset = coord - thumb_pos;
+            *new_pos = sb->pos;
             return true;
         }
 
@@ -615,8 +616,9 @@ void textarea_paint(textarea_t *ta) {
         int32_t py = ty + line_num * FONT_UI_HEIGHT - ta->scroll_y;
 
         if (py >= ty + th) break;
-        if (py + FONT_UI_HEIGHT <= ty) {
-            /* Skip to next line */
+        if (py < ty) {
+            /* Line starts above text rect — skip to avoid drawing
+             * into the uncleared margin area above the textarea. */
             while (offset < ta->len && ta->buf[offset] != '\n') offset++;
             if (offset < ta->len) offset++; /* skip \n */
             continue;
