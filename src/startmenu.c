@@ -136,13 +136,8 @@ static void fos_scan(void) {
             f_close(&f);
         }
 
-        /* Fallback: capitalize filename */
-        if (!got_name) {
-            strncpy(fos_apps[fos_app_count].name, fno.fname, FOS_NAME_LEN - 1);
-            fos_apps[fos_app_count].name[FOS_NAME_LEN - 1] = '\0';
-            fos_apps[fos_app_count].name[0] =
-                toupper((unsigned char)fos_apps[fos_app_count].name[0]);
-        }
+        /* Skip files without a companion .inf */
+        if (!got_name) continue;
 
         fos_app_count++;
     }

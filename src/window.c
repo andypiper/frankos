@@ -770,11 +770,14 @@ void wm_composite(void) {
 
     enum { CUR_ERASE_STAMP, CUR_RESET_STAMP, CUR_SKIP } cursor_mode;
 
+    bool did_full_repaint = false;
+
     if (needs_full_repaint) {
         /*--- Fallback path: full repaint ---*/
         cursor_overlay_erase();
         display_clear(THEME_DESKTOP_COLOR);
         needs_full_repaint = false;
+        did_full_repaint = true;
         expose_count = 0;
 
         /* Mark ALL visible windows and taskbar dirty */
@@ -907,8 +910,11 @@ void wm_composite(void) {
 
     /* Paint dirty visible windows back-to-front.
      * Skip when popups are open — their overlays sit on top and
-     * window paints would briefly overwrite them mid-scanline. */
-    if (!has_popup) {
+     * window paints would briefly overwrite them mid-scanline.
+     * Exception: after a full repaint the screen was cleared, so
+     * windows MUST be repainted even with popups open (the popup
+     * overlay is drawn on top immediately after). */
+    if (!has_popup || did_full_repaint) {
         for (uint8_t i = 0; i < z_count; i++) {
             hwnd_t hwnd = z_stack[i];
             window_t *win = &windows[hwnd - 1];
