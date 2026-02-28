@@ -561,7 +561,7 @@ diggerdie(struct digger_draw_api *ddap, int n)
       if (digdat[n].deathtime!=0)
         digdat[n].deathtime--;
       else {
-	if (dgstate.diggers == 1 && !sounddiedone) {
+	if (dgstate.diggers == 1 && musicflag && !sounddiedone) {
 	    frame -= 1;
 	    break;
 	}
