@@ -1,0 +1,14171 @@
+/***********************************************************************************************************************
+PicoMite MMBasic
+
+Draw.c
+
+<COPYRIGHT HOLDERS>  Geoff Graham, Peter Mather
+Copyright (c) 2021, <COPYRIGHT HOLDERS> All rights reserved.
+Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
+1.	Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
+2.	Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer
+    in the documentation and/or other materials provided with the distribution.
+3.	The name MMBasic be used when referring to the interpreter in any documentation and promotional material and the original copyright message be displayed
+    on the console at startup (additional copyright messages may be added).
+4.	All advertising materials mentioning features or use of this software must display the following acknowledgement: This product includes software developed
+    by the <copyright holder>.
+5.	Neither the name of the <copyright holder> nor the names of its contributors may be used to endorse or promote products derived from this software
+    without specific prior written permission.
+THIS SOFTWARE IS PROVIDED BY <COPYRIGHT HOLDERS> AS IS AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL <COPYRIGHT HOLDERS> BE LIABLE FOR ANY DIRECT,
+INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+************************************************************************************************************************/
+/**
+ * @file Draw.c
+ * @author Geoff Graham, Peter Mather
+ * Thanks to ksinger for the ideas behind the SPRITE(B function
+ * @brief Source for Graphics MMBasic commands and functions
+ */
+/*
+ * @cond
+ * The following section will be excluded from the documentation.
+ */
+
+#include <stdarg.h>
+#include <math.h>
+#include "MMBasic_Includes.h"
+#include "Hardware_Includes.h"
+#include "hardware/spi.h"
+#include "Memory.h"
+#ifndef PICOMITEWEB
+#include "pico/multicore.h"
+extern mutex_t frameBufferMutex;
+#endif
+#ifdef PICOMITEWEB
+#include "pico/cyw43_arch.h"
+#endif
+#if PICOMITERP2350
+#include "VGA222.h"
+#endif
+#define LONG long
+#define max(x, y) (((x) > (y)) ? (x) : (y))
+#define min(x, y) (((x) < (y)) ? (x) : (y))
+
+// Helper macros for strided array access (used for struct member arrays)
+#define STRIDE_FLOAT(ptr, idx, stride) (*(MMFLOAT *)((char *)(ptr) + (idx) * (stride)))
+#define STRIDE_INT(ptr, idx, stride) (*(long long int *)((char *)(ptr) + (idx) * (stride)))
+
+// Maximum number of vertices for polygon fill operations
+#define MAX_POLYGON_VERTICES 256
+
+// Magic number to indicate sprite position is not in use
+#define SPRITE_POS_INACTIVE 10000
+
+// Magic number to indicate buffer is a triangle buffer (not rectangular)
+#define TRIANGLE_BUFFER_MARKER 9999
+
+void DrawFilledCircle(int x, int y, int radius, int r, int fill, int ints_per_line, uint32_t *br, MMFLOAT aspect, MMFLOAT aspect2);
+void SaveTriangle(int bnbr, char *buff);
+void RestoreTriangle(int bnbr, char *buff);
+void ReadLine(int x1, int y1, int x2, int y2, char *buff);
+void cmd_RestoreTriangle(unsigned char *p);
+void polygon(unsigned char *p, int close);
+void DrawCircleRingLineByLine(int x, int y, int r1, int r2, int c, MMFLOAT aspect, MMFLOAT aspect2);
+typedef struct _BMPDECODER
+{
+    LONG lWidth;
+    LONG lHeight;
+    LONG lImageOffset;
+    WORD wPaletteEntries;
+    BYTE bBitsPerPixel;
+    BYTE bHeaderType;
+    BYTE blBmMarkerFlag : 1;
+    BYTE blCompressionType : 3;
+    BYTE bNumOfPlanes : 3;
+    BYTE b16bit565flag : 1;
+    BYTE aPalette[256][3]; /* Each palette entry has RGB */
+} BMPDECODER;
+/***************************************************************************/
+// define the fonts
+
+#include "font1.h"
+#include "Misc_12x20_LE.h"
+#include "Hom_16x24_LE.h"
+#include "Fnt_10x16.h"
+#include "Inconsola.h"
+#include "ArialNumFontPlus.h"
+#include "Font_8x6.h"
+#include "arial_bold.h"
+#ifdef PICOMITEVGA
+#ifndef HDMI
+#include "Include.h"
+#endif
+#endif
+#include "smallfont.h"
+#include "font-8x10.h"
+
+unsigned char *FontTable[FONT_TABLE_SIZE] = {(unsigned char *)font1,
+                                             (unsigned char *)Misc_12x20_LE,
+#ifdef PICOMITEVGA
+#ifdef HDMI
+                                             (unsigned char *)Hom_16x24_LE,
+#else
+                                             (unsigned char *)arial_bold,
+#endif
+#else
+                                             (unsigned char *)Hom_16x24_LE,
+#endif
+                                             (unsigned char *)Fnt_10x16,
+                                             (unsigned char *)Inconsola,
+                                             (unsigned char *)ArialNumFontPlus,
+                                             (unsigned char *)F_6x8_LE,
+                                             (unsigned char *)TinyFont,
+                                             (unsigned char *)font8x10,
+                                             NULL,
+                                             NULL,
+                                             NULL,
+                                             NULL,
+                                             NULL,
+                                             NULL,
+                                             NULL};
+
+/***************************************************************************/
+// the default function for DrawRectangle() and DrawBitmap()
+
+short gui_font;
+int gui_fcolour;
+int gui_bcolour;
+volatile short low_x = silly_low, high_y = silly_high, low_y = silly_low, high_x = silly_high;
+int PrintPixelMode = 0;
+
+short CurrentX = 0, CurrentY = 0; // the current default position for the next char to be written
+short DisplayHRes, DisplayVRes;   // the physical characteristics of the display
+
+// Sprite buffer management - dynamically allocated in chunks of 3 sprites per 256-byte page
+struct spritebuffer *spritebuff[MAXBLITBUF + 1] = {NULL};
+// Chunk tracking: each chunk holds SPRITES_PER_CHUNK sprites
+// We need (MAXBLITBUF + SPRITES_PER_CHUNK) / SPRITES_PER_CHUNK chunks max
+#define SPRITE_CHUNK_COUNT ((MAXBLITBUF + SPRITES_PER_CHUNK) / SPRITES_PER_CHUNK)
+static struct spritebuffer *sprite_chunks[SPRITE_CHUNK_COUNT] = {NULL};
+static uint8_t sprite_chunk_used[SPRITE_CHUNK_COUNT] = {0}; // Count of sprites used in each chunk
+
+struct blitbuffer blitbuff[MAXBLITBUF + 1] = {0};
+char CMM1 = 0;
+// the MMBasic programming characteristics of the display
+// note that HRes == 0 is an indication that a display is not configured
+short HRes = 0, VRes = 0;
+short lastx, lasty;
+const int CMM1map[16] = {BLACK, BLUE, GREEN, CYAN, RED, MAGENTA, YELLOW, WHITE, MYRTLE, COBALT, MIDGREEN, CERULEAN, RUST, FUCHSIA, BROWN, LILAC};
+int RGB121map[16];
+// pointers to the drawing primitives
+#ifndef PICOMITEWEB
+struct D3D *struct3d[MAX3D + 1] = {NULL};
+s_camera camera[MAXCAM + 1];
+#endif
+int layer_in_use[MAXLAYER + 1];
+unsigned char LIFO[MAXBLITBUF];
+unsigned char zeroLIFO[MAXBLITBUF];
+uint8_t LIFOpointer = 0;
+uint8_t zeroLIFOpointer = 0;
+uint8_t sprites_in_use = 0;
+char *COLLISIONInterrupt = NULL;
+bool CollisionFound = false;
+int sprite_which_collided = -1;
+static bool hideall = 0;
+uint8_t sprite_transparent = 0;
+
+// Static object collision detection
+struct stobject stobjects[MAXSTOBJECTS + 1] = {0};
+char *STCollisionInterrupt = NULL;
+bool STCollisionFound = false;
+int sprite_hit_st = -1;
+int st_which_collided = -1;
+
+#ifdef PICOMITEVGA
+#ifndef HDMI
+uint32_t remap[256];
+#else
+uint32_t remap555[256];
+uint32_t remap332[256];
+uint16_t remap256[256];
+#endif
+
+short gui_font_width, gui_font_height;
+int last_bcolour, last_fcolour;
+volatile int CursorTimer = 0; // used to time the flashing cursor
+extern volatile int QVgaScanLine;
+bool mergedread = 0;
+int ScreenSize = 0;
+#else
+extern int SSD1963data;
+int map[16] = {0};
+#ifdef PICOMITEWEB
+#ifndef rp2350
+short gui_font_width, gui_font_height;
+int last_bcolour, last_fcolour;
+volatile int CursorTimer = 0; // used to time the flashing cursor
+int display_backlight;        // the brightness of the backlight (1 to 100)
+#else
+#endif
+extern int InvokingCtrl;
+#else
+extern int InvokingCtrl;
+bool mergerunning = false;
+volatile bool mergedone = false;
+uint32_t mergetimer = 0;
+#endif
+#endif
+void cmd_ReadTriangle(unsigned char *p);
+void (*DrawRectangle)(int x1, int y1, int x2, int y2, int c) = (void (*)(int, int, int, int, int))DisplayNotSet;
+void (*DrawBitmap)(int x1, int y1, int width, int height, int scale, int fc, int bc, unsigned char *bitmap) = (void (*)(int, int, int, int, int, int, int, unsigned char *))DisplayNotSet;
+void (*ScrollLCD)(int lines) = (void (*)(int))DisplayNotSet;
+void (*DrawBuffer)(int x1, int y1, int x2, int y2, unsigned char *c) = (void (*)(int, int, int, int, unsigned char *))DisplayNotSet;
+void (*ReadBuffer)(int x1, int y1, int x2, int y2, unsigned char *c) = (void (*)(int, int, int, int, unsigned char *))DisplayNotSet;
+void (*DrawBLITBuffer)(int x1, int y1, int x2, int y2, unsigned char *c) = (void (*)(int, int, int, int, unsigned char *))DisplayNotSet;
+void (*ReadBLITBuffer)(int x1, int y1, int x2, int y2, unsigned char *c) = (void (*)(int, int, int, int, unsigned char *))DisplayNotSet;
+void (*DrawBufferFast)(int x1, int y1, int x2, int y2, int blank, unsigned char *c) = (void (*)(int, int, int, int, int, unsigned char *))DisplayNotSet;
+void (*ReadBufferFast)(int x1, int y1, int x2, int y2, unsigned char *c) = (void (*)(int, int, int, int, unsigned char *))DisplayNotSet;
+void (*DrawPixel)(int x1, int y1, int c) = (void (*)(int, int, int))DisplayNotSet;
+void DrawTriangle(int x0, int y0, int x1, int y1, int x2, int y2, int c, int fill);
+// these are the GUI commands that are common to the MX170 and MX470 versions
+// in the case of the MX170 this function is called directly by MMBasic when the GUI command is used
+// in the case of the MX470 it is called by MX470GUI in GUI.c
+const int colours[16] = {0x00, 0xFF, 0x4000, 0x40ff, 0x8000, 0x80ff, 0xff00, 0xffff, 0xff0000, 0xff00FF, 0xff4000, 0xff40ff, 0xff8000, 0xff80ff, 0xffff00, 0xffffff};
+void MIPS16 initFonts(void)
+{
+    FontTable[0] = (unsigned char *)font1;
+    FontTable[1] = (unsigned char *)Misc_12x20_LE;
+#ifdef PICOMITEVGA
+#ifdef HDMI
+    FontTable[2] = (unsigned char *)Hom_16x24_LE;
+#else
+    FontTable[2] = (unsigned char *)arial_bold;
+#endif
+#else
+    FontTable[2] = (unsigned char *)Hom_16x24_LE;
+#endif
+    FontTable[3] = (unsigned char *)Fnt_10x16;
+    FontTable[4] = (unsigned char *)Inconsola;
+    FontTable[5] = (unsigned char *)ArialNumFontPlus;
+    FontTable[6] = (unsigned char *)F_6x8_LE;
+    FontTable[7] = (unsigned char *)TinyFont;
+    FontTable[8] = (unsigned char *)font8x10;
+    FontTable[9] = NULL;
+    FontTable[10] = NULL;
+    FontTable[11] = NULL;
+    FontTable[12] = NULL;
+    FontTable[13] = NULL;
+    FontTable[14] = NULL;
+    FontTable[15] = NULL;
+}
+#if PICOMITERP2350
+uint16_t __not_in_flash_func(RGB565)(uint32_t c)
+{
+    return ((c >> 16) & 0b11111000) | ((c >> 13) & 0b00000111) | ((c << 3) & 0b1110000000000000) | ((c << 5) & 0b0001111100000000);
+}
+#endif
+
+uint16_t __not_in_flash_func(RGB555)(uint32_t c)
+{
+    return ((c & 0xf8) >> 3) | ((c & 0xf800) >> 6) | ((c & 0xf80000) >> 9);
+}
+uint8_t __not_in_flash_func(RGB332)(uint32_t c)
+{
+    return (c >> 16 & 0xE0) | (c >> 11 & 0x1C) | (c >> 6 & 0x03);
+}
+/*  @endcond */
+void CheckDisplay(void)
+{
+    if (Option.DISPLAY_TYPE == 0)
+        DisplayNotSet();
+}
+void MIPS16 cmd_guiMX170(void)
+{
+    unsigned char *p;
+
+    CheckDisplay(); // display a bitmap stored in an integer or string
+    if ((p = checkstring(cmdline, (unsigned char *)"BITMAP")))
+    {
+        int x, y, fc, bc, h, w, scale, t, bytes;
+        unsigned char *s;
+        MMFLOAT f;
+        long long int i64;
+
+        getcsargs(&p, 15);
+        if (!(argc & 1) || argc < 5)
+            StandardError(2);
+
+        // set the defaults
+        h = 8;
+        w = 8;
+        scale = 1;
+        bytes = 8;
+        fc = gui_fcolour;
+        bc = gui_bcolour;
+
+        x = getinteger(argv[0]);
+        y = getinteger(argv[2]);
+
+        // get the type of argument 3 (the bitmap) and its value (integer or string)
+        t = T_NOTYPE;
+        evaluate(argv[4], &f, &i64, &s, &t, true);
+        if (t & T_NBR)
+            SyntaxError();
+        else if (t & T_INT)
+            s = (unsigned char *)&i64;
+        else if (t & T_STR)
+            bytes = *s++;
+
+        if (argc > 5 && *argv[6])
+            w = getint(argv[6], 1, HRes);
+        if (argc > 7 && *argv[8])
+            h = getint(argv[8], 1, VRes);
+        if (argc > 9 && *argv[10])
+            scale = getint(argv[10], 1, 15);
+        if (argc > 11 && *argv[12])
+            fc = getint(argv[12], 0, WHITE);
+        if (argc == 15)
+            bc = getint(argv[14], -1, WHITE);
+        if (h * w > bytes * 8)
+            error("Not enough data");
+        DrawBitmap(x, y, w, h, scale, fc, bc, (unsigned char *)s);
+        if (Option.Refresh)
+            Display_Refresh();
+        return;
+    }
+#ifndef PICOMITEVGA
+#ifdef GUICONTROLS
+    if ((p = checkstring(cmdline, (unsigned char *)"BEEP")))
+    {
+        if (Option.TOUCH_Click == 0)
+            error("Click option not set");
+        ClickTimer = getint(p, 0, INT_MAX) + 1;
+        return;
+    }
+#endif
+    if ((p = checkstring(cmdline, (unsigned char *)"RESET")))
+    {
+        if ((checkstring(p, (unsigned char *)"LCDPANEL")))
+        {
+#ifdef PICOMITE
+            if (mergerunning)
+            {
+                multicore_fifo_push_blocking(0xFF);
+                busy_wait_ms(mergetimer + 200);
+                if (mergerunning)
+                {
+                    SoftReset(SOFT_RESET);
+                }
+            }
+#endif
+            InitDisplaySPI(true);
+            InitDisplayI2C(true);
+            if ((Option.TOUCH_CS || Option.TOUCH_IRQ) && !Option.TOUCH_CAP)
+            {
+                GetTouchValue(CMD_PENIRQ_ON); // send the controller the command to turn on PenIRQ
+                GetTouchAxis(CMD_MEASURE_X);
+            }
+            return;
+        }
+    }
+
+    if ((p = checkstring(cmdline, (unsigned char *)"CALIBRATE")))
+    {
+        int tlx, tly, trx, try, blx, bly, brx, bry, midy;
+        char *s;
+        if (Option.TOUCH_CS == 0 && Option.TOUCH_IRQ == 0)
+            error("Touch not configured");
+
+        if (*p && *p != '\'')
+        { // if the calibration is provided on the command line
+            getcsargs(&p, 9);
+            if (argc != 9)
+                StandardError(2);
+            Option.TOUCH_SWAPXY = getinteger(argv[0]);
+            Option.TOUCH_XZERO = getinteger(argv[2]);
+            Option.TOUCH_YZERO = getinteger(argv[4]);
+            Option.TOUCH_XSCALE = getinteger(argv[6]) / 10000.0;
+            Option.TOUCH_YSCALE = getinteger(argv[8]) / 10000.0;
+            if (!CurrentLinePtr)
+                SaveOptions();
+            return;
+        }
+        else
+        {
+            if (CurrentLinePtr)
+                StandardError(10);
+            Option.TOUCH_SWAPXY = 0;
+            Option.TOUCH_XZERO = 0;
+            Option.TOUCH_YZERO = 0;
+            Option.TOUCH_XSCALE = 1.0f;
+            Option.TOUCH_YSCALE = 1.0f;
+        }
+        calibrate = 1;
+        GetCalibration(TARGET_OFFSET, TARGET_OFFSET, &tlx, &tly);
+        GetCalibration(HRes - TARGET_OFFSET, TARGET_OFFSET, &trx, &try);
+        if (abs(trx - tlx) < CAL_ERROR_MARGIN && abs(tly - try) < CAL_ERROR_MARGIN)
+        {
+            calibrate = 0;
+            error("Touch hardware failure %,%,%,%", tlx, trx, tly, try);
+        }
+
+        GetCalibration(TARGET_OFFSET, VRes - TARGET_OFFSET, &blx, &bly);
+        GetCalibration(HRes - TARGET_OFFSET, VRes - TARGET_OFFSET, &brx, &bry);
+        calibrate = 0;
+        midy = max(max(tly, try), max(bly, bry)) / 2;
+        Option.TOUCH_SWAPXY = ((tly < midy && try > midy) || (tly > midy && try < midy));
+
+        if (Option.TOUCH_SWAPXY)
+        {
+            swap(tlx, tly);
+            swap(trx, try);
+            swap(blx, bly);
+            swap(brx, bry);
+        }
+
+        Option.TOUCH_XSCALE = (MMFLOAT)(HRes - TARGET_OFFSET * 2) / (MMFLOAT)(trx - tlx);
+        Option.TOUCH_YSCALE = (MMFLOAT)(VRes - TARGET_OFFSET * 2) / (MMFLOAT)(bly - tly);
+        Option.TOUCH_XZERO = ((MMFLOAT)tlx - ((MMFLOAT)TARGET_OFFSET / Option.TOUCH_XSCALE));
+        Option.TOUCH_YZERO = ((MMFLOAT)tly - ((MMFLOAT)TARGET_OFFSET / Option.TOUCH_YSCALE));
+        SaveOptions();
+        brx = (HRes - TARGET_OFFSET) - ((brx - Option.TOUCH_XZERO) * Option.TOUCH_XSCALE);
+        bry = (VRes - TARGET_OFFSET) - ((bry - Option.TOUCH_YZERO) * Option.TOUCH_YSCALE);
+        if (abs(brx) > CAL_ERROR_MARGIN || abs(bry) > CAL_ERROR_MARGIN)
+        {
+            s = "Warning: Inaccurate calibration\r\n";
+        }
+        else
+            s = "Done. No errors\r\n";
+        CurrentX = CurrentY = 0;
+        MMPrintString(s);
+        strcpy((char *)inpbuf, "Deviation X = ");
+        IntToStr((char *)inpbuf + strlen((char *)inpbuf), brx, 10);
+        strcat((char *)inpbuf, ", Y = ");
+        IntToStr((char *)inpbuf + strlen((char *)inpbuf), bry, 10);
+        strcat((char *)inpbuf, " (pixels)\r\n");
+        MMPrintString((char *)inpbuf);
+        if (!Option.DISPLAY_CONSOLE)
+        {
+            GUIPrintString(0, 0, 0x11, JUSTIFY_LEFT, JUSTIFY_TOP, ORIENT_NORMAL, WHITE, BLACK, s);
+            GUIPrintString(0, 36, 0x11, JUSTIFY_LEFT, JUSTIFY_TOP, ORIENT_NORMAL, WHITE, BLACK, (char *)inpbuf);
+        }
+        return;
+    }
+#endif
+    if ((p = checkstring(cmdline, (unsigned char *)"TEST")))
+    {
+        if ((checkstring(p, (unsigned char *)"LCDPANEL")))
+        {
+            int t, count = 0;
+            uint64_t start = time_us_64();
+            t = ((HRes > VRes) ? HRes : VRes) / 7;
+            while (getConsole() < '\r')
+            {
+                routinechecks();
+#ifdef PICOMITEWEB
+                {
+                    if (startupcomplete)
+                        ProcessWeb(1);
+                }
+#endif
+                DrawCircle(rand() % HRes, rand() % VRes, (rand() % t) + t / 5, 1, 1, rgb((rand() % 8) * 256 / 8, (rand() % 8) * 256 / 8, (rand() % 8) * 256 / 8), 1);
+                count++;
+#ifdef PICOMITEVGA
+#ifdef HDMI
+                while (v_scanline != 0)
+                {
+                }
+#else
+                while (QVgaScanLine != 0)
+                {
+                }
+#endif
+#endif
+            }
+            ClearScreen(gui_bcolour);
+            PFlt(((MMFLOAT)count) / (((MMFLOAT)(time_us_64() - start)) / 1000000.0));
+            MMPrintString(" Circles per Second");
+            return;
+        }
+#ifndef PICOMITEVGA
+        if ((checkstring(p, (unsigned char *)"TOUCH")))
+        {
+            int x, y;
+            ClearScreen(gui_bcolour);
+            while (getConsole() < '\r')
+            {
+                x = GetTouch(GET_X_AXIS);
+                y = GetTouch(GET_Y_AXIS);
+                if (x != TOUCH_ERROR && y != TOUCH_ERROR)
+                    DrawBox(x - 1, y - 1, x + 1, y + 1, 0, WHITE, WHITE);
+            }
+            ClearScreen(gui_bcolour);
+            return;
+        }
+#endif
+    }
+    StandardError(36);
+}
+/*
+ * @cond
+ * The following section will be excluded from the documentation.
+ */
+
+void getargaddress(unsigned char *p, long long int **ip, MMFLOAT **fp, int *n, int *stride)
+{
+    unsigned char *ptr = NULL;
+    *fp = NULL;
+    *ip = NULL;
+    if (stride)
+        *stride = sizeof(MMFLOAT); // Default stride for normal arrays (8 bytes)
+    char pp[STRINGSIZE] = {0};
+    strcpy(pp, (char *)p);
+    if (!isnamestart(pp[0]))
+    { // found a literal
+        *n = 1;
+        return;
+    }
+    ptr = findvar((unsigned char *)pp, V_FIND | V_EMPTY_OK | V_NOFIND_NULL);
+    if (ptr && g_vartbl[g_VarIndex].type & (T_NBR | T_INT))
+    {
+        if (g_vartbl[g_VarIndex].dims[0] <= 0)
+        { // simple variable
+            *n = 1;
+            return;
+        }
+        else
+        { // array or array element
+            if (*n == 0)
+                *n = g_vartbl[g_VarIndex].dims[0] + 1 - g_OptionBase;
+            else
+                *n = (g_vartbl[g_VarIndex].dims[0] + 1 - g_OptionBase) < *n ? (g_vartbl[g_VarIndex].dims[0] + 1 - g_OptionBase) : *n;
+            skipspace(p);
+            do
+            {
+                p++;
+            } while (isnamechar(*p));
+            if (*p == '!' || *p == '%')
+                p++;
+            if (*p == '(')
+            {
+                p++;
+                skipspace(p);
+                if (*p != ')')
+                { // array element
+                    *n = 1;
+                    return;
+                }
+            }
+        }
+        if (g_vartbl[g_VarIndex].dims[1] != 0)
+            StandardError(6);
+        if (g_vartbl[g_VarIndex].type & T_NBR)
+            *fp = (MMFLOAT *)ptr;
+        else
+            *ip = (long long int *)ptr;
+    }
+#ifdef STRUCTENABLED
+    // Check if this is a struct member access (g_StructMemberType set by findvar)
+    else if (ptr && (g_vartbl[g_VarIndex].type & T_STRUCT) && g_StructMemberType != 0)
+    {
+        // Caller must handle stride for struct member arrays
+        if (stride == NULL)
+            StandardError(47);
+
+        // Check if this is an array element access (e.g., boxes(i%).x) vs whole array (boxes().x)
+        // We need to check if there's an index expression in the parentheses
+        unsigned char *pcheck = p;
+        skipspace(pcheck);
+        // Skip past variable name
+        while (isnamechar(*pcheck))
+            pcheck++;
+        if (*pcheck == '!' || *pcheck == '%' || *pcheck == '$')
+            pcheck++;
+        skipspace(pcheck);
+        if (*pcheck == '(')
+        {
+            pcheck++;
+            skipspace(pcheck);
+            if (*pcheck != ')')
+            {
+                // There's an index expression - this is a single element access
+                *n = 1;
+                return;
+            }
+        }
+
+        // This is a struct array with member access like points().x
+        int struct_type = (int)g_vartbl[g_VarIndex].size;
+        int struct_size = g_structtbl[struct_type]->total_size;
+
+        // Get member type from g_StructMemberType (set by findvar/ResolveStructMember)
+        int member_type = g_StructMemberType;
+
+        // Check member type is numeric
+        if (!(member_type & (T_NBR | T_INT)))
+        {
+            *n = 1; // Not a numeric member, treat as single value
+            return;
+        }
+
+        // Calculate number of elements from array dimensions
+        if (*n == 0)
+            *n = g_vartbl[g_VarIndex].dims[0] + 1 - g_OptionBase;
+        else
+            *n = (g_vartbl[g_VarIndex].dims[0] + 1 - g_OptionBase) < *n ? (g_vartbl[g_VarIndex].dims[0] + 1 - g_OptionBase) : *n;
+
+        // Check for 2D arrays (not supported)
+        if (g_vartbl[g_VarIndex].dims[1] != 0)
+            StandardError(6);
+
+        // Set stride to structure size
+        *stride = struct_size;
+
+        // Set the appropriate pointer based on member type
+        if (member_type & T_NBR)
+            *fp = (MMFLOAT *)ptr;
+        else
+            *ip = (long long int *)ptr;
+    }
+#endif
+    else
+    {
+        *n = 1; // may be a function call
+    }
+}
+
+/****************************************************************************************************
+
+ General purpose drawing routines
+
+****************************************************************************************************/
+int rgb(int r, int g, int b)
+{
+    return RGB(r, g, b);
+}
+void getcoord(char *p, int *x, int *y)
+{
+    unsigned char *tp, *ttp;
+    char b[STRINGSIZE];
+    char savechar;
+    tp = getclosebracket((unsigned char *)p);
+    savechar = *tp;
+    *tp = 0;        // remove the closing brackets
+    strcpy(b, p);   // copy the coordinates to the temp buffer
+    *tp = savechar; // put back the closing bracket
+    ttp = (unsigned char *)b + 1;
+    // kludge (todo: fix this)
+    {
+        getcsargs(&ttp, 3); // this is a macro and must be the first executable stmt in a block
+        if (argc != 3)
+            SyntaxError();
+        *x = getinteger(argv[0]);
+        *y = getinteger(argv[2]);
+    }
+}
+
+int getColour(char *c, int minus)
+{
+    int colour;
+    if (CMM1)
+    {
+        colour = getint((unsigned char *)c, (minus ? -1 : 0), 15);
+        if (colour >= 0)
+            colour = CMM1map[colour];
+    }
+    else
+        colour = getint((unsigned char *)c, (minus ? -1 : 0), 0xFFFFFFF);
+    return colour;
+}
+#ifndef PICOMITEVGA
+void DrawPixelNormal(int x, int y, int c)
+{
+    DrawRectangle(x, y, x, y, c);
+}
+#endif
+void ClearScreen(int c)
+{
+    if (!Option.DISPLAY_TYPE)
+        return;
+#if PICOMITERP2350
+    if (ScrollLCD == ScrollLCDMEM332)
+    {
+        if (Option.DISPLAY_TYPE >= SSD1963_5_12BUFF)
+        {
+            ScrollStart = 0;
+        }
+        else
+        {
+            multicore_fifo_push_blocking(7);
+            multicore_fifo_push_blocking((uint32_t)0);
+            ScrollStart = 0;
+        }
+    }
+#endif
+#ifdef PICOMITEVGA
+    if (DISPLAY_TYPE == SCREENMODE1 && WriteBuf == DisplayBuf)
+    {
+        DrawRectangle(0, 0, HRes - 1, VRes - 1, 0);
+#ifdef HDMI
+        memset((void *)WriteBuf, 0, ScreenSize);
+        if (FullColour)
+        {
+            uint16_t bcolour = RGB555(c);
+            for (int x = 0; x < X_TILE; x++)
+            {
+                for (int y = 0; y < Y_TILE; y++)
+                {
+                    tilefcols[y * X_TILE + x] = RGB555(gui_fcolour);
+                    tilebcols[y * X_TILE + x] = bcolour;
+                }
+            }
+        }
+        else
+        {
+            uint8_t bcolour = RGB332(c);
+            for (int x = 0; x < X_TILE; x++)
+            {
+                for (int y = 0; y < Y_TILE; y++)
+                {
+                    tilefcols_w[y * X_TILE + x] = RGB332(gui_fcolour);
+                    tilebcols_w[y * X_TILE + x] = bcolour;
+                }
+            }
+        }
+        CurrentX = CurrentY = 0;
+#else
+        memset((void *)WriteBuf, 0, ScreenSize);
+        for (int x = 0; x < X_TILE; x++)
+        {
+            for (int y = 0; y < Y_TILE; y++)
+            {
+                tilefcols[y * X_TILE + x] = RGB121pack(gui_fcolour);
+                tilebcols[y * X_TILE + x] = RGB121pack(c);
+            }
+        }
+#endif
+    }
+    else
+        DrawRectangle(0, 0, HRes - 1, VRes - 1, c);
+#else
+    DrawRectangle(0, 0, HRes - 1, VRes - 1, c);
+#endif
+}
+void DrawBuffered(int xti, int yti, int c, int complete)
+{
+    static unsigned char pos = 0;
+    static unsigned char movex, movey, movec;
+    static short xtilast[8];
+    static short ytilast[8];
+    static int clast[8];
+    xtilast[pos] = xti;
+    ytilast[pos] = yti;
+    clast[pos] = c;
+    if (complete == 1)
+    {
+        if (pos == 1)
+        {
+            DrawPixel(xtilast[0], ytilast[0], clast[0]);
+        }
+        else
+        {
+            DrawLine(xtilast[0], ytilast[0], xtilast[pos - 1], ytilast[pos - 1], 1, clast[0]);
+        }
+        pos = 0;
+    }
+    else
+    {
+        if (pos == 0)
+        {
+            movex = movey = movec = 1;
+            pos += 1;
+        }
+        else
+        {
+            if (xti == xtilast[0] && abs(yti - ytilast[pos - 1]) == 1)
+                movex = 0;
+            else
+                movex = 1;
+            if (yti == ytilast[0] && abs(xti - xtilast[pos - 1]) == 1)
+                movey = 0;
+            else
+                movey = 1;
+            if (c == clast[0])
+                movec = 0;
+            else
+                movec = 1;
+            if (movec == 0 && (movex == 0 || movey == 0) && pos < 6)
+                pos += 1;
+            else
+            {
+                if (pos == 1)
+                {
+                    DrawPixel(xtilast[0], ytilast[0], clast[0]);
+                }
+                else
+                {
+                    DrawLine(xtilast[0], ytilast[0], xtilast[pos - 1], ytilast[pos - 1], 1, clast[0]);
+                }
+                movex = movey = movec = 1;
+                xtilast[0] = xti;
+                ytilast[0] = yti;
+                clast[0] = c;
+                pos = 1;
+            }
+        }
+    }
+}
+
+/**************************************************************************************************
+Draw a line on a the video output
+  x1, y1 - the start coordinate
+  x2, y2 - the end coordinate
+    w - the width of the line (ignored for diagional lines)
+  c - the colour to use
+***************************************************************************************************/
+#define abs(a) (((a) > 0) ? (a) : -(a))
+int SizeLine(int x1, int y1, int x2, int y2)
+{
+    int n = 0;
+    if (y1 == y2)
+    {
+        return abs(x1 - x2) + 1;
+    }
+    if (x1 == x2)
+    {
+        return abs(y1 - y2) + 1;
+    }
+    int dx, dy, sx, sy, err, e2;
+    dx = abs(x2 - x1);
+    sx = x1 < x2 ? 1 : -1;
+    dy = -abs(y2 - y1);
+    sy = y1 < y2 ? 1 : -1;
+    err = dx + dy;
+    while (1)
+    {
+        n++;
+        e2 = 2 * err;
+        if (e2 >= dy)
+        {
+            if (x1 == x2)
+                break;
+            err += dy;
+            x1 += sx;
+        }
+        if (e2 <= dx)
+        {
+            if (y1 == y2)
+                break;
+            err += dx;
+            y1 += sy;
+        }
+    }
+    return n;
+}
+void ReadLine(int x1, int y1, int x2, int y2, char *buff)
+{
+    if (y1 == y2 || x1 == x2)
+    {
+        ReadBuffer(x1, y1, x2, y2, (unsigned char *)buff); // horiz line
+        return;
+    }
+    int dx, dy, sx, sy, err, e2;
+    dx = abs(x2 - x1);
+    sx = x1 < x2 ? 1 : -1;
+    dy = -abs(y2 - y1);
+    sy = y1 < y2 ? 1 : -1;
+    err = dx + dy;
+    while (1)
+    {
+        ReadBuffer(x1, y1, x1, y1, (unsigned char *)buff);
+        buff += 3;
+        e2 = 2 * err;
+        if (e2 >= dy)
+        {
+            if (x1 == x2)
+                break;
+            err += dy;
+            x1 += sx;
+        }
+        if (e2 <= dx)
+        {
+            if (y1 == y2)
+                break;
+            err += dx;
+            y1 += sy;
+        }
+    }
+}
+void RestoreLine(int x1, int y1, int x2, int y2, char *buff)
+{
+    if (y1 == y2 || x1 == x2)
+    {
+        DrawBuffer(x1, y1, x2, y2, (unsigned char *)buff); // horiz line
+        return;
+    }
+    int dx, dy, sx, sy, err, e2;
+    dx = abs(x2 - x1);
+    sx = x1 < x2 ? 1 : -1;
+    dy = -abs(y2 - y1);
+    sy = y1 < y2 ? 1 : -1;
+    err = dx + dy;
+    while (1)
+    {
+        DrawBuffer(x1, y1, x1, y1, (unsigned char *)buff);
+        buff += 3;
+        e2 = 2 * err;
+        if (e2 >= dy)
+        {
+            if (x1 == x2)
+                break;
+            err += dy;
+            x1 += sx;
+        }
+        if (e2 <= dx)
+        {
+            if (y1 == y2)
+                break;
+            err += dx;
+            y1 += sy;
+        }
+    }
+}
+
+void DrawLine(int x1, int y1, int x2, int y2, int w, int c)
+{
+
+    if (y1 == y2 && w > 0)
+    {
+        DrawRectangle(x1, y1, x2, y2 + w - 1, c); // horiz line
+        if (Option.Refresh)
+            Display_Refresh();
+        return;
+    }
+    if (x1 == x2 && w > 0)
+    {
+        DrawRectangle(x1, y1, x2 + w - 1, y2, c); // vert line
+        if (Option.Refresh)
+            Display_Refresh();
+        return;
+    }
+    if (w == 1 || w == -1)
+    {
+        int dx, dy, sx, sy, err, e2;
+        dx = abs(x2 - x1);
+        sx = x1 < x2 ? 1 : -1;
+        dy = -abs(y2 - y1);
+        sy = y1 < y2 ? 1 : -1;
+        err = dx + dy;
+        while (1)
+        {
+            DrawBuffered(x1, y1, c, 0);
+            e2 = 2 * err;
+            if (e2 >= dy)
+            {
+                if (x1 == x2)
+                    break;
+                err += dy;
+                x1 += sx;
+            }
+            if (e2 <= dx)
+            {
+                if (y1 == y2)
+                    break;
+                err += dx;
+                y1 += sy;
+            }
+        }
+        DrawBuffered(0, 0, 0, 1);
+    }
+    else
+    {
+        float start, end;
+        if (w < 0)
+        {
+            w = abs(w);
+            start = -(w / 2.0f);
+            end = w / 2.0f;
+        }
+        else
+        {
+            start = 0.0f;
+            end = w;
+        }
+        // Calculate the line direction and length
+        float dx = x2 - x1;
+        float dy = y2 - y1;
+        float length = sqrtf(dx * dx + dy * dy);
+
+        // Normalize direction vector
+        float nx = dx / length;
+        float ny = dy / length;
+
+        // Calculate the perpendicular vector for width
+        float px = -ny;
+        float py = nx;
+
+        // Half-width adjustment
+
+        // Loop through every pixel inside the bounding rectangle of the line
+        for (int i = 0; i <= length; i++)
+        {
+            float lineX = x1 + i * nx;
+            float lineY = y1 + i * ny;
+
+            for (float j = start; j <= end; j += 0.25f)
+            { // Finer granularity
+                float pixelX = lineX + j * px;
+                float pixelY = lineY + j * py;
+
+                DrawPixel(roundf(pixelX), roundf(pixelY), c);
+            }
+        }
+    }
+    if (Option.Refresh)
+        Display_Refresh();
+}
+
+/**********************************************************************************************
+Draw a box
+     x1, y1 - the start coordinate
+     x2, y2 - the end coordinate
+     w      - the width of the sides of the box (can be zero)
+     c      - the colour to use for sides of the box
+     fill   - the colour to fill the box (-1 for no fill)
+***********************************************************************************************/
+void DrawBox(int x1, int y1, int x2, int y2, int w, int c, int fill)
+{
+    int t;
+
+    // make sure the coordinates are in the right sequence
+    if (x2 <= x1)
+    {
+        t = x1;
+        x1 = x2;
+        x2 = t;
+    }
+    if (y2 <= y1)
+    {
+        t = y1;
+        y1 = y2;
+        y2 = t;
+    }
+    if (w > x2 - x1)
+        w = x2 - x1;
+    if (w > y2 - y1)
+        w = y2 - y1;
+
+    if (w > 0)
+    {
+        w--;
+        DrawRectangle(x1, y1, x2, y1 + w, c); // Draw the top horiz line
+        DrawRectangle(x1, y2 - w, x2, y2, c); // Draw the bottom horiz line
+        DrawRectangle(x1, y1, x1 + w, y2, c); // Draw the left vert line
+        DrawRectangle(x2 - w, y1, x2, y2, c); // Draw the right vert line
+        w++;
+    }
+
+    if (fill >= 0)
+        DrawRectangle(x1 + w, y1 + w, x2 - w, y2 - w, fill);
+}
+
+/**********************************************************************************************
+Draw a box with rounded corners
+     x1, y1 - the start coordinate
+     x2, y2 - the end coordinate
+     radius - the radius (in pixels) of the arc forming the corners
+     c      - the colour to use for sides
+     fill   - the colour to fill the box (-1 for no fill)
+***********************************************************************************************/
+void MIPS16 DrawRBox(int x1, int y1, int x2, int y2, int radius, int c, int fill)
+{
+    int f, ddF_x, ddF_y, xx, yy;
+
+    f = 1 - radius;
+    ddF_x = 1;
+    ddF_y = -2 * radius;
+    xx = 0;
+    yy = radius;
+
+    while (xx < yy)
+    {
+        if (f >= 0)
+        {
+            yy -= 1;
+            ddF_y += 2;
+            f += ddF_y;
+        }
+        xx += 1;
+        ddF_x += 2;
+        f += ddF_x;
+        DrawPixel(x2 + xx - radius, y2 + yy - radius, c); // Bottom Right Corner
+        DrawPixel(x2 + yy - radius, y2 + xx - radius, c); // ^^^
+        DrawPixel(x1 - xx + radius, y2 + yy - radius, c); // Bottom Left Corner
+        DrawPixel(x1 - yy + radius, y2 + xx - radius, c); // ^^^
+
+        DrawPixel(x2 + xx - radius, y1 - yy + radius, c); // Top Right Corner
+        DrawPixel(x2 + yy - radius, y1 - xx + radius, c); // ^^^
+        DrawPixel(x1 - xx + radius, y1 - yy + radius, c); // Top Left Corner
+        DrawPixel(x1 - yy + radius, y1 - xx + radius, c); // ^^^
+        if (fill >= 0)
+        {
+            DrawRectangle(x2 + xx - radius - 1, y2 + yy - radius, x1 - xx + radius + 1, y2 + yy - radius, fill);
+            DrawRectangle(x2 + yy - radius - 1, y2 + xx - radius, x1 - yy + radius + 1, y2 + xx - radius, fill);
+            DrawRectangle(x2 + xx - radius - 1, y1 - yy + radius, x1 - xx + radius + 1, y1 - yy + radius, fill);
+            DrawRectangle(x2 + yy - radius - 1, y1 - xx + radius, x1 - yy + radius + 1, y1 - xx + radius, fill);
+        }
+    }
+    if (fill >= 0)
+        DrawRectangle(x1 + 1, y1 + radius, x2 - 1, y2 - radius, fill);
+    DrawRectangle(x1 + radius - 1, y1, x2 - radius + 1, y1, c); // top side
+    DrawRectangle(x1 + radius - 1, y2, x2 - radius + 1, y2, c); // botom side
+    DrawRectangle(x1, y1 + radius, x1, y2 - radius, c);         // left side
+    DrawRectangle(x2, y1 + radius, x2, y2 - radius, c);         // right side
+    if (Option.Refresh)
+        Display_Refresh();
+}
+
+/***********************************************************************************************
+Draw a circle on the video output
+  x, y - the center of the circle
+  radius - the radius of the circle
+    w - width of the line drawing the circle
+  c - the colour to use for the circle
+  fill - the colour to use for the fill or -1 if no fill
+  aspect - the ration of the x and y axis (a MMFLOAT).  1.0 gives a prefect circle
+***********************************************************************************************/
+/***********************************************************************************************
+Draw a circle on the video output
+    x, y - the center of the circle
+    radius - the radius of the circle
+    w - width of the line drawing the circle
+    c - the colour to use for the circle
+    fill - the colour to use for the fill or -1 if no fill
+    aspect - the ration of the x and y axis (a MMFLOAT).  1.0 gives a prefect circle
+***********************************************************************************************/
+#ifdef rp2350
+void __not_in_flash_func(DrawCircle)(int x, int y, int radius, int w, int c, int fill, MMFLOAT aspect)
+{
+#else
+void DrawCircle(int x, int y, int radius, int w, int c, int fill, MMFLOAT aspect)
+{
+#endif
+    int a, b, P;
+    int A, B;
+    int asp;
+    MMFLOAT aspect2;
+
+    if (w > 1)
+    {
+        if (fill >= 0)
+        {
+            // Thick border with filled centre
+            DrawCircle(x, y, radius, 0, c, c, aspect);
+            aspect2 = ((aspect * (MMFLOAT)radius) - (MMFLOAT)w) / ((MMFLOAT)(radius - w));
+            DrawCircle(x, y, radius - w, 0, fill, fill, aspect2);
+        }
+        else
+        {
+            // OPTIMIZED: Thick border with empty centre - LINE BY LINE
+            int r1 = radius - w;
+            int r2 = radius;
+
+            aspect2 = ((aspect * (MMFLOAT)r2) - (MMFLOAT)w) / ((MMFLOAT)r1);
+
+            // Use new line-by-line algorithm - DRAMATICALLY reduced memory!
+            DrawCircleRingLineByLine(x, y, r1, r2, c, aspect, aspect2);
+        }
+    }
+    else
+    {
+        // OPTIMIZED: Single thickness outline
+        int w1 = w;
+        int r1 = radius;
+
+        if (fill >= 0)
+        {
+            asp = (int)(aspect * 1024.0f);
+
+            while (w >= 0 && radius > 0)
+            {
+                a = 0;
+                b = radius;
+                P = 1 - radius;
+
+                do
+                {
+                    A = (a * asp) >> 10;
+                    B = (b * asp) >> 10;
+
+                    DrawRectangle(x - A, y + b, x + A, y + b, fill);
+                    DrawRectangle(x - A, y - b, x + A, y - b, fill);
+                    DrawRectangle(x - B, y + a, x + B, y + a, fill);
+                    DrawRectangle(x - B, y - a, x + B, y - a, fill);
+
+                    if (P < 0)
+                    {
+                        P += 3 + (a << 1);
+                        a++;
+                    }
+                    else
+                    {
+                        P += 5 + ((a - b) << 1);
+                        a++;
+                        b--;
+                    }
+                } while (a <= b);
+
+                w--;
+                radius--;
+            }
+        }
+
+        if (c != fill)
+        {
+            w = w1;
+            radius = r1;
+            asp = (int)(aspect * 1024.0f);
+
+            while (w >= 0 && radius > 0)
+            {
+                a = 0;
+                b = radius;
+                P = 1 - radius;
+
+                do
+                {
+                    A = (a * asp) >> 10;
+                    B = (b * asp) >> 10;
+
+                    if (w)
+                    {
+                        // OPTIMIZED: Unrolled pixel drawing
+                        DrawPixel(A + x, b + y, c);
+                        DrawPixel(B + x, a + y, c);
+                        DrawPixel(x - A, b + y, c);
+                        DrawPixel(x - B, a + y, c);
+                        DrawPixel(B + x, y - a, c);
+                        DrawPixel(A + x, y - b, c);
+                        DrawPixel(x - A, y - b, c);
+                        DrawPixel(x - B, y - a, c);
+                    }
+
+                    if (P < 0)
+                    {
+                        P += 3 + (a << 1);
+                        a++;
+                    }
+                    else
+                    {
+                        P += 5 + ((a - b) << 1);
+                        a++;
+                        b--;
+                    }
+                } while (a <= b);
+
+                w--;
+                radius--;
+            }
+        }
+    }
+
+    if (Option.Refresh)
+        Display_Refresh();
+}
+
+#define ABS(X) ((X) < 0 ? -(X) : (X))
+#define CLAMP(v, min, max) ((v) < (min) ? (min) : ((v) >= (max) ? (max) - 1 : (v)))
+#define SWAP(a, b)      \
+    do                  \
+    {                   \
+        int _tmp = (a); \
+        (a) = (b);      \
+        (b) = _tmp;     \
+    } while (0)
+
+// Internal optimized version with offset support
+static void CalcLineInternal(int x1, int y1, int x2, int y2, short *xmin, short *xmax, int yoffset)
+{
+    // Handle horizontal line
+    if (y1 == y2)
+    {
+        if (y1 < 0 || y1 >= VRes)
+            return;
+
+        int idx = y1 - yoffset;
+        int minx = (x1 < x2) ? x1 : x2;
+        int maxx = (x1 > x2) ? x1 : x2;
+
+        if (minx < xmin[idx])
+            xmin[idx] = minx;
+        if (maxx > xmax[idx])
+            xmax[idx] = maxx;
+        return;
+    }
+
+    // Handle vertical line
+    if (x1 == x2)
+    {
+        if (y2 < y1)
+            SWAP(y2, y1);
+
+        int ystart = CLAMP(y1, 0, VRes);
+        int yend = CLAMP(y2, 0, VRes);
+
+        for (int y = ystart; y <= yend; y++)
+        {
+            int idx = y - yoffset;
+            if (x1 < xmin[idx])
+                xmin[idx] = x1;
+            if (x1 > xmax[idx])
+                xmax[idx] = x1;
+        }
+        return;
+    }
+
+    // Bresenham's line algorithm
+    if (y1 > y2)
+    {
+        SWAP(y1, y2);
+        SWAP(x1, x2);
+    }
+
+    int absX = ABS(x1 - x2);
+    int absY = ABS(y1 - y2);
+    int offX = x2 < x1 ? 1 : -1;
+    int offY = y2 < y1 ? 1 : -1;
+
+    int x = x2;
+    int y = y2;
+    int err;
+
+    // Update initial point if in bounds
+    if (y >= 0 && y < VRes)
+    {
+        int idx = y - yoffset;
+        if (x < xmin[idx])
+            xmin[idx] = x;
+        if (x > xmax[idx])
+            xmax[idx] = x;
+    }
+
+    if (absX > absY)
+    {
+        // Line is more horizontal
+        err = absX >> 1;
+        while (x != x1)
+        {
+            err = err - absY;
+            if (err < 0)
+            {
+                y += offY;
+                err += absX;
+            }
+            x += offX;
+
+            if (y >= 0 && y < VRes)
+            {
+                int idx = y - yoffset;
+                if (x < xmin[idx])
+                    xmin[idx] = x;
+                if (x > xmax[idx])
+                    xmax[idx] = x;
+            }
+        }
+    }
+    else
+    {
+        // Line is more vertical
+        err = absY >> 1;
+        while (y != y1)
+        {
+            err = err - absX;
+            if (err < 0)
+            {
+                x += offX;
+                err += absY;
+            }
+            y += offY;
+
+            if (y >= 0 && y < VRes)
+            {
+                int idx = y - yoffset;
+                if (x < xmin[idx])
+                    xmin[idx] = x;
+                if (x > xmax[idx])
+                    xmax[idx] = x;
+            }
+        }
+    }
+}
+
+// Original CalcLine - maintains backward compatibility
+void CalcLine(int x1, int y1, int x2, int y2, short *xmin, short *xmax)
+{
+    CalcLineInternal(x1, y1, x2, y2, xmin, xmax, 0);
+}
+
+void DrawTriangle(int x0, int y0, int x1, int y1, int x2, int y2, int c, int f)
+{
+    // Check for degenerate triangle (collinear points)
+    if (x0 * (y1 - y2) + x1 * (y2 - y0) + x2 * (y0 - y1) == 0)
+    {
+        // Sort points by y coordinate
+        if (y0 > y2)
+        {
+            SWAP(y0, y2);
+            SWAP(x0, x2);
+        }
+        if (y0 > y1)
+        {
+            SWAP(y0, y1);
+            SWAP(x0, x1);
+        }
+        if (y1 > y2)
+        {
+            SWAP(y1, y2);
+            SWAP(x1, x2);
+        }
+
+        DrawLine(x0, y0, x2, y2, 1, c);
+        return;
+    }
+
+    // Draw outline only
+    if (f == -1)
+    {
+        DrawLine(x0, y0, x1, y1, 1, c);
+        DrawLine(x1, y1, x2, y2, 1, c);
+        DrawLine(x2, y2, x0, y0, 1, c);
+        return;
+    }
+
+    // Sort vertices by y coordinate (sorting network)
+    if (y0 > y2)
+    {
+        SWAP(y0, y2);
+        SWAP(x0, x2);
+    }
+    if (y0 > y1)
+    {
+        SWAP(y0, y1);
+        SWAP(x0, x1);
+    }
+    if (y1 > y2)
+    {
+        SWAP(y1, y2);
+        SWAP(x1, x2);
+    }
+
+    // Calculate actual y range needed
+    int ymin = (y0 < 0) ? 0 : y0;
+    int ymax = (y2 >= VRes) ? VRes - 1 : y2;
+
+    // Early exit if completely off-screen
+    if (ymin >= VRes || ymax < 0)
+        return;
+
+    int range = ymax - ymin + 1;
+
+    // Allocate only needed range
+    short *xmin = (short *)GetMemory(range * sizeof(short));
+    short *xmax = (short *)GetMemory(range * sizeof(short));
+
+    // Initialize arrays
+    for (int i = 0; i < range; i++)
+    {
+        xmin[i] = 32767;
+        xmax[i] = -32768;
+    }
+
+    // Calculate scanline extents
+    CalcLineInternal(x0, y0, x1, y1, xmin, xmax, ymin);
+    CalcLineInternal(x1, y1, x2, y2, xmin, xmax, ymin);
+    CalcLineInternal(x2, y2, x0, y0, xmin, xmax, ymin);
+
+    // Fill scanlines
+    for (int y = ymin; y <= ymax; y++)
+    {
+        int idx = y - ymin;
+        if (xmax[idx] >= xmin[idx]) // Valid span
+            DrawRectangle(xmin[idx], y, xmax[idx], y, f);
+    }
+
+    // Draw outline
+    DrawLine(x0, y0, x1, y1, 1, c);
+    DrawLine(x1, y1, x2, y2, 1, c);
+    DrawLine(x2, y2, x0, y0, 1, c);
+
+    FreeMemory((unsigned char *)xmin);
+    FreeMemory((unsigned char *)xmax);
+}
+void RestoreTriangle(int bnbr, char *buff)
+{
+    short *p = (short *)buff;
+    int x0 = p[0];
+    int y0 = p[1];
+    int x1 = p[2];
+    int y1 = p[3];
+    int x2 = p[4];
+    int y2 = p[5];
+    char *buffp = (char *)&p[6];
+    if (x0 * (y1 - y2) + x1 * (y2 - y0) + x2 * (y0 - y1) == 0)
+    { // points are co-linear i.e zero area
+        if (y0 > y1)
+        {
+            swap(y0, y1);
+            swap(x0, x1);
+        }
+        if (y1 > y2)
+        {
+            swap(y2, y1);
+            swap(x2, x1);
+        }
+        if (y0 > y1)
+        {
+            swap(y0, y1);
+            swap(x0, x1);
+        }
+        RestoreLine(x0, y0, x2, y2, buffp);
+    }
+    else
+    {
+        if (y0 > y1)
+        {
+            swap(y0, y1);
+            swap(x0, x1);
+        }
+        if (y1 > y2)
+        {
+            swap(y2, y1);
+            swap(x2, x1);
+        }
+        if (y0 > y1)
+        {
+            swap(y0, y1);
+            swap(x0, x1);
+        }
+        short *xmin = (short *)GetMemory(VRes * sizeof(short));
+        short *xmax = (short *)GetMemory(VRes * sizeof(short));
+
+        int y;
+        for (y = y0; y <= y2; y++)
+        {
+            if (y >= 0 && y < VRes)
+            {
+                xmin[y] = 32767;
+                xmax[y] = -1;
+            }
+        }
+        CalcLine(x0, y0, x1, y1, xmin, xmax);
+        CalcLine(x1, y1, x2, y2, xmin, xmax);
+        CalcLine(x2, y2, x0, y0, xmin, xmax);
+        for (y = y0; y <= y2; y++)
+        {
+            DrawBuffer(xmin[y], y, xmax[y], y, (unsigned char *)buffp);
+            buffp += (xmax[y] - xmin[y] + 1) * 3;
+        }
+        FreeMemory((unsigned char *)xmin);
+        FreeMemory((unsigned char *)xmax);
+    }
+}
+void SaveTriangle(int bnbr, char *buff)
+{
+    short *p = (short *)buff;
+    int x0 = p[0];
+    int y0 = p[1];
+    int x1 = p[2];
+    int y1 = p[3];
+    int x2 = p[4];
+    int y2 = p[5];
+    char *buffp = (char *)&p[6];
+    if (x0 * (y1 - y2) + x1 * (y2 - y0) + x2 * (y0 - y1) == 0)
+    { // points are co-linear i.e zero area
+        if (y0 > y1)
+        {
+            swap(y0, y1);
+            swap(x0, x1);
+        }
+        if (y1 > y2)
+        {
+            swap(y2, y1);
+            swap(x2, x1);
+        }
+        if (y0 > y1)
+        {
+            swap(y0, y1);
+            swap(x0, x1);
+        }
+        ReadLine(x0, y0, x2, y2, buffp);
+    }
+    else
+    {
+        if (y0 > y1)
+        {
+            swap(y0, y1);
+            swap(x0, x1);
+        }
+        if (y1 > y2)
+        {
+            swap(y2, y1);
+            swap(x2, x1);
+        }
+        if (y0 > y1)
+        {
+            swap(y0, y1);
+            swap(x0, x1);
+        }
+        short *xmin = (short *)GetMemory(VRes * sizeof(short));
+        short *xmax = (short *)GetMemory(VRes * sizeof(short));
+
+        int y;
+        for (y = y0; y <= y2; y++)
+        {
+            if (y >= 0 && y < VRes)
+            {
+                xmin[y] = 32767;
+                xmax[y] = -1;
+            }
+        }
+        CalcLine(x0, y0, x1, y1, xmin, xmax);
+        CalcLine(x1, y1, x2, y2, xmin, xmax);
+        CalcLine(x2, y2, x0, y0, xmin, xmax);
+        for (y = y0; y <= y2; y++)
+        {
+            ReadBuffer(xmin[y], y, xmax[y], y, (unsigned char *)buffp);
+            buffp += (xmax[y] - xmin[y] + 1) * 3;
+        }
+        FreeMemory((unsigned char *)xmin);
+        FreeMemory((unsigned char *)xmax);
+    }
+}
+int SizeTriangle(int x0, int y0, int x1, int y1, int x2, int y2)
+{
+    int n = 0;
+    if (x0 * (y1 - y2) + x1 * (y2 - y0) + x2 * (y0 - y1) == 0)
+    { // points are co-linear i.e zero area
+        if (y0 > y1)
+        {
+            swap(y0, y1);
+            swap(x0, x1);
+        }
+        if (y1 > y2)
+        {
+            swap(y2, y1);
+            swap(x2, x1);
+        }
+        if (y0 > y1)
+        {
+            swap(y0, y1);
+            swap(x0, x1);
+        }
+        return SizeLine(x0, y0, x2, y2);
+    }
+    else
+    {
+        if (y0 > y1)
+        {
+            swap(y0, y1);
+            swap(x0, x1);
+        }
+        if (y1 > y2)
+        {
+            swap(y2, y1);
+            swap(x2, x1);
+        }
+        if (y0 > y1)
+        {
+            swap(y0, y1);
+            swap(x0, x1);
+        }
+        short *xmin = (short *)GetMemory(VRes * sizeof(short));
+        short *xmax = (short *)GetMemory(VRes * sizeof(short));
+
+        int y;
+        for (y = y0; y <= y2; y++)
+        {
+            if (y >= 0 && y < VRes)
+            {
+                xmin[y] = 32767;
+                xmax[y] = -1;
+            }
+        }
+        CalcLine(x0, y0, x1, y1, xmin, xmax);
+        CalcLine(x1, y1, x2, y2, xmin, xmax);
+        CalcLine(x2, y2, x0, y0, xmin, xmax);
+        for (y = y0; y <= y2; y++)
+        {
+            n += (xmax[y] - xmin[y] + 1);
+        }
+        FreeMemory((unsigned char *)xmin);
+        FreeMemory((unsigned char *)xmax);
+    }
+    return n;
+}
+/*  @endcond */
+
+void cmd_RestoreTriangle(unsigned char *p)
+{
+    getcsargs(&p, 1);
+    if (*argv[0] == '#')
+        argv[0]++;
+    int bnbr = getint(argv[0], 1, MAXBLITBUF) - 1; // get the buffer number
+    if (blitbuff[bnbr].blitbuffptr == NULL)
+        error((char *)"Buffer not in use");
+    if (blitbuff[bnbr].h != TRIANGLE_BUFFER_MARKER)
+        error("Invalid buffer for restore");
+    RestoreTriangle(bnbr, blitbuff[bnbr].blitbuffptr);
+    FreeMemory((unsigned char *)blitbuff[bnbr].blitbuffptr);
+    blitbuff[bnbr].blitbuffptr = NULL;
+}
+
+void cmd_ReadTriangle(unsigned char *p)
+{
+    int bnbr, x1, x2, x3, y1, y2, y3, size;
+    getcsargs(&p, 13);
+    if (argc != 13)
+        SyntaxError();
+    if (*argv[0] == '#')
+        argv[0]++;
+    bnbr = getint(argv[0], 1, MAXBLITBUF) - 1; // get the buffer number
+    if (blitbuff[bnbr].blitbuffptr != NULL)
+        error((char *)"Buffer in use");
+    x1 = getinteger(argv[2]);
+    y1 = getinteger(argv[4]);
+    x2 = getinteger(argv[6]);
+    y2 = getinteger(argv[8]);
+    x3 = getinteger(argv[10]);
+    y3 = getinteger(argv[12]);
+    size = SizeTriangle(x1, y1, x2, y2, x3, y3);
+    blitbuff[bnbr].blitbuffptr = GetMemory(size * 3 + 256);
+    blitbuff[bnbr].h = TRIANGLE_BUFFER_MARKER;
+    short *buff = (short *)blitbuff[bnbr].blitbuffptr;
+    *buff++ = x1;
+    *buff++ = y1;
+    *buff++ = x2;
+    *buff++ = y2;
+    *buff++ = x3;
+    *buff++ = y3;
+    SaveTriangle(bnbr, blitbuff[bnbr].blitbuffptr);
+}
+/*
+ * @cond
+ * The following section will be excluded from the documentation.
+ */
+
+/******************************************************************************************
+ Print a char on the LCD display
+ Any characters not in the font will print as a space.
+ The char is printed at the current location defined by CurrentX and CurrentY
+*****************************************************************************************/
+void GUIPrintChar(int fnt, int fc, int bc, char c, int orientation)
+{
+    unsigned char *p, *fp, *np = NULL, *AllocatedMemory = NULL;
+    int BitNumber, BitPos, x, y, newx, newy, modx, mody, scale = fnt & 0b1111;
+    int height, width;
+    if (PrintPixelMode == 1)
+        bc = -1;
+    if (PrintPixelMode == 2)
+    {
+        int s = bc;
+        bc = fc;
+        fc = s;
+    }
+    if (PrintPixelMode == 5)
+    {
+        fc = bc;
+        bc = -1;
+    }
+    // to get the +, - and = chars for font 6 we fudge them by scaling up font 1
+    if ((fnt & 0xf0) == 0x50 && (c == '-' || c == '+' || c == '='))
+    {
+        fp = (unsigned char *)FontTable[0];
+        scale = scale * 4;
+    }
+    else
+        fp = (unsigned char *)FontTable[fnt >> 4];
+
+    height = fp[1];
+    width = fp[0];
+    modx = mody = 0;
+    if (orientation > ORIENT_VERT)
+    {
+        AllocatedMemory = np = GetMemory(width * height);
+        if (orientation == ORIENT_INVERTED)
+        {
+            modx -= width * scale - 1;
+            mody -= height * scale - 1;
+        }
+        else if (orientation == ORIENT_CCW90DEG)
+        {
+            mody -= width * scale;
+        }
+        else if (orientation == ORIENT_CW90DEG)
+        {
+            modx -= height * scale - 1;
+        }
+    }
+
+    if (c >= fp[2] && c < fp[2] + fp[3])
+    {
+        p = fp + 4 + (int)(((c - fp[2]) * height * width) / 8);
+
+        if (orientation > ORIENT_VERT)
+        { // non-standard orientation
+            if (orientation == ORIENT_INVERTED)
+            {
+                for (y = 0; y < height; y++)
+                {
+                    newy = height - y - 1;
+                    for (x = 0; x < width; x++)
+                    {
+                        newx = width - x - 1;
+                        if ((p[((y * width) + x) / 8] >> (((height * width) - ((y * width) + x) - 1) % 8)) & 1)
+                        {
+                            BitNumber = ((newy * width) + newx);
+                            BitPos = 128 >> (BitNumber % 8);
+                            np[BitNumber / 8] |= BitPos;
+                        }
+                    }
+                }
+            }
+            else if (orientation == ORIENT_CCW90DEG)
+            {
+                for (y = 0; y < height; y++)
+                {
+                    newx = y;
+                    for (x = 0; x < width; x++)
+                    {
+                        newy = width - x - 1;
+                        if ((p[((y * width) + x) / 8] >> (((height * width) - ((y * width) + x) - 1) % 8)) & 1)
+                        {
+                            BitNumber = ((newy * height) + newx);
+                            BitPos = 128 >> (BitNumber % 8);
+                            np[BitNumber / 8] |= BitPos;
+                        }
+                    }
+                }
+            }
+            else if (orientation == ORIENT_CW90DEG)
+            {
+                for (y = 0; y < height; y++)
+                {
+                    newx = height - y - 1;
+                    for (x = 0; x < width; x++)
+                    {
+                        newy = x;
+                        if ((p[((y * width) + x) / 8] >> (((height * width) - ((y * width) + x) - 1) % 8)) & 1)
+                        {
+                            BitNumber = ((newy * height) + newx);
+                            BitPos = 128 >> (BitNumber % 8);
+                            np[BitNumber / 8] |= BitPos;
+                        }
+                    }
+                }
+            }
+        }
+        else
+            np = p;
+
+        if (orientation < ORIENT_CCW90DEG)
+            DrawBitmap(CurrentX + modx, CurrentY + mody, width, height, scale, fc, bc, np);
+        else
+            DrawBitmap(CurrentX + modx, CurrentY + mody, height, width, scale, fc, bc, np);
+    }
+    else
+    {
+        if (orientation < ORIENT_CCW90DEG)
+            DrawRectangle(CurrentX + modx, CurrentY + mody, CurrentX + modx + (width * scale), CurrentY + mody + (height * scale), bc);
+        else
+            DrawRectangle(CurrentX + modx, CurrentY + mody, CurrentX + modx + (height * scale), CurrentY + mody + (width * scale), bc);
+    }
+
+    // to get the . and degree symbols for font 6 we draw a small circle
+    if ((fnt & 0xf0) == 0x50)
+    {
+        if (orientation > ORIENT_VERT)
+        {
+            if (orientation == ORIENT_INVERTED)
+            {
+                if (c == '.')
+                    DrawCircle(CurrentX + modx + (width * scale) / 2, CurrentY + mody + 7 * scale, 4 * scale, 0, fc, fc, 1.0);
+                if (c == 0x60)
+                    DrawCircle(CurrentX + modx + (width * scale) / 2, CurrentY + mody + (height * scale) - 9 * scale, 6 * scale, 2 * scale, fc, -1, 1.0);
+            }
+            else if (orientation == ORIENT_CCW90DEG)
+            {
+                if (c == '.')
+                    DrawCircle(CurrentX + modx + (height * scale) - 7 * scale, CurrentY + mody + (width * scale) / 2, 4 * scale, 0, fc, fc, 1.0);
+                if (c == 0x60)
+                    DrawCircle(CurrentX + modx + 9 * scale, CurrentY + mody + (width * scale) / 2, 6 * scale, 2 * scale, fc, -1, 1.0);
+            }
+            else if (orientation == ORIENT_CW90DEG)
+            {
+                if (c == '.')
+                    DrawCircle(CurrentX + modx + 7 * scale, CurrentY + mody + (width * scale) / 2, 4 * scale, 0, fc, fc, 1.0);
+                if (c == 0x60)
+                    DrawCircle(CurrentX + modx + (height * scale) - 9 * scale, CurrentY + mody + (width * scale) / 2, 6 * scale, 2 * scale, fc, -1, 1.0);
+            }
+        }
+        else
+        {
+            if (c == '.')
+                DrawCircle(CurrentX + modx + (width * scale) / 2, CurrentY + mody + (height * scale) - 7 * scale, 4 * scale, 0, fc, fc, 1.0);
+            if (c == 0x60)
+                DrawCircle(CurrentX + modx + (width * scale) / 2, CurrentY + mody + 9 * scale, 6 * scale, 2 * scale, fc, -1, 1.0);
+        }
+    }
+
+    if (orientation == ORIENT_NORMAL)
+        CurrentX += width * scale;
+    else if (orientation == ORIENT_VERT)
+        CurrentY += height * scale;
+    else if (orientation == ORIENT_INVERTED)
+        CurrentX -= width * scale;
+    else if (orientation == ORIENT_CCW90DEG)
+        CurrentY -= width * scale;
+    else if (orientation == ORIENT_CW90DEG)
+        CurrentY += width * scale;
+    if (orientation > ORIENT_VERT)
+        FreeMemory(AllocatedMemory);
+}
+
+/******************************************************************************************
+ Print a string on the LCD display
+ The string must be a C string (not an MMBasic string)
+ Any characters not in the font will print as a space.
+*****************************************************************************************/
+void GUIPrintString(int x, int y, int fnt, int jh, int jv, int jo, int fc, int bc, char *str)
+{
+    CurrentX = x;
+    CurrentY = y;
+    if (jo == ORIENT_NORMAL)
+    {
+        if (jh == JUSTIFY_CENTER)
+            CurrentX -= (strlen(str) * GetFontWidth(fnt)) / 2;
+        if (jh == JUSTIFY_RIGHT)
+            CurrentX -= (strlen(str) * GetFontWidth(fnt));
+        if (jv == JUSTIFY_MIDDLE)
+            CurrentY -= GetFontHeight(fnt) / 2;
+        if (jv == JUSTIFY_BOTTOM)
+            CurrentY -= GetFontHeight(fnt);
+    }
+    else if (jo == ORIENT_VERT)
+    {
+        if (jh == JUSTIFY_CENTER)
+            CurrentX -= GetFontWidth(fnt) / 2;
+        if (jh == JUSTIFY_RIGHT)
+            CurrentX -= GetFontWidth(fnt);
+        if (jv == JUSTIFY_MIDDLE)
+            CurrentY -= (strlen(str) * GetFontHeight(fnt)) / 2;
+        if (jv == JUSTIFY_BOTTOM)
+            CurrentY -= (strlen(str) * GetFontHeight(fnt));
+    }
+    else if (jo == ORIENT_INVERTED)
+    {
+        if (jh == JUSTIFY_CENTER)
+            CurrentX += (strlen(str) * GetFontWidth(fnt)) / 2;
+        if (jh == JUSTIFY_RIGHT)
+            CurrentX += (strlen(str) * GetFontWidth(fnt));
+        if (jv == JUSTIFY_MIDDLE)
+            CurrentY += GetFontHeight(fnt) / 2;
+        if (jv == JUSTIFY_BOTTOM)
+            CurrentY += GetFontHeight(fnt);
+    }
+    else if (jo == ORIENT_CCW90DEG)
+    {
+        if (jh == JUSTIFY_CENTER)
+            CurrentX -= GetFontHeight(fnt) / 2;
+        if (jh == JUSTIFY_RIGHT)
+            CurrentX -= GetFontHeight(fnt);
+        if (jv == JUSTIFY_MIDDLE)
+            CurrentY += (strlen(str) * GetFontWidth(fnt)) / 2;
+        if (jv == JUSTIFY_BOTTOM)
+            CurrentY += (strlen(str) * GetFontWidth(fnt));
+    }
+    else if (jo == ORIENT_CW90DEG)
+    {
+        if (jh == JUSTIFY_CENTER)
+            CurrentX += GetFontHeight(fnt) / 2;
+        if (jh == JUSTIFY_RIGHT)
+            CurrentX += GetFontHeight(fnt);
+        if (jv == JUSTIFY_MIDDLE)
+            CurrentY -= (strlen(str) * GetFontWidth(fnt)) / 2;
+        if (jv == JUSTIFY_BOTTOM)
+            CurrentY -= (strlen(str) * GetFontWidth(fnt));
+    }
+    while (*str)
+    {
+#ifdef GUICONTROLS
+        if (*str == 0xff && Ctrl[InvokingCtrl].type == 10)
+        {
+            //            fc = rgb(0, 0, 255);                                // this is specially for GUI FORMATBOX
+            str++;
+            GUIPrintChar(fnt, bc, fc, *str++, jo);
+        }
+        else
+#endif
+            GUIPrintChar(fnt, fc, bc, *str++, jo);
+    }
+}
+
+/****************************************************************************************************
+
+ MMBasic commands and functions
+
+****************************************************************************************************/
+
+// get and decode the justify$ string used in TEXT and GUI CAPTION
+// the values are returned via pointers
+int GetJustification(char *p, int *jh, int *jv, int *jo)
+{
+    switch (mytoupper(*p++))
+    {
+    case 'L':
+        *jh = JUSTIFY_LEFT;
+        break;
+    case 'C':
+        *jh = JUSTIFY_CENTER;
+        break;
+    case 'R':
+        *jh = JUSTIFY_RIGHT;
+        break;
+    case 0:
+        return true;
+    default:
+        p--;
+    }
+    skipspace(p);
+    switch (mytoupper(*p++))
+    {
+    case 'T':
+        *jv = JUSTIFY_TOP;
+        break;
+    case 'M':
+        *jv = JUSTIFY_MIDDLE;
+        break;
+    case 'B':
+        *jv = JUSTIFY_BOTTOM;
+        break;
+    case 0:
+        return true;
+    default:
+        p--;
+    }
+    skipspace(p);
+    switch (mytoupper(*p++))
+    {
+    case 'N':
+        *jo = ORIENT_NORMAL;
+        break; // normal
+    case 'V':
+        *jo = ORIENT_VERT;
+        break; // vertical text (top to bottom)
+    case 'I':
+        *jo = ORIENT_INVERTED;
+        break; // inverted
+    case 'U':
+        *jo = ORIENT_CCW90DEG;
+        break; // rotated CCW 90 degrees
+    case 'D':
+        *jo = ORIENT_CW90DEG;
+        break; // rotated CW 90 degrees
+    case 0:
+        return true;
+    default:
+        return false;
+    }
+    return *p == 0;
+}
+
+/*  @endcond */
+void cmd_text(void)
+{
+    int x, y, font, scale, fc, bc;
+    char *s;
+    int jh = 0, jv = 0, jo = 0;
+
+    getcsargs(&cmdline, 17); // this is a macro and must be the first executable stmt
+    CheckDisplay();
+    if (!(argc & 1) || argc < 5)
+        StandardError(2);
+    x = getinteger(argv[0]);
+    y = getinteger(argv[2]);
+    s = (char *)getCstring(argv[4]);
+
+    if (argc > 5 && *argv[6])
+        if (!GetJustification((char *)argv[6], &jh, &jv, &jo))
+            if (!GetJustification((char *)getCstring(argv[6]), &jh, &jv, &jo))
+                error("Justification");
+    ;
+
+    font = (gui_font >> 4) + 1;
+    scale = (gui_font & 0b1111);
+    fc = gui_fcolour;
+    bc = gui_bcolour; // the defaults
+    if (argc > 7 && *argv[8])
+    {
+        if (*argv[8] == '#')
+            argv[8]++;
+        font = getint(argv[8], 1, FONT_TABLE_SIZE);
+    }
+    if (FontTable[font - 1] == NULL)
+        error("Invalid font #%", font);
+    if (argc > 9 && *argv[10])
+        scale = getint(argv[10], 1, 15);
+    if (argc > 11 && *argv[12])
+        fc = getint(argv[12], 0, WHITE);
+    if (argc == 15)
+        bc = getint(argv[14], -1, WHITE);
+    GUIPrintString(x, y, ((font - 1) << 4) | scale, jh, jv, jo, fc, bc, s);
+    if (Option.Refresh)
+        Display_Refresh();
+}
+
+void cmd_pixel(void)
+{
+    CheckDisplay();
+    if (CMM1)
+    {
+        int x, y, value;
+        getcoord((char *)cmdline, &x, &y);
+        cmdline = getclosebracket(cmdline) + 1;
+        while (*cmdline && tokenfunction(*cmdline) != op_equal)
+            cmdline++;
+        if (!*cmdline)
+            SyntaxError();
+        ++cmdline;
+        if (!*cmdline)
+            SyntaxError();
+        value = getColour((char *)cmdline, 0);
+        DrawPixel(x, y, value);
+        lastx = x;
+        lasty = y;
+    }
+    else
+    {
+        int x1, y1, c = 0, n = 0, i, nc = 0;
+        int x1stride = sizeof(MMFLOAT), y1stride = sizeof(MMFLOAT), cstride = sizeof(MMFLOAT);
+        long long int *x1ptr, *y1ptr, *cptr;
+        MMFLOAT *x1fptr, *y1fptr, *cfptr;
+        getcsargs(&cmdline, 5);
+        if (!(argc == 3 || argc == 5))
+            StandardError(2);
+        getargaddress(argv[0], &x1ptr, &x1fptr, &n, &x1stride);
+        if (n != 1)
+            getargaddress(argv[2], &y1ptr, &y1fptr, &n, &y1stride);
+        if (n == 1)
+        {                    // just a single point
+            c = gui_fcolour; // setup the defaults
+            x1 = getinteger(argv[0]);
+            y1 = getinteger(argv[2]);
+            if (argc == 5)
+                c = getint(argv[4], -1, WHITE);
+            else
+                c = gui_fcolour;
+            if (c != -1)
+                DrawPixel(x1, y1, c);
+            else
+            {
+                CurrentX = x1;
+                CurrentY = y1;
+            }
+        }
+        else
+        {
+            c = gui_fcolour; // setup the defaults
+            if (argc == 5)
+            {
+                getargaddress(argv[4], &cptr, &cfptr, &nc, &cstride);
+                if (nc == 1)
+                    c = getint(argv[4], 0, WHITE);
+                else if (nc > 1)
+                {
+                    if (nc < n)
+                        n = nc; // adjust the dimensionality
+                    for (i = 0; i < nc; i++)
+                    {
+                        c = (cfptr == NULL ? STRIDE_INT(cptr, i, cstride) : (int)STRIDE_FLOAT(cfptr, i, cstride));
+                        if (c < 0 || c > WHITE)
+                            StandardErrorParam3(26, (int)c, 0, WHITE);
+                    }
+                }
+            }
+            for (i = 0; i < n; i++)
+            {
+                x1 = (x1fptr == NULL ? STRIDE_INT(x1ptr, i, x1stride) : (int)STRIDE_FLOAT(x1fptr, i, x1stride));
+                y1 = (y1fptr == NULL ? STRIDE_INT(y1ptr, i, y1stride) : (int)STRIDE_FLOAT(y1fptr, i, y1stride));
+                if (nc > 1)
+                    c = (cfptr == NULL ? STRIDE_INT(cptr, i, cstride) : (int)STRIDE_FLOAT(cfptr, i, cstride));
+                DrawPixel(x1, y1, c);
+            }
+        }
+    }
+    if (Option.Refresh)
+        Display_Refresh();
+}
+
+void cmd_circle(void)
+{
+    CheckDisplay();
+    if (CMM1)
+    {
+        int x, y, radius, colour, fill;
+        float aspect;
+        getcsargs(&cmdline, 9);
+        if (argc % 2 == 0 || argc < 3)
+            SyntaxError();
+        if (*argv[0] != '(')
+            error("Expected opening bracket");
+        if (mytoupper(*argv[argc - 1]) == 'F')
+        {
+            argc -= 2;
+            fill = true;
+        }
+        else
+            fill = false;
+        getcoord((char *)argv[0], &x, &y);
+        radius = getinteger(argv[2]);
+        if (radius == 0)
+            return; // nothing to draw
+        if (radius < 1)
+            SyntaxError();
+        if (argc > 3 && *argv[4])
+            colour = getColour((char *)argv[4], 0);
+        else
+            colour = gui_fcolour;
+
+        if (argc > 5 && *argv[6])
+            aspect = getnumber(argv[6]);
+        else
+            aspect = 1;
+
+        DrawCircle(x, y, radius, (fill ? 0 : 1), colour, (fill ? colour : -1), aspect);
+        lastx = x;
+        lasty = y;
+    }
+    else
+    {
+        int x, y, r, w = 0, c = 0, f = 0, n = 0, i, nc = 0, nw = 0, nf = 0, na = 0;
+        int xstride = sizeof(MMFLOAT), ystride = sizeof(MMFLOAT), rstride = sizeof(MMFLOAT);
+        int wstride = sizeof(MMFLOAT), astride = sizeof(MMFLOAT), cstride = sizeof(MMFLOAT), fstride = sizeof(MMFLOAT);
+        MMFLOAT a;
+        long long int *xptr, *yptr, *rptr, *fptr, *wptr, *cptr, *aptr;
+        MMFLOAT *xfptr, *yfptr, *rfptr, *ffptr, *wfptr, *cfptr, *afptr;
+        getcsargs(&cmdline, 13);
+        if (!(argc & 1) || argc < 5)
+            StandardError(2);
+        getargaddress(argv[0], &xptr, &xfptr, &n, &xstride);
+        if (n != 1)
+        {
+            getargaddress(argv[2], &yptr, &yfptr, &n, &ystride);
+            getargaddress(argv[4], &rptr, &rfptr, &n, &rstride);
+        }
+        if (n == 1)
+        {
+            w = 1;
+            c = gui_fcolour;
+            f = -1;
+            a = 1; // setup the defaults
+            x = getinteger(argv[0]);
+            y = getinteger(argv[2]);
+            r = getinteger(argv[4]);
+            if (argc > 5 && *argv[6])
+                w = getint(argv[6], 0, 100);
+            if (argc > 7 && *argv[8])
+                a = getnumber(argv[8]);
+            if (argc > 9 && *argv[10])
+                c = getint(argv[10], 0, WHITE);
+            if (argc > 11)
+                f = getint(argv[12], -1, WHITE);
+            int save_refresh = Option.Refresh;
+            Option.Refresh = 0;
+            DrawCircle(x, y, r, w, c, f, a);
+            Option.Refresh = save_refresh;
+        }
+        else
+        {
+            w = 1;
+            c = gui_fcolour;
+            f = -1;
+            a = 1; // setup the defaults
+            if (argc > 5 && *argv[6])
+            {
+                getargaddress(argv[6], &wptr, &wfptr, &nw, &wstride);
+                if (nw == 1)
+                    w = getint(argv[6], 0, 100);
+                else if (nw > 1)
+                {
+                    if (nw > 1 && nw < n)
+                        n = nw; // adjust the dimensionality
+                    for (i = 0; i < nw; i++)
+                    {
+                        w = (wfptr == NULL ? STRIDE_INT(wptr, i, wstride) : (int)STRIDE_FLOAT(wfptr, i, wstride));
+                        if (w < 0 || w > 100)
+                            StandardErrorParam3(26, (int)w, 0, 100);
+                    }
+                }
+            }
+            if (argc > 7 && *argv[8])
+            {
+                getargaddress(argv[8], &aptr, &afptr, &na, &astride);
+                if (na == 1)
+                    a = getnumber(argv[8]);
+                if (na > 1 && na < n)
+                    n = na; // adjust the dimensionality
+            }
+            if (argc > 9 && *argv[10])
+            {
+                getargaddress(argv[10], &cptr, &cfptr, &nc, &cstride);
+                if (nc == 1)
+                    c = getint(argv[10], 0, WHITE);
+                else if (nc > 1)
+                {
+                    if (nc > 1 && nc < n)
+                        n = nc; // adjust the dimensionality
+                    for (i = 0; i < nc; i++)
+                    {
+                        c = (cfptr == NULL ? STRIDE_INT(cptr, i, cstride) : (int)STRIDE_FLOAT(cfptr, i, cstride));
+                        if (c < 0 || c > WHITE)
+                            StandardErrorParam3(26, (int)c, 0, WHITE);
+                    }
+                }
+            }
+            if (argc > 11)
+            {
+                getargaddress(argv[12], &fptr, &ffptr, &nf, &fstride);
+                if (nf == 1)
+                    f = getint(argv[12], -1, WHITE);
+                else if (nf > 1)
+                {
+                    if (nf > 1 && nf < n)
+                        n = nf; // adjust the dimensionality
+                    for (i = 0; i < nf; i++)
+                    {
+                        f = (ffptr == NULL ? STRIDE_INT(fptr, i, fstride) : (int)STRIDE_FLOAT(ffptr, i, fstride));
+                        if (f < 0 || f > WHITE)
+                            StandardErrorParam3(26, (int)f, 0, WHITE);
+                    }
+                }
+            }
+            int save_refresh = Option.Refresh;
+            Option.Refresh = 0;
+            for (i = 0; i < n; i++)
+            {
+                x = (xfptr == NULL ? STRIDE_INT(xptr, i, xstride) : (int)STRIDE_FLOAT(xfptr, i, xstride));
+                y = (yfptr == NULL ? STRIDE_INT(yptr, i, ystride) : (int)STRIDE_FLOAT(yfptr, i, ystride));
+                r = (rfptr == NULL ? STRIDE_INT(rptr, i, rstride) : (int)STRIDE_FLOAT(rfptr, i, rstride)) - 1;
+                if (nw > 1)
+                    w = (wfptr == NULL ? STRIDE_INT(wptr, i, wstride) : (int)STRIDE_FLOAT(wfptr, i, wstride));
+                if (nc > 1)
+                    c = (cfptr == NULL ? STRIDE_INT(cptr, i, cstride) : (int)STRIDE_FLOAT(cfptr, i, cstride));
+                if (nf > 1)
+                    f = (ffptr == NULL ? STRIDE_INT(fptr, i, fstride) : (int)STRIDE_FLOAT(ffptr, i, fstride));
+                if (na > 1)
+                    a = (afptr == NULL ? (MMFLOAT)STRIDE_INT(aptr, i, astride) : STRIDE_FLOAT(afptr, i, astride));
+                DrawCircle(x, y, r, w, c, f, a);
+            }
+            Option.Refresh = save_refresh;
+        }
+    }
+    if (Option.Refresh)
+        Display_Refresh();
+}
+/*
+ * @cond
+ * The following section will be excluded from the documentation.
+ */
+static short xb0, xb1, yb0, yb1;
+void GetPixel(int x, int y, int *r, int *g, int *b)
+{
+    union colourmap
+    {
+        char rgbbytes[4];
+        unsigned int rgb;
+    } c;
+    ReadBuffer(x, y, x, y, (unsigned char *)&c.rgb);
+    *r = c.rgbbytes[2];
+    *g = c.rgbbytes[1];
+    *b = c.rgbbytes[0];
+}
+
+void MIPS16 drawAAPixel(int x, int y, MMFLOAT alpha, uint32_t c)
+{
+    int bgR, bgG, bgB;
+
+    // Get the current background color of the pixel
+    GetPixel(x, y, &bgR, &bgG, &bgB);
+    union colourmap
+    {
+        unsigned char rgbbytes[4];
+        unsigned int rgb;
+    } col;
+    col.rgb = c;
+    col.rgbbytes[0] = (unsigned char)((MMFLOAT)col.rgbbytes[0] * alpha);
+    col.rgbbytes[0] += (unsigned char)((MMFLOAT)bgB * (1.0 - alpha));
+    col.rgbbytes[1] = (unsigned char)((MMFLOAT)col.rgbbytes[1] * alpha);
+    col.rgbbytes[1] += (unsigned char)((MMFLOAT)bgG * (1.0 - alpha));
+    col.rgbbytes[2] = (unsigned char)((MMFLOAT)col.rgbbytes[2] * alpha);
+    col.rgbbytes[2] += (unsigned char)((MMFLOAT)bgR * (1.0 - alpha));
+    if (((x >= xb0 && x <= xb1) && (y >= yb0 && y <= yb1)))
+        DrawPixel(x, y, col.rgb);
+}
+void MIPS16 drawAALine(MMFLOAT x0, MMFLOAT y0, MMFLOAT x1, MMFLOAT y1, uint32_t c, int w)
+{
+    // Ensure positive integer values for width
+    if (w < 1)
+        w = 1;
+
+    // If drawing a dot, the call drawDot function
+    // if Math.abs(y1 - y0) < 1.0 && Math.abs(x1 - x0) < 1.0
+    //  #drawDot (x0 + x1) / 2, (y0 + y1) / 2
+    //  return
+    xb0 = x0;
+    xb1 = x1;
+    yb0 = y0;
+    yb1 = y1;
+    if (xb1 < xb0)
+        swap(xb1, xb0);
+    if (yb1 < yb0)
+        swap(yb1, yb0);
+
+    // steep means that m > 1
+    int steep = abs(y1 - y0) >= abs(x1 - x0);
+    // swap the co-ordinates if slope > 1 or we
+    // draw backwards
+    if (steep)
+    {
+        swap(x0, y0);
+        swap(x1, y1);
+    }
+    if (x0 > x1)
+    {
+        swap(x0, x1);
+        swap(y0, y1);
+    }
+    // compute the slope
+    MMFLOAT dx = x1 - x0;
+    MMFLOAT dy = y1 - y0;
+
+    MMFLOAT gradient;
+    if (dx <= 0.0)
+        gradient = 1;
+    else
+        gradient = dy / dx;
+
+    // rotate w
+    w = w * sqrt(1 + (gradient * gradient));
+
+    // Handle first endpoint
+    MMFLOAT xend = round(x0);
+    MMFLOAT yend = y0 - (w - 1) * 0.5 + gradient * (xend - x0);
+    MMFLOAT xgap = 1 - (x0 + 0.5 - xend);
+    MMFLOAT xpxl1 = xend; // this will be used in the main loop
+    MMFLOAT ypxl1 = floor(yend);
+    MMFLOAT fpart = yend - floor(yend);
+    MMFLOAT rfpart = 1.0 - fpart;
+
+    if (steep)
+    {
+        drawAAPixel(ypxl1, xpxl1, rfpart * xgap, c);
+        for (int i = 1; i <= w; i++)
+            drawAAPixel(ypxl1 + i, xpxl1, 1, c);
+        drawAAPixel(ypxl1 + w, xpxl1, fpart * xgap, c);
+    }
+    else
+    {
+        drawAAPixel(xpxl1, ypxl1, rfpart * xgap, c);
+        for (int i = 1; i <= w; i++)
+            drawAAPixel(xpxl1, ypxl1 + i, 1, c);
+        drawAAPixel(xpxl1, ypxl1 + w, fpart * xgap, c);
+    }
+    MMFLOAT intery = yend + gradient; // first y-intersection for the main loop
+
+    // Handle second endpoint
+    xend = round(x1);
+    yend = y1 - (w - 1) * 0.5 + gradient * (xend - x1);
+    xgap = 1 - (x1 + 0.5 - xend);
+    MMFLOAT xpxl2 = xend; // this will be used in the main loop
+    MMFLOAT ypxl2 = floor(yend);
+    fpart = yend - floor(yend);
+    rfpart = 1 - fpart;
+
+    if (steep)
+    {
+        drawAAPixel(ypxl2, xpxl2, rfpart * xgap, c);
+        for (int i = 1; i <= w; i++)
+            drawAAPixel(ypxl2 + i, xpxl2, 1, c);
+        drawAAPixel(ypxl2 + w, xpxl2, fpart * xgap, c);
+    }
+    else
+    {
+        drawAAPixel(xpxl2, ypxl2, rfpart * xgap, c);
+        for (int i = 1; i <= w; i++)
+            drawAAPixel(xpxl2, ypxl2 + i, 1, c);
+        drawAAPixel(xpxl2, ypxl2 + w, fpart * xgap, c);
+    }
+    // main loop
+    if (steep)
+    {
+        for (int x = xpxl1 + 1; x <= xpxl2; x++)
+        {
+            fpart = intery - floor(intery);
+            rfpart = 1 - fpart;
+            MMFLOAT y = floor(intery);
+            drawAAPixel(y, x, rfpart, c);
+            for (int i = 1; i < w; i++)
+                drawAAPixel(y + i, x, 1, c);
+            drawAAPixel(y + w, x, fpart, c);
+            intery = intery + gradient;
+        }
+    }
+    else
+    {
+        for (int x = xpxl1 + 1; x <= xpxl2; x++)
+        {
+            fpart = intery - floor(intery);
+            rfpart = 1 - fpart;
+            MMFLOAT y = floor(intery);
+            drawAAPixel(x, y, rfpart, c);
+            for (int i = 1; i < w; i++)
+                drawAAPixel(x, y + i, 1, c);
+            drawAAPixel(x, y + w, fpart, c);
+            intery = intery + gradient;
+        }
+    }
+}
+/*  @endcond */
+
+void cmd_line(void)
+{
+    CheckDisplay();
+    unsigned char *p;
+    if (CMM1)
+    {
+        int x1, y1, x2, y2, colour, box, fill;
+        getcsargs(&cmdline, 5);
+
+        // check if it is actually a LINE INPUT command
+        if (argc < 1)
+            SyntaxError();
+        x1 = lastx;
+        y1 = lasty;
+        colour = gui_fcolour;
+        box = false;
+        fill = false; // set the defaults for optional components
+        p = argv[0];
+        if (tokenfunction(*p) != op_subtract)
+        {
+            // the start point is specified - get the coordinates and step over to where the minus token should be
+            if (*p != '(')
+                error("Expected opening bracket");
+            getcoord((char *)p, &x1, &y1);
+            p = getclosebracket(p) + 1;
+            skipspace(p);
+        }
+        if (tokenfunction(*p) != op_subtract)
+            SyntaxError();
+        p++;
+        skipspace(p);
+        if (*p != '(')
+            error("Expected opening bracket");
+        getcoord((char *)p, &x2, &y2);
+        if (argc > 1 && *argv[2])
+        {
+            colour = getColour((char *)argv[2], 0);
+        }
+        if (argc == 5)
+        {
+            box = (strchr((char *)argv[4], 'b') != NULL || strchr((char *)argv[4], 'B') != NULL);
+            fill = (strchr((char *)argv[4], 'f') != NULL || strchr((char *)argv[4], 'F') != NULL);
+        }
+        if (box)
+            DrawBox(x1, y1, x2, y2, 1, colour, (fill ? colour : -1)); // draw a box
+        else
+            DrawLine(x1, y1, x2, y2, 1, colour); // or just a line
+
+        lastx = x2;
+        lasty = y2; // save in case the user wants the last value
+    }
+    else
+    {
+        int x1, y1, x2, y2, w = 0, c = 0, n = 0, i, nc = 0, nw = 0;
+        if ((p = checkstring(cmdline, (unsigned char *)"PLOT")))
+        {
+            long long int *y1ptr;
+            MMFLOAT *y1fptr;
+            int xs = 0, xinc = 1;
+            int ys = 0, yinc = 1;
+            int y1stride = sizeof(MMFLOAT);
+            getcsargs(&p, 13);
+            getargaddress(argv[0], &y1ptr, &y1fptr, &n, &y1stride);
+            if (n == 1)
+                error("Argument 1 is not an array");
+            nc = n;
+            if (argc >= 3 && *argv[2])
+                nc = getint(argv[2], 1, HRes - 1);
+            if (nc > n)
+                nc = n;
+            if (argc >= 5 && *argv[4])
+                xs = getint(argv[4], 0, HRes - 1);
+            if (argc >= 7 && *argv[6])
+                xinc = getint(argv[6], 1, HRes - 1);
+            if (argc >= 9 && *argv[8])
+                ys = getint(argv[8], g_OptionBase, n - 2 + g_OptionBase);
+            if (argc >= 11 && *argv[10])
+                yinc = getint(argv[10], 1, n - 1);
+            c = gui_fcolour;
+            w = 1; // setup the defaults
+            if (argc == 13)
+                c = getint(argv[12], 0, WHITE);
+            int y = ys - g_OptionBase;
+            for (i = 0; i < (nc - 1); i++)
+            {
+                if (y >= nc)
+                    break;
+                if (y + yinc >= nc)
+                    break;
+                x1 = xs + i * xinc;
+                y1 = (y1fptr == NULL ? STRIDE_INT(y1ptr, y, y1stride) : (int)STRIDE_FLOAT(y1fptr, y, y1stride));
+                if (y1 < 0)
+                    y1 = 0;
+                if (y1 >= VRes)
+                    y1 = VRes - 1;
+                x2 = xs + (i + 1) * xinc;
+                y2 = (y1fptr == NULL ? STRIDE_INT(y1ptr, y + yinc, y1stride) : (int)STRIDE_FLOAT(y1fptr, y + yinc, y1stride));
+                if (x1 >= HRes)
+                    break; // can only get worse so stop now
+                if (x2 >= HRes)
+                    x2 = HRes - 1;
+                if (y2 < 0)
+                    y2 = 0;
+                if (y2 >= VRes)
+                    y2 = VRes - 1;
+                DrawLine(x1, y1, x2, y2, w, c);
+                y += yinc;
+            }
+        }
+        else if ((p = checkstring(cmdline, (unsigned char *)"GRAPH")))
+        {
+            unsigned char *pp = GetTempStrMemory();
+            strcpy((char *)pp, (char *)p);
+            memmove(&pp[2], pp, strlen((char *)p) + 1);
+            pp[0] = '0';
+            pp[1] = ',';
+            polygon(pp, 0);
+            return;
+        }
+        else if ((p = checkstring(cmdline, (unsigned char *)"AA")))
+        {
+            MMFLOAT x1, y1, x2, y2;
+            getcsargs(&p, 11);
+            c = gui_fcolour;
+            ;
+            w = 1; // setup the defaults
+            x1 = getnumber(argv[0]);
+            y1 = getnumber(argv[2]);
+            x2 = getnumber(argv[4]);
+            y2 = getnumber(argv[6]);
+            if (argc > 7 && *argv[8])
+            {
+                w = getint(argv[8], 1, 100);
+            }
+            if (argc == 11)
+                c = getint(argv[10], 0, WHITE);
+            if (x1 == x2 || y1 == y2)
+                DrawLine(x1, y1, x2, y2, w, c);
+            else
+                drawAALine(x1, y1, x2, y2, c, w);
+            return;
+        }
+        else
+        {
+            long long int *x1ptr, *y1ptr, *x2ptr, *y2ptr, *wptr, *cptr;
+            MMFLOAT *x1fptr, *y1fptr, *x2fptr, *y2fptr, *wfptr, *cfptr;
+            int x1stride = sizeof(MMFLOAT), y1stride = sizeof(MMFLOAT), x2stride = sizeof(MMFLOAT), y2stride = sizeof(MMFLOAT);
+            int wstride = sizeof(MMFLOAT), cstride = sizeof(MMFLOAT);
+            getcsargs(&cmdline, 11);
+            if (!(argc & 1) || argc < 3)
+                StandardError(2);
+            getargaddress(argv[0], &x1ptr, &x1fptr, &n, &x1stride);
+            if (n != 1)
+            {
+                if (argc < 7)
+                    StandardError(2);
+                getargaddress(argv[2], &y1ptr, &y1fptr, &n, &y1stride);
+                getargaddress(argv[4], &x2ptr, &x2fptr, &n, &x2stride);
+                getargaddress(argv[6], &y2ptr, &y2fptr, &n, &y2stride);
+            }
+            if (n == 1)
+            {
+                c = gui_fcolour;
+                w = 1; // setup the defaults
+                x1 = getinteger(argv[0]);
+                y1 = getinteger(argv[2]);
+                if (argc >= 5 && *argv[4])
+                    x2 = getinteger(argv[4]);
+                else
+                {
+                    x2 = CurrentX;
+                    CurrentX = x1;
+                }
+                if (argc >= 7 && *argv[6])
+                    y2 = getinteger(argv[6]);
+                else
+                {
+                    y2 = CurrentY;
+                    CurrentY = y1;
+                }
+                if (x1 == CurrentX && y1 == CurrentY)
+                {
+                    CurrentX = x2;
+                    CurrentY = y2;
+                }
+                if (argc > 7 && *argv[8])
+                {
+                    w = getint(argv[8], -100, 100);
+                    if (!w)
+                        return;
+                }
+                if (argc == 11)
+                    c = getint(argv[10], 0, WHITE);
+                DrawLine(x1, y1, x2, y2, w, c);
+            }
+            else
+            {
+                c = gui_fcolour;
+                w = 1; // setup the defaults
+                if (argc > 7 && *argv[8])
+                {
+                    getargaddress(argv[8], &wptr, &wfptr, &nw, &wstride);
+                    if (nw == 1)
+                        w = getint(argv[8], -100, 100);
+                    else if (nw > 1)
+                    {
+                        if (nw > 1 && nw < n)
+                            n = nw; // adjust the dimensionality
+                        for (i = 0; i < nw; i++)
+                        {
+                            w = (wfptr == NULL ? STRIDE_INT(wptr, i, wstride) : (int)STRIDE_FLOAT(wfptr, i, wstride));
+                            if (w < -100 || w > 100)
+                                StandardErrorParam3(26, (int)w, 0, 100);
+                        }
+                    }
+                }
+                if (argc == 11)
+                {
+                    getargaddress(argv[10], &cptr, &cfptr, &nc, &cstride);
+                    if (nc == 1)
+                        c = getint(argv[10], 0, WHITE);
+                    else if (nc > 1)
+                    {
+                        if (nc > 1 && nc < n)
+                            n = nc; // adjust the dimensionality
+                        for (i = 0; i < nc; i++)
+                        {
+                            c = (cfptr == NULL ? STRIDE_INT(cptr, i, cstride) : (int)STRIDE_FLOAT(cfptr, i, cstride));
+                            if (c < 0 || c > WHITE)
+                                StandardErrorParam3(26, (int)c, 0, WHITE);
+                        }
+                    }
+                }
+                for (i = 0; i < n; i++)
+                {
+                    x1 = (x1fptr == NULL ? STRIDE_INT(x1ptr, i, x1stride) : (int)STRIDE_FLOAT(x1fptr, i, x1stride));
+                    y1 = (y1fptr == NULL ? STRIDE_INT(y1ptr, i, y1stride) : (int)STRIDE_FLOAT(y1fptr, i, y1stride));
+                    x2 = (x2fptr == NULL ? STRIDE_INT(x2ptr, i, x2stride) : (int)STRIDE_FLOAT(x2fptr, i, x2stride));
+                    y2 = (y2fptr == NULL ? STRIDE_INT(y2ptr, i, y2stride) : (int)STRIDE_FLOAT(y2fptr, i, y2stride));
+                    if (nw > 1)
+                        w = (wfptr == NULL ? STRIDE_INT(wptr, i, wstride) : (int)STRIDE_FLOAT(wfptr, i, wstride));
+                    if (nc > 1)
+                        c = (cfptr == NULL ? STRIDE_INT(cptr, i, cstride) : (int)STRIDE_FLOAT(cfptr, i, cstride));
+                    if (w)
+                        DrawLine(x1, y1, x2, y2, w, c);
+                }
+            }
+        }
+    }
+    if (Option.Refresh)
+        Display_Refresh();
+}
+
+void cmd_box(void)
+{
+    int x1, y1, w = 0, c = 0, f = 0, n = 0, i, nc = 0, nw = 0, nf = 0, hmod, wmod, nwidth = 0, nheight = 0, width = 0, height = 0;
+    int x1stride = sizeof(MMFLOAT), y1stride = sizeof(MMFLOAT), wistride = sizeof(MMFLOAT), hstride = sizeof(MMFLOAT);
+    int wstride = sizeof(MMFLOAT), cstride = sizeof(MMFLOAT), fstride = sizeof(MMFLOAT);
+    long long int *x1ptr, *y1ptr, *wiptr, *hptr, *wptr, *cptr, *fptr;
+    MMFLOAT *x1fptr, *y1fptr, *wifptr, *hfptr, *wfptr, *cfptr, *ffptr;
+    getcsargs(&cmdline, 13);
+    CheckDisplay();
+    if (!(argc & 1) || argc < 7)
+        StandardError(2);
+    getargaddress(argv[0], &x1ptr, &x1fptr, &n, &x1stride);
+    if (n != 1)
+    {
+        getargaddress(argv[2], &y1ptr, &y1fptr, &n, &y1stride);
+    }
+    if (n == 1)
+    {
+        c = gui_fcolour;
+        w = 1;
+        f = -1; // setup the defaults
+        x1 = getinteger(argv[0]);
+        y1 = getinteger(argv[2]);
+        width = getinteger(argv[4]);
+        height = getinteger(argv[6]);
+        wmod = (width > 0 ? -1 : 1);
+        hmod = (height > 0 ? -1 : 1);
+        if (argc > 7 && *argv[8])
+            w = getint(argv[8], 0, 100);
+        if (argc > 9 && *argv[10])
+            c = getint(argv[10], 0, WHITE);
+        if (argc == 13)
+            f = getint(argv[12], -1, WHITE);
+        if (width != 0 && height != 0)
+            DrawBox(x1, y1, x1 + width + wmod, y1 + height + hmod, w, c, f);
+    }
+    else
+    {
+        getargaddress(argv[4], &wiptr, &wifptr, &nwidth, &wistride);
+        if (nwidth == 1)
+            width = getint(argv[4], 1, HRes);
+        else if (nwidth > 1)
+        {
+            if (nwidth > 1 && nwidth < n)
+                n = nwidth; // adjust the dimensionality
+            for (i = 0; i < nwidth; i++)
+            {
+                width = (wifptr == NULL ? STRIDE_INT(wiptr, i, wistride) : (int)STRIDE_FLOAT(wifptr, i, wistride));
+                if (width < 1 || width > HRes)
+                    error("Width % is invalid (valid is % to %)", (int)width, 1, HRes);
+            }
+        }
+        getargaddress(argv[6], &hptr, &hfptr, &nheight, &hstride);
+        if (nheight == 1)
+            height = getint(argv[6], 1, VRes);
+        else if (nheight > 1)
+        {
+            if (nheight > 1 && nheight < n)
+                n = nheight; // adjust the dimensionality
+            for (i = 0; i < nheight; i++)
+            {
+                height = (hfptr == NULL ? STRIDE_INT(hptr, i, hstride) : (int)STRIDE_FLOAT(hfptr, i, hstride));
+                if (height < 1 || height > VRes)
+                    error("Height % is invalid (valid is % to %)", (int)height, 1, VRes);
+            }
+        }
+        c = gui_fcolour;
+        w = 1; // setup the defaults
+        if (argc > 7 && *argv[8])
+        {
+            getargaddress(argv[8], &wptr, &wfptr, &nw, &wstride);
+            if (nw == 1)
+                w = getint(argv[8], 0, 100);
+            else if (nw > 1)
+            {
+                if (nw > 1 && nw < n)
+                    n = nw; // adjust the dimensionality
+                for (i = 0; i < nw; i++)
+                {
+                    w = (wfptr == NULL ? STRIDE_INT(wptr, i, wstride) : (int)STRIDE_FLOAT(wfptr, i, wstride));
+                    if (w < 0 || w > 100)
+                        StandardErrorParam3(26, (int)w, 0, 100);
+                }
+            }
+        }
+        if (argc > 9 && *argv[10])
+        {
+            getargaddress(argv[10], &cptr, &cfptr, &nc, &cstride);
+            if (nc == 1)
+                c = getint(argv[10], 0, WHITE);
+            else if (nc > 1)
+            {
+                if (nc > 1 && nc < n)
+                    n = nc; // adjust the dimensionality
+                for (i = 0; i < nc; i++)
+                {
+                    c = (cfptr == NULL ? STRIDE_INT(cptr, i, cstride) : (int)STRIDE_FLOAT(cfptr, i, cstride));
+                    if (c < 0 || c > WHITE)
+                        StandardErrorParam3(26, (int)c, 0, WHITE);
+                }
+            }
+        }
+        if (argc == 13)
+        {
+            getargaddress(argv[12], &fptr, &ffptr, &nf, &fstride);
+            if (nf == 1)
+                f = getint(argv[12], 0, WHITE);
+            else if (nf > 1)
+            {
+                if (nf > 1 && nf < n)
+                    n = nf; // adjust the dimensionality
+                for (i = 0; i < nf; i++)
+                {
+                    f = (ffptr == NULL ? STRIDE_INT(fptr, i, fstride) : (int)STRIDE_FLOAT(ffptr, i, fstride));
+                    if (f < -1 || f > WHITE)
+                        StandardErrorParam3(26, (int)f, -1, WHITE);
+                }
+            }
+        }
+        for (i = 0; i < n; i++)
+        {
+            x1 = (x1fptr == NULL ? STRIDE_INT(x1ptr, i, x1stride) : (int)STRIDE_FLOAT(x1fptr, i, x1stride));
+            y1 = (y1fptr == NULL ? STRIDE_INT(y1ptr, i, y1stride) : (int)STRIDE_FLOAT(y1fptr, i, y1stride));
+            if (nwidth > 1)
+                width = (wifptr == NULL ? STRIDE_INT(wiptr, i, wistride) : (int)STRIDE_FLOAT(wifptr, i, wistride));
+            if (nheight > 1)
+                height = (hfptr == NULL ? STRIDE_INT(hptr, i, hstride) : (int)STRIDE_FLOAT(hfptr, i, hstride));
+            wmod = (width > 0 ? -1 : 1);
+            hmod = (height > 0 ? -1 : 1);
+            if (nw > 1)
+                w = (wfptr == NULL ? STRIDE_INT(wptr, i, wstride) : (int)STRIDE_FLOAT(wfptr, i, wstride));
+            if (nc > 1)
+                c = (cfptr == NULL ? STRIDE_INT(cptr, i, cstride) : (int)STRIDE_FLOAT(cfptr, i, cstride));
+            if (nf > 1)
+                f = (ffptr == NULL ? STRIDE_INT(fptr, i, fstride) : (int)STRIDE_FLOAT(ffptr, i, fstride));
+            if (width != 0 && height != 0)
+                DrawBox(x1, y1, x1 + width + wmod, y1 + height + hmod, w, c, f);
+        }
+    }
+    if (Option.Refresh)
+        Display_Refresh();
+}
+/*
+ * @cond
+ * The following section will be excluded from the documentation.
+ */
+
+/*void MIPS16 bezier(float x0, float y0, float x1, float y1, float x2, float y2, float x3, float y3, int c)
+{
+    float tmp, tmp1, tmp2, tmp3, tmp4, tmp5, tmp6, tmp7, tmp8, t = 0.0, xt = x0, yt = y0;
+    int i, xti, yti, xtlast = -1, ytlast = -1;
+    for (i = 0; i < 500; i++)
+    {
+        tmp = 1.0 - t;
+        tmp3 = t * t;
+        tmp4 = tmp * tmp;
+        tmp1 = tmp3 * t;
+        tmp2 = tmp4 * tmp;
+        tmp5 = 3.0 * t;
+        tmp6 = 3.0 * tmp3;
+        tmp7 = tmp5 * tmp4;
+        tmp8 = tmp6 * tmp;
+        xti = (int)xt;
+        yti = (int)yt;
+        xt = ((((tmp2 * x0) + (tmp7 * x1)) + (tmp8 * x2)) + (tmp1 * x3));
+        yt = ((((tmp2 * y0) + (tmp7 * y1)) + (tmp8 * y2)) + (tmp1 * y3));
+        if ((xti != xtlast) || (yti != ytlast))
+        {
+            DrawBuffered(xti, yti, c, 0);
+            xtlast = xti;
+            ytlast = yti;
+        }
+        t += 0.002;
+    }
+    DrawBuffered(0, 0, 0, 1);
+}*/
+
+// Fixed-point configuration: 10.22 format (10 bits integer, 22 bits fraction)
+#define FP_SHIFT 24
+#define FP_ONE (1 << FP_SHIFT)
+#define FP_HALF (1 << (FP_SHIFT - 1))
+
+// Convert integer to fixed-point
+#define INT_TO_FP(x) ((int32_t)(x) << FP_SHIFT)
+
+// Convert fixed-point to integer (with rounding)
+#define FP_TO_INT(x) (((x) + FP_HALF) >> FP_SHIFT)
+
+// Fixed-point multiplication
+#define FP_MUL(a, b) (((int64_t)(a) * (int64_t)(b)) >> FP_SHIFT)
+
+// Binomial coefficient calculation (unchanged)
+static int binomial(int n, int k)
+{
+    if (k > n)
+        return 0;
+    if (k == 0 || k == n)
+        return 1;
+    int result = 1;
+    for (int i = 0; i < k; i++)
+    {
+        result *= (n - i);
+        result /= (i + 1);
+    }
+    return result;
+}
+
+// Fast integer square root for bounding box diagonal
+static int isqrt(int n)
+{
+    if (n < 2)
+        return n;
+
+    int x = n;
+    int y = (x + 1) / 2;
+
+    while (y < x)
+    {
+        x = y;
+        y = (x + n / x) / 2;
+    }
+
+    return x;
+}
+
+// Function to plot n-point Bezier curve using fixed-point arithmetic
+void PlotBezier(int n, int c, int64_t *x, int64_t *y)
+{
+    int32_t t_fp, one_minus_t_fp;
+    int64_t x_val, y_val;
+    int prev_x, prev_y;
+
+    // Calculate bounding box to estimate curve length
+    int min_x = x[0], max_x = x[0];
+    int min_y = y[0], max_y = y[0];
+    for (int i = 1; i < n; i++)
+    {
+        if (x[i] < min_x)
+            min_x = x[i];
+        if (x[i] > max_x)
+            max_x = x[i];
+        if (y[i] < min_y)
+            min_y = y[i];
+        if (y[i] > max_y)
+            max_y = y[i];
+    }
+
+    // Estimate steps based on bounding box diagonal
+    int bbox_width = max_x - min_x;
+    int bbox_height = max_y - min_y;
+    int bbox_diag = isqrt(bbox_width * bbox_width + bbox_height * bbox_height);
+    int num_steps = bbox_diag * 3;
+
+    // Clamp to reasonable range
+    if (num_steps < 10)
+        num_steps = 10;
+    if (num_steps > 2000)
+        num_steps = 2000;
+
+    // Pre-calculate binomial coefficients
+    int binom_coeffs[16]; // Assuming max 16 control points
+    for (int i = 0; i < n; i++)
+    {
+        binom_coeffs[i] = binomial(n - 1, i);
+    }
+
+    // Calculate and draw first point
+    prev_x = x[0];
+    prev_y = y[0];
+    DrawPixel(prev_x, prev_y, c);
+
+    int line_start_x = prev_x;
+    int line_start_y = prev_y;
+    int line_dx = 0;
+    int line_dy = 0;
+    int line_len = 0;
+
+    // Pre-allocate arrays for power calculations (incremental approach)
+    int32_t t_powers[16];   // t^i in fixed-point
+    int32_t omt_powers[16]; // (1-t)^i in fixed-point
+
+    // Plot the Bezier curve using line segments
+    for (int step = 1; step <= num_steps; step++)
+    {
+        // Calculate t in fixed-point: t = step / num_steps
+        t_fp = ((int64_t)step << FP_SHIFT) / num_steps;
+        one_minus_t_fp = FP_ONE - t_fp;
+
+        // Calculate powers incrementally using previous values
+        // t^0 = 1, t^1 = t, t^2 = t * t^1, etc.
+        t_powers[0] = FP_ONE;
+        omt_powers[0] = FP_ONE;
+
+        for (int i = 1; i < n; i++)
+        {
+            t_powers[i] = FP_MUL(t_powers[i - 1], t_fp);
+            omt_powers[i] = FP_MUL(omt_powers[i - 1], one_minus_t_fp);
+        }
+
+        x_val = 0;
+        y_val = 0;
+
+        // Calculate point using Bezier formula with fixed-point
+        for (int i = 0; i < n; i++)
+        {
+            // basis = binomial(n-1,i) * (1-t)^(n-1-i) * t^i
+            // Note: binomial coefficient is integer, powers are fixed-point
+            int32_t basis_fp = FP_MUL(omt_powers[n - 1 - i], t_powers[i]);
+
+            // Multiply by binomial coefficient (integer)
+            basis_fp = basis_fp * binom_coeffs[i];
+
+            // Accumulate: basis * coordinate
+            x_val += (int64_t)basis_fp * x[i];
+            y_val += (int64_t)basis_fp * y[i];
+        }
+
+        // Convert back to integer coordinates
+        // Need to shift by FP_SHIFT since basis_fp is already in fixed-point
+        int curr_x = (int)((x_val + FP_HALF) >> FP_SHIFT);
+        int curr_y = (int)((y_val + FP_HALF) >> FP_SHIFT);
+
+        // Only process if coordinate changed
+        // Only process if coordinate changed
+        if (curr_x != prev_x || curr_y != prev_y)
+        {
+            int dx = curr_x - prev_x;
+            int dy = curr_y - prev_y;
+            // If jump > 1 pixel, bridge it immediately
+            if (dx > 1 || dx < -1 || dy > 1 || dy < -1)
+            {
+                if (line_len > 1)
+                {
+                    DrawLine(line_start_x, line_start_y, prev_x, prev_y, 1, c);
+                }
+                else if (line_len == 1)
+                {
+                    DrawPixel(prev_x, prev_y, c);
+                }
+                DrawLine(prev_x, prev_y, curr_x, curr_y, 1, c);
+                line_len = 0; // reset run
+            }
+            else
+            {
+
+                // Check if this continues the current straight line
+                if (line_len > 0 && dx == line_dx && dy == line_dy)
+                {
+                    line_len++;
+                }
+                else
+                {
+                    // Direction changed - draw accumulated line if any
+                    if (line_len > 1)
+                    {
+                        DrawLine(line_start_x, line_start_y, prev_x, prev_y, 1, c);
+                    }
+                    else if (line_len == 1)
+                    {
+                        DrawPixel(prev_x, prev_y, c);
+                    }
+
+                    // Start new line segment
+                    line_start_x = prev_x;
+                    line_start_y = prev_y;
+                    line_dx = dx;
+                    line_dy = dy;
+                    line_len = 1;
+                }
+            }
+            prev_x = curr_x;
+            prev_y = curr_y;
+        }
+    }
+
+    // Draw final accumulated line segment
+    if (line_len > 1)
+    {
+        DrawLine(line_start_x, line_start_y, prev_x, prev_y, 1, c);
+    }
+    else if (line_len == 1)
+    {
+        DrawPixel(prev_x, prev_y, c);
+    }
+}
+
+void cmd_bezier(void)
+{
+    int64_t *x = NULL;
+    int64_t *y = NULL;
+    int countx, county;
+    getcsargs(&cmdline, 7);
+    if (argc < 3)
+        SyntaxError();
+    countx = parseintegerarray(argv[0], &x, 1, 1, NULL, false, NULL);
+    county = parseintegerarray(argv[2], &y, 2, 1, NULL, false, NULL);
+    if (countx != county)
+        StandardError(16);
+    int n = countx;
+    if (argc >= 5 && *argv[4])
+        n = getint(argv[4], 2, countx);
+    int colour = WHITE;
+    if (argc == 7)
+        colour = getColour((char *)argv[6], 0);
+    PlotBezier(n, colour, x, y);
+}
+/*  @endcond */
+
+// Fast arc drawing using direct scanline rendering
+// Draws arc segments directly without intermediate bitmap buffer
+
+static inline int normalize_angle(int angle)
+{
+    angle %= 360;
+    return angle < 0 ? angle + 360 : angle;
+}
+
+static inline int point_in_arc_sector(int px, int py, int cx, int cy, int start_deg, int end_deg)
+{
+    // Calculate angle of point relative to center
+    int dx = px - cx;
+    int dy = py - cy;
+
+    if (dx == 0 && dy == 0)
+        return 1;
+
+    // Original uses: 0° = up, 90° = right, 180° = down, 270° = left (clockwise from top)
+    // Standard atan2 gives: 0° = right, 90° = up, 180° = left, 270° = down (counter-clockwise from right)
+    // Convert: angle = 90 - atan2_angle, which is equivalent to atan2(dx, -dy)
+    float angle = atan2f(dx, -dy) * 57.29577951f; // 180/PI
+    if (angle < 0)
+        angle += 360.0f;
+
+    int angle_deg = (int)angle;
+
+    // Handle wrap-around
+    if (end_deg < start_deg)
+        end_deg += 360;
+    if (angle_deg < start_deg)
+        angle_deg += 360;
+
+    return (angle_deg >= start_deg && angle_deg <= end_deg);
+}
+
+void cmd_arc(void)
+{
+    int x, y, r1, r2, c;
+    int rad1, rad2;
+
+    getcsargs(&cmdline, 13);
+    if (!(argc == 11 || argc == 13))
+        StandardError(2);
+    CheckDisplay();
+
+    x = getinteger(argv[0]);
+    y = getinteger(argv[2]);
+    r1 = getinteger(argv[4]);
+
+    if (*argv[6])
+        r2 = getinteger(argv[6]);
+    else
+    {
+        r2 = r1;
+        r1--;
+    }
+
+    if (r2 < r1)
+        error("Inner radius < outer");
+
+    rad1 = getnumber(argv[8]);
+    rad2 = getnumber(argv[10]);
+
+    // Normalize angles to 0-359
+    rad1 = normalize_angle(rad1);
+    rad2 = normalize_angle(rad2);
+
+    if (rad1 == rad2)
+        error("Radials");
+
+    if (argc == 13)
+        c = getint(argv[12], 0, WHITE);
+    else
+        c = gui_fcolour;
+
+    // Ensure rad2 > rad1 for sweep direction
+    if (rad2 < rad1)
+        rad2 += 360;
+
+    int save_refresh = Option.Refresh;
+    Option.Refresh = 0;
+    // Draw arc using scanline method
+    // Iterate through bounding box
+    int min_y = y - r2;
+    int max_y = y + r2;
+    for (int scan_y = min_y; scan_y <= max_y; scan_y++)
+    {
+        int dy = scan_y - y;
+        int dy2 = dy * dy;
+
+        // Calculate x range for outer circle at this y
+        int dx_outer = (int)sqrtf(r2 * r2 - dy2);
+        int dx_inner = (r1 * r1 > dy2) ? (int)sqrtf(r1 * r1 - dy2) : 0;
+
+        // Check left and right segments
+        for (int side = 0; side < 2; side++)
+        {
+            int x_start, x_end;
+
+            if (side == 0)
+            {
+                // Left side: from -dx_outer to -dx_inner
+                x_start = x - dx_outer;
+                x_end = x - dx_inner;
+            }
+            else
+            {
+                // Right side: from dx_inner to dx_outer
+                x_start = x + dx_inner;
+                x_end = x + dx_outer;
+            }
+
+            // Find the actual segment within the arc
+            int segment_start = -1;
+            int segment_end = -1;
+
+            for (int scan_x = x_start; scan_x <= x_end; scan_x++)
+            {
+                if (point_in_arc_sector(scan_x, scan_y, x, y, rad1, rad2))
+                {
+                    if (segment_start == -1)
+                        segment_start = scan_x;
+                    segment_end = scan_x;
+                }
+                else if (segment_start != -1)
+                {
+                    // Draw completed segment
+                    DrawRectangle(segment_start, scan_y, segment_end, scan_y, c);
+                    segment_start = -1;
+                }
+            }
+
+            // Draw any remaining segment
+            if (segment_start != -1)
+            {
+                DrawRectangle(segment_start, scan_y, segment_end, scan_y, c);
+            }
+        }
+    }
+
+    Option.Refresh = save_refresh;
+    if (Option.Refresh)
+        Display_Refresh();
+}
+
+/*
+ * @cond
+ * The following section will be excluded from the documentation.
+ */
+
+typedef struct
+{
+    unsigned char red;
+    unsigned char green;
+    unsigned char blue;
+} rgb_t;
+#define TFLOAT float
+typedef struct
+{
+    TFLOAT xpos;    // current position and heading
+    TFLOAT ypos;    // (uses floating-point numbers for
+    TFLOAT heading; //  increased accuracy)
+
+    rgb_t pen_color;  // current pen color
+    rgb_t fill_color; // current fill color
+    bool pendown;     // currently drawing?
+    bool filled;      // currently filling?
+} fill_t;
+fill_t main_fill;
+fill_t backup_fill;
+int main_fill_poly_vertex_count = 0; // polygon vertex count
+TFLOAT *main_fill_polyX = NULL;      // polygon vertex x-coords
+TFLOAT *main_fill_polyY = NULL;      // polygon vertex y-coords
+
+void fill_set_pen_color(int red, int green, int blue)
+{
+    main_fill.pen_color.red = red;
+    main_fill.pen_color.green = green;
+    main_fill.pen_color.blue = blue;
+}
+
+void fill_set_fill_color(int red, int green, int blue)
+{
+    main_fill.fill_color.red = red;
+    main_fill.fill_color.green = green;
+    main_fill.fill_color.blue = blue;
+}
+static void fill_begin_fill()
+{
+    main_fill.filled = true;
+    main_fill_poly_vertex_count = 0;
+}
+
+// Edge structure for polygon fill - pre-computed edge data
+typedef struct
+{
+    TFLOAT x0, y0, x1, y1;
+    TFLOAT dx, dy;
+    int valid;
+} FillEdge;
+
+static void fill_end_fill(int count, int ystart, int yend)
+{
+    // Dynamically allocate arrays to reduce stack usage
+    TFLOAT *nodeX = GetMemory(count * sizeof(TFLOAT));
+    if (nodeX == NULL)
+    {
+        error("Not enough memory for polygon fill");
+        return;
+    }
+
+    const int f = (main_fill.fill_color.red << 16) |
+                  (main_fill.fill_color.green << 8) |
+                  main_fill.fill_color.blue;
+    const int c = (main_fill.pen_color.red << 16) |
+                  (main_fill.pen_color.green << 8) |
+                  main_fill.pen_color.blue;
+
+    const int vertex_count = main_fill_poly_vertex_count;
+
+    // Dynamically allocate edge array
+    FillEdge *pEdges = GetMemory(vertex_count * sizeof(FillEdge));
+    if (pEdges == NULL)
+    {
+        FreeMemory((void *)nodeX);
+        error("Not enough memory for polygon edges");
+        return;
+    }
+
+    // Pre-process edges
+    for (int i = 0; i < vertex_count; i++)
+    {
+        int j = (i + 1) % vertex_count;
+        pEdges[i].x0 = main_fill_polyX[i];
+        pEdges[i].y0 = main_fill_polyY[i];
+        pEdges[i].x1 = main_fill_polyX[j];
+        pEdges[i].y1 = main_fill_polyY[j];
+        pEdges[i].dy = pEdges[i].y1 - pEdges[i].y0;
+        pEdges[i].dx = pEdges[i].x1 - pEdges[i].x0;
+
+        // Pre-check if edge is horizontal (can skip during scanline processing)
+        pEdges[i].valid = (pEdges[i].dy != 0);
+    }
+
+    // Scanline loop
+    for (int y = ystart; y < yend; y++)
+    {
+        int nodes = 0;
+        const TFLOAT yf = (TFLOAT)y;
+
+        // Find intercepts - optimized with pre-computed edge data
+        for (int i = 0; i < vertex_count; i++)
+        {
+            if (!pEdges[i].valid)
+                continue;
+
+            const FillEdge *e = &pEdges[i];
+
+            // Edge crossing check
+            if ((e->y0 < yf && e->y1 >= yf) || (e->y1 < yf && e->y0 >= yf))
+            {
+                // Fast intercept calculation
+                nodeX[nodes++] = e->x0 + (yf - e->y0) * e->dx / e->dy;
+            }
+        }
+
+        // Optimized sort
+        if (nodes == 2)
+        {
+            // Special case: just swap if needed
+            if (nodeX[0] > nodeX[1])
+            {
+                TFLOAT temp = nodeX[0];
+                nodeX[0] = nodeX[1];
+                nodeX[1] = temp;
+            }
+        }
+        else if (nodes > 2)
+        {
+            // Insertion sort for small n
+            for (int i = 1; i < nodes; i++)
+            {
+                TFLOAT temp = nodeX[i];
+                int j = i;
+                while (j > 0 && nodeX[j - 1] > temp)
+                {
+                    nodeX[j] = nodeX[j - 1];
+                    j--;
+                }
+                nodeX[j] = temp;
+            }
+        }
+
+        // Fill spans
+        for (int i = 0; i < nodes - 1; i += 2)
+        {
+            int xstart = (int)(nodeX[i] + 1.0f);
+            int xend = (int)nodeX[i + 1];
+
+            if (xstart <= xend)
+            {
+                DrawRectangle(xstart, y, xend, y, f);
+            }
+        }
+    }
+
+    main_fill.filled = false;
+
+    // Redraw outline
+    for (int i = 0; i < vertex_count; i++)
+    {
+        //        int next = (i + 1) % vertex_count;
+        DrawLine((int)(pEdges[i].x0 + 0.5f), (int)(pEdges[i].y0 + 0.5f),
+                 (int)(pEdges[i].x1 + 0.5f), (int)(pEdges[i].y1 + 0.5f), 1, c);
+    }
+
+    // Free dynamically allocated memory
+    FreeMemory((void *)pEdges);
+    FreeMemory((void *)nodeX);
+}
+void polygon(unsigned char *p, int close)
+{
+    int xcount = 0;
+    long long int *xptr = NULL, *yptr = NULL, xptr2 = 0, yptr2 = 0, *polycount = NULL, *cptr = NULL, *fptr = NULL;
+    MMFLOAT *polycountf = NULL, *cfptr = NULL, *ffptr = NULL, *xfptr = NULL, *yfptr = NULL, xfptr2 = 0, yfptr2 = 0;
+    int i, f = 0, c, xtot = 0, ymax = 0, ymin = 1000000, idx = 0;
+    int xstride = sizeof(MMFLOAT), ystride = sizeof(MMFLOAT);
+    int n = 0, nx = 0, ny = 0, nc = 0, nf = 0;
+    getcsargs(&p, 9);
+    CheckDisplay();
+    getargaddress(argv[0], &polycount, &polycountf, &n, NULL);
+    if (n == 1)
+    {
+        xcount = xtot = getinteger(argv[0]);
+        if ((xcount < 3 || xcount > 9999) && xcount != 0)
+            error("Invalid number of vertices");
+        getargaddress(argv[2], &xptr, &xfptr, &nx, &xstride);
+        if (xcount == 0)
+        {
+            xcount = xtot = nx;
+        }
+        if (nx < xtot)
+            error("X Dimensions %", nx);
+        getargaddress(argv[4], &yptr, &yfptr, &ny, &ystride);
+        if (ny < xtot)
+            error("Y Dimensions %", ny);
+        if (xptr)
+            xptr2 = STRIDE_INT(xptr, 0, xstride);
+        else
+            xfptr2 = STRIDE_FLOAT(xfptr, 0, xstride);
+        if (yptr)
+            yptr2 = STRIDE_INT(yptr, 0, ystride);
+        else
+            yfptr2 = STRIDE_FLOAT(yfptr, 0, ystride);
+        c = gui_fcolour; // setup the defaults
+        if (argc > 5 && *argv[6])
+            c = getint(argv[6], 0, WHITE);
+        if (argc > 7 && *argv[8])
+        {
+            main_fill_polyX = (TFLOAT *)GetTempMainMemory((xtot + 1) * sizeof(TFLOAT));
+            main_fill_polyY = (TFLOAT *)GetTempMainMemory((xtot + 1) * sizeof(TFLOAT));
+            f = getint(argv[8], 0, WHITE);
+            fill_set_fill_color((f >> 16) & 0xFF, (f >> 8) & 0xFF, f & 0xFF);
+            fill_set_pen_color((c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF);
+            fill_begin_fill();
+        }
+        idx = 0;
+        for (i = 0; i < xcount - 1; i++)
+        {
+            if (argc > 7)
+            {
+                main_fill_polyX[main_fill_poly_vertex_count] = (xfptr == NULL ? (TFLOAT)STRIDE_INT(xptr, idx, xstride) : (TFLOAT)STRIDE_FLOAT(xfptr, idx, xstride));
+                main_fill_polyY[main_fill_poly_vertex_count] = (yfptr == NULL ? (TFLOAT)STRIDE_INT(yptr, idx, ystride) : (TFLOAT)STRIDE_FLOAT(yfptr, idx, ystride));
+                idx++;
+                if (main_fill_polyY[main_fill_poly_vertex_count] > ymax)
+                    ymax = main_fill_polyY[main_fill_poly_vertex_count];
+                if (main_fill_polyY[main_fill_poly_vertex_count] < ymin)
+                    ymin = main_fill_polyY[main_fill_poly_vertex_count];
+                main_fill_poly_vertex_count++;
+            }
+            else
+            {
+                int x1 = (xfptr == NULL ? STRIDE_INT(xptr, idx, xstride) : (int)STRIDE_FLOAT(xfptr, idx, xstride));
+                int x2 = (xfptr == NULL ? STRIDE_INT(xptr, idx + 1, xstride) : (int)STRIDE_FLOAT(xfptr, idx + 1, xstride));
+                int y1 = (yfptr == NULL ? STRIDE_INT(yptr, idx, ystride) : (int)STRIDE_FLOAT(yfptr, idx, ystride));
+                int y2 = (yfptr == NULL ? STRIDE_INT(yptr, idx + 1, ystride) : (int)STRIDE_FLOAT(yfptr, idx + 1, ystride));
+                idx++;
+                DrawLine(x1, y1, x2, y2, 1, c);
+            }
+        }
+        if (argc > 7)
+        {
+            main_fill_polyX[main_fill_poly_vertex_count] = (xfptr == NULL ? (TFLOAT)STRIDE_INT(xptr, idx, xstride) : (TFLOAT)STRIDE_FLOAT(xfptr, idx, xstride));
+            main_fill_polyY[main_fill_poly_vertex_count] = (yfptr == NULL ? (TFLOAT)STRIDE_INT(yptr, idx, ystride) : (TFLOAT)STRIDE_FLOAT(yfptr, idx, ystride));
+            if (main_fill_polyY[main_fill_poly_vertex_count] > ymax)
+                ymax = main_fill_polyY[main_fill_poly_vertex_count];
+            if (main_fill_polyY[main_fill_poly_vertex_count] < ymin)
+                ymin = main_fill_polyY[main_fill_poly_vertex_count];
+            if (main_fill_polyY[main_fill_poly_vertex_count] != main_fill_polyY[0] || main_fill_polyX[main_fill_poly_vertex_count] != main_fill_polyX[0])
+            {
+                main_fill_poly_vertex_count++;
+                main_fill_polyX[main_fill_poly_vertex_count] = main_fill_polyX[0];
+                main_fill_polyY[main_fill_poly_vertex_count] = main_fill_polyY[0];
+            }
+            main_fill_poly_vertex_count++;
+            if (main_fill_poly_vertex_count > 5)
+            {
+                fill_end_fill(xcount, ymin, ymax);
+            }
+            else if (main_fill_poly_vertex_count == 5)
+            {
+                DrawTriangle(main_fill_polyX[0], main_fill_polyY[0], main_fill_polyX[1], main_fill_polyY[1], main_fill_polyX[2], main_fill_polyY[2], f, f);
+                DrawTriangle(main_fill_polyX[0], main_fill_polyY[0], main_fill_polyX[2], main_fill_polyY[2], main_fill_polyX[3], main_fill_polyY[3], f, f);
+                if (f != c)
+                {
+                    DrawLine(main_fill_polyX[0], main_fill_polyY[0], main_fill_polyX[1], main_fill_polyY[1], 1, c);
+                    DrawLine(main_fill_polyX[1], main_fill_polyY[1], main_fill_polyX[2], main_fill_polyY[2], 1, c);
+                    DrawLine(main_fill_polyX[2], main_fill_polyY[2], main_fill_polyX[3], main_fill_polyY[3], 1, c);
+                    DrawLine(main_fill_polyX[3], main_fill_polyY[3], main_fill_polyX[4], main_fill_polyY[4], 1, c);
+                }
+            }
+            else
+            {
+                DrawTriangle(main_fill_polyX[0], main_fill_polyY[0], main_fill_polyX[1], main_fill_polyY[1], main_fill_polyX[2], main_fill_polyY[2], c, f);
+            }
+        }
+        else if (close)
+        {
+            int x1 = (xfptr == NULL ? STRIDE_INT(xptr, idx, xstride) : (int)STRIDE_FLOAT(xfptr, idx, xstride));
+            int x2 = (xfptr == NULL ? xptr2 : (int)xfptr2);
+            int y1 = (yfptr == NULL ? STRIDE_INT(yptr, idx, ystride) : (int)STRIDE_FLOAT(yfptr, idx, ystride));
+            int y2 = (yfptr == NULL ? yptr2 : (int)yfptr2);
+            DrawLine(x1, y1, x2, y2, 1, c);
+        }
+    }
+    else
+    {
+        int *cc = GetTempMainMemory(n * sizeof(int)); // array for foreground colours
+        int *ff = GetTempMainMemory(n * sizeof(int)); // array for background colours
+        int xstart, j, xmax = 0;
+        for (i = 0; i < n; i++)
+        {
+            if ((polycountf == NULL ? polycount[i] : (int)polycountf[i]) > xmax)
+                xmax = (polycountf == NULL ? polycount[i] : (int)polycountf[i]);
+            if (!(polycountf == NULL ? polycount[i] : (int)polycountf[i]))
+                break;
+            xtot += (polycountf == NULL ? polycount[i] : (int)polycountf[i]);
+            if ((polycountf == NULL ? polycount[i] : (int)polycountf[i]) < 3 || (polycountf == NULL ? polycount[i] : (int)polycountf[i]) > 9999)
+                error("Invalid number of vertices, polygon %", i);
+        }
+        n = i;
+        getargaddress(argv[2], &xptr, &xfptr, &nx, &xstride);
+        if (nx < xtot)
+            error("X Dimensions %", nx);
+        getargaddress(argv[4], &yptr, &yfptr, &ny, &ystride);
+        if (ny < xtot)
+            error("Y Dimensions %", ny);
+        main_fill_polyX = (TFLOAT *)GetTempMainMemory(xmax * sizeof(TFLOAT));
+        main_fill_polyY = (TFLOAT *)GetTempMainMemory(xmax * sizeof(TFLOAT));
+        if (argc > 5 && *argv[6])
+        { // foreground colour specified
+            getargaddress(argv[6], &cptr, &cfptr, &nc, NULL);
+            if (nc == 1)
+                for (i = 0; i < n; i++)
+                    cc[i] = getint(argv[6], 0, WHITE);
+            else
+            {
+                if (nc < n)
+                    error("Foreground colour Dimensions");
+                for (i = 0; i < n; i++)
+                {
+                    cc[i] = (cfptr == NULL ? cptr[i] : (int)cfptr[i]);
+                    if (cc[i] < 0 || cc[i] > 0xFFFFFF)
+                        StandardErrorParam3(26, (int)cc[i], 0, 0xFFFFFF);
+                }
+            }
+        }
+        else
+            for (i = 0; i < n; i++)
+                cc[i] = gui_fcolour;
+        if (argc > 7)
+        { // background colour specified
+            getargaddress(argv[8], &fptr, &ffptr, &nf, NULL);
+            if (nf == 1)
+                for (i = 0; i < n; i++)
+                    ff[i] = getint(argv[8], 0, WHITE);
+            else
+            {
+                if (nf < n)
+                    error("Background colour Dimensions");
+                for (i = 0; i < n; i++)
+                {
+                    ff[i] = (ffptr == NULL ? fptr[i] : (int)ffptr[i]);
+                    if (ff[i] < 0 || ff[i] > 0xFFFFFF)
+                        StandardErrorParam3(26, (int)ff[i], 0, 0xFFFFFF);
+                }
+            }
+        }
+        xstart = 0;
+        idx = 0;
+        for (i = 0; i < n; i++)
+        {
+            if (xptr)
+                xptr2 = STRIDE_INT(xptr, idx, xstride);
+            else
+                xfptr2 = STRIDE_FLOAT(xfptr, idx, xstride);
+            if (yptr)
+                yptr2 = STRIDE_INT(yptr, idx, ystride);
+            else
+                yfptr2 = STRIDE_FLOAT(yfptr, idx, ystride);
+            ymax = 0;
+            ymin = 1000000;
+            main_fill_poly_vertex_count = 0;
+            xcount = (int)(polycountf == NULL ? polycount[i] : (int)polycountf[i]);
+            if (argc > 7 && *argv[8])
+            {
+                fill_set_pen_color((cc[i] >> 16) & 0xFF, (cc[i] >> 8) & 0xFF, cc[i] & 0xFF);
+                fill_set_fill_color((ff[i] >> 16) & 0xFF, (ff[i] >> 8) & 0xFF, ff[i] & 0xFF);
+                fill_begin_fill();
+            }
+            for (j = xstart; j < xstart + xcount - 1; j++)
+            {
+                if (argc > 7)
+                {
+                    main_fill_polyX[main_fill_poly_vertex_count] = (xfptr == NULL ? (TFLOAT)STRIDE_INT(xptr, idx, xstride) : (TFLOAT)STRIDE_FLOAT(xfptr, idx, xstride));
+                    main_fill_polyY[main_fill_poly_vertex_count] = (yfptr == NULL ? (TFLOAT)STRIDE_INT(yptr, idx, ystride) : (TFLOAT)STRIDE_FLOAT(yfptr, idx, ystride));
+                    idx++;
+                    if (main_fill_polyY[main_fill_poly_vertex_count] > ymax)
+                        ymax = main_fill_polyY[main_fill_poly_vertex_count];
+                    if (main_fill_polyY[main_fill_poly_vertex_count] < ymin)
+                        ymin = main_fill_polyY[main_fill_poly_vertex_count];
+                    main_fill_poly_vertex_count++;
+                }
+                else
+                {
+                    int x1 = (xfptr == NULL ? STRIDE_INT(xptr, idx, xstride) : (int)STRIDE_FLOAT(xfptr, idx, xstride));
+                    int x2 = (xfptr == NULL ? STRIDE_INT(xptr, idx + 1, xstride) : (int)STRIDE_FLOAT(xfptr, idx + 1, xstride));
+                    int y1 = (yfptr == NULL ? STRIDE_INT(yptr, idx, ystride) : (int)STRIDE_FLOAT(yfptr, idx, ystride));
+                    int y2 = (yfptr == NULL ? STRIDE_INT(yptr, idx + 1, ystride) : (int)STRIDE_FLOAT(yfptr, idx + 1, ystride));
+                    idx++;
+                    DrawLine(x1, y1, x2, y2, 1, cc[i]);
+                }
+            }
+            if (argc > 7)
+            {
+                main_fill_polyX[main_fill_poly_vertex_count] = (xfptr == NULL ? (TFLOAT)STRIDE_INT(xptr, idx, xstride) : (TFLOAT)STRIDE_FLOAT(xfptr, idx, xstride));
+                main_fill_polyY[main_fill_poly_vertex_count] = (yfptr == NULL ? (TFLOAT)STRIDE_INT(yptr, idx, ystride) : (TFLOAT)STRIDE_FLOAT(yfptr, idx, ystride));
+                idx++;
+                if (main_fill_polyY[main_fill_poly_vertex_count] > ymax)
+                    ymax = main_fill_polyY[main_fill_poly_vertex_count];
+                if (main_fill_polyY[main_fill_poly_vertex_count] < ymin)
+                    ymin = main_fill_polyY[main_fill_poly_vertex_count];
+                if (main_fill_polyY[main_fill_poly_vertex_count] != main_fill_polyY[0] || main_fill_polyX[main_fill_poly_vertex_count] != main_fill_polyX[0])
+                {
+                    main_fill_poly_vertex_count++;
+                    main_fill_polyX[main_fill_poly_vertex_count] = main_fill_polyX[0];
+                    main_fill_polyY[main_fill_poly_vertex_count] = main_fill_polyY[0];
+                }
+                main_fill_poly_vertex_count++;
+                if (main_fill_poly_vertex_count > 5)
+                {
+                    fill_end_fill(xcount, ymin, ymax);
+                }
+                else if (main_fill_poly_vertex_count == 5)
+                {
+                    DrawTriangle(main_fill_polyX[0], main_fill_polyY[0], main_fill_polyX[1], main_fill_polyY[1], main_fill_polyX[2], main_fill_polyY[2], ff[i], ff[i]);
+                    DrawTriangle(main_fill_polyX[0], main_fill_polyY[0], main_fill_polyX[2], main_fill_polyY[2], main_fill_polyX[3], main_fill_polyY[3], ff[i], ff[i]);
+                    if (ff[i] != cc[i])
+                    {
+                        DrawLine(main_fill_polyX[0], main_fill_polyY[0], main_fill_polyX[1], main_fill_polyY[1], 1, cc[i]);
+                        DrawLine(main_fill_polyX[1], main_fill_polyY[1], main_fill_polyX[2], main_fill_polyY[2], 1, cc[i]);
+                        DrawLine(main_fill_polyX[2], main_fill_polyY[2], main_fill_polyX[3], main_fill_polyY[3], 1, cc[i]);
+                        DrawLine(main_fill_polyX[3], main_fill_polyY[3], main_fill_polyX[4], main_fill_polyY[4], 1, cc[i]);
+                    }
+                }
+                else
+                {
+                    DrawTriangle(main_fill_polyX[0], main_fill_polyY[0], main_fill_polyX[1], main_fill_polyY[1], main_fill_polyX[2], main_fill_polyY[2], cc[i], ff[i]);
+                }
+            }
+            else
+            {
+                int x1 = (xfptr == NULL ? STRIDE_INT(xptr, idx, xstride) : (int)STRIDE_FLOAT(xfptr, idx, xstride));
+                int x2 = (xfptr == NULL ? xptr2 : (int)xfptr2);
+                int y1 = (yfptr == NULL ? STRIDE_INT(yptr, idx, ystride) : (int)STRIDE_FLOAT(yfptr, idx, ystride));
+                int y2 = (yfptr == NULL ? yptr2 : (int)yfptr2);
+                DrawLine(x1, y1, x2, y2, 1, cc[i]);
+                idx++;
+            }
+
+            xstart += xcount;
+        }
+    }
+}
+/*  @endcond */
+void cmd_polygon(void)
+{
+    polygon(cmdline, 1);
+}
+
+void MIPS16 cmd_rbox(void)
+{
+    int x1, y1, wi, h, w = 0, c = 0, f = 0, r = 0, n = 0, i, nc = 0, nw = 0, nf = 0, hmod, wmod;
+    int x1stride = sizeof(MMFLOAT), y1stride = sizeof(MMFLOAT), wistride = sizeof(MMFLOAT), hstride = sizeof(MMFLOAT);
+    int wstride = sizeof(MMFLOAT), cstride = sizeof(MMFLOAT), fstride = sizeof(MMFLOAT);
+    long long int *x1ptr, *y1ptr, *wiptr, *hptr, *wptr, *cptr, *fptr;
+    MMFLOAT *x1fptr, *y1fptr, *wifptr, *hfptr, *wfptr, *cfptr, *ffptr;
+    getcsargs(&cmdline, 13);
+    CheckDisplay();
+    if (!(argc & 1) || argc < 7)
+        StandardError(2);
+    getargaddress(argv[0], &x1ptr, &x1fptr, &n, &x1stride);
+    if (n != 1)
+    {
+        getargaddress(argv[2], &y1ptr, &y1fptr, &n, &y1stride);
+        getargaddress(argv[4], &wiptr, &wifptr, &n, &wistride);
+        getargaddress(argv[6], &hptr, &hfptr, &n, &hstride);
+    }
+    if (n == 1)
+    {
+        c = gui_fcolour;
+        w = 1;
+        f = -1;
+        r = 10; // setup the defaults
+        x1 = getinteger(argv[0]);
+        y1 = getinteger(argv[2]);
+        w = getinteger(argv[4]);
+        h = getinteger(argv[6]);
+        wmod = (w > 0 ? -1 : 1);
+        hmod = (h > 0 ? -1 : 1);
+        if (argc > 7 && *argv[8])
+            r = getint(argv[8], 0, 100);
+        if (argc > 9 && *argv[10])
+            c = getint(argv[10], 0, WHITE);
+        if (argc == 13)
+            f = getint(argv[12], -1, WHITE);
+        if (w != 0 && h != 0)
+            DrawRBox(x1, y1, x1 + w + wmod, y1 + h + hmod, r, c, f);
+    }
+    else
+    {
+        c = gui_fcolour;
+        w = 1; // setup the defaults
+        if (argc > 7 && *argv[8])
+        {
+            getargaddress(argv[8], &wptr, &wfptr, &nw, &wstride);
+            if (nw == 1)
+                w = getint(argv[8], 0, 100);
+            else if (nw > 1)
+            {
+                if (nw > 1 && nw < n)
+                    n = nw; // adjust the dimensionality
+                for (i = 0; i < nw; i++)
+                {
+                    w = (wfptr == NULL ? STRIDE_INT(wptr, i, wstride) : (int)STRIDE_FLOAT(wfptr, i, wstride));
+                    if (w < 0 || w > 100)
+                        StandardErrorParam3(26, (int)w, 0, 100);
+                }
+            }
+        }
+        if (argc > 9 && *argv[10])
+        {
+            getargaddress(argv[10], &cptr, &cfptr, &nc, &cstride);
+            if (nc == 1)
+                c = getint(argv[10], 0, WHITE);
+            else if (nc > 1)
+            {
+                if (nc > 1 && nc < n)
+                    n = nc; // adjust the dimensionality
+                for (i = 0; i < nc; i++)
+                {
+                    c = (cfptr == NULL ? STRIDE_INT(cptr, i, cstride) : (int)STRIDE_FLOAT(cfptr, i, cstride));
+                    if (c < 0 || c > WHITE)
+                        StandardErrorParam3(26, (int)c, 0, WHITE);
+                }
+            }
+        }
+        if (argc == 13)
+        {
+            getargaddress(argv[12], &fptr, &ffptr, &nf, &fstride);
+            if (nf == 1)
+                f = getint(argv[12], 0, WHITE);
+            else if (nf > 1)
+            {
+                if (nf > 1 && nf < n)
+                    n = nf; // adjust the dimensionality
+                for (i = 0; i < nf; i++)
+                {
+                    f = (ffptr == NULL ? STRIDE_INT(fptr, i, fstride) : (int)STRIDE_FLOAT(ffptr, i, fstride));
+                    if (f < -1 || f > WHITE)
+                        StandardErrorParam3(26, (int)f, -1, WHITE);
+                }
+            }
+        }
+        for (i = 0; i < n; i++)
+        {
+            x1 = (x1fptr == NULL ? STRIDE_INT(x1ptr, i, x1stride) : (int)STRIDE_FLOAT(x1fptr, i, x1stride));
+            y1 = (y1fptr == NULL ? STRIDE_INT(y1ptr, i, y1stride) : (int)STRIDE_FLOAT(y1fptr, i, y1stride));
+            wi = (wifptr == NULL ? STRIDE_INT(wiptr, i, wistride) : (int)STRIDE_FLOAT(wifptr, i, wistride));
+            h = (hfptr == NULL ? STRIDE_INT(hptr, i, hstride) : (int)STRIDE_FLOAT(hfptr, i, hstride));
+            wmod = (wi > 0 ? -1 : 1);
+            hmod = (h > 0 ? -1 : 1);
+            if (nw > 1)
+                w = (wfptr == NULL ? STRIDE_INT(wptr, i, wstride) : (int)STRIDE_FLOAT(wfptr, i, wstride));
+            if (nc > 1)
+                c = (cfptr == NULL ? STRIDE_INT(cptr, i, cstride) : (int)STRIDE_FLOAT(cfptr, i, cstride));
+            if (nf > 1)
+                f = (ffptr == NULL ? STRIDE_INT(fptr, i, fstride) : (int)STRIDE_FLOAT(ffptr, i, fstride));
+            if (wi != 0 && h != 0)
+                DrawRBox(x1, y1, x1 + wi + wmod, y1 + h + hmod, w, c, f);
+        }
+    }
+    if (Option.Refresh)
+        Display_Refresh();
+}
+// this function positions the cursor within a PRINT command
+void MIPS16 fun_at(void)
+{
+    char buf[27];
+    getcsargs(&ep, 5);
+    if (commandfunction(cmdtoken) != cmd_print)
+        error("Invalid function");
+    //	if((argc == 3 || argc == 5)) StandardError(2);
+    //	AutoLineWrap = false;
+    CurrentX = getinteger(argv[0]);
+    if (argc >= 3 && *argv[2])
+        CurrentY = getinteger(argv[2]);
+    if (argc == 5)
+    {
+        PrintPixelMode = getinteger(argv[4]);
+        if (PrintPixelMode < 0 || PrintPixelMode > 7)
+        {
+            PrintPixelMode = 0;
+            StandardError(21);
+        }
+    }
+    else
+        PrintPixelMode = 0;
+
+    // BJR: VT100 set cursor location: <esc>[y;xf
+    //      where x and y are ASCII string integers.
+    //      Assumes overall font size of 6x12 pixels (480/80 x 432/36), including gaps between characters and lines
+
+    sprintf(buf, "\033[%d;%df", (int)CurrentY / (FontTable[gui_font >> 4][1] * (gui_font & 0b1111)) + 1, (int)CurrentX / (FontTable[gui_font >> 4][0] * (gui_font & 0b1111)) + 1);
+    SSPrintString(buf); // send it to the USB
+    if (PrintPixelMode == 2 || PrintPixelMode == 5)
+        SSPrintString("\033[7m");
+    targ = T_STR;
+    sret = (unsigned char *)"\0"; // normally pointing sret to a string in flash is illegal
+}
+
+// these three functions were written by Peter Mather (matherp on the Back Shed forum)
+// read the contents of a PIXEL out of screen memory
+void fun_pixel(void)
+{
+    if ((void *)ReadBuffer == (void *)DisplayNotSet)
+        StandardError(11);
+    int p;
+    int x, y;
+    getcsargs(&ep, 3);
+    if (argc != 3)
+        StandardError(2);
+    x = getinteger(argv[0]);
+    y = getinteger(argv[2]);
+    ReadBuffer(x, y, x, y, (unsigned char *)&p);
+    iret = p & 0xFFFFFF;
+    targ = T_INT;
+}
+
+void cmd_triangle(void)
+{ // thanks to Peter Mather (matherp on the Back Shed forum)
+    unsigned char *p;
+    if ((p = checkstring(cmdline, (unsigned char *)"SAVE")))
+    {
+        if ((void *)ReadBuffer == (void *)DisplayNotSet)
+            StandardError(11);
+        cmd_ReadTriangle(p);
+        return;
+    }
+    if ((p = checkstring(cmdline, (unsigned char *)"RESTORE")))
+    {
+        if ((void *)ReadBuffer == (void *)DisplayNotSet)
+            StandardError(11);
+        cmd_RestoreTriangle(p);
+        return;
+    }
+    int x1, y1, x2, y2, x3, y3, c = 0, f = 0, n = 0, i, nc = 0, nf = 0;
+    int x1stride = sizeof(MMFLOAT), y1stride = sizeof(MMFLOAT), x2stride = sizeof(MMFLOAT), y2stride = sizeof(MMFLOAT);
+    int x3stride = sizeof(MMFLOAT), y3stride = sizeof(MMFLOAT), cstride = sizeof(MMFLOAT), fstride = sizeof(MMFLOAT);
+    long long int *x3ptr, *y3ptr, *x1ptr, *y1ptr, *x2ptr, *y2ptr, *fptr, *cptr;
+    MMFLOAT *x3fptr, *y3fptr, *x1fptr, *y1fptr, *x2fptr, *y2fptr, *ffptr, *cfptr;
+    getcsargs(&cmdline, 15);
+    CheckDisplay();
+    if (!(argc & 1) || argc < 11)
+        StandardError(2);
+    getargaddress(argv[0], &x1ptr, &x1fptr, &n, &x1stride);
+    if (n != 1)
+    {
+        int cn = n;
+        getargaddress(argv[2], &y1ptr, &y1fptr, &n, &y1stride);
+        if (n < cn)
+            cn = n;
+        getargaddress(argv[4], &x2ptr, &x2fptr, &n, &x2stride);
+        if (n < cn)
+            cn = n;
+        getargaddress(argv[6], &y2ptr, &y2fptr, &n, &y2stride);
+        if (n < cn)
+            cn = n;
+        getargaddress(argv[8], &x3ptr, &x3fptr, &n, &x3stride);
+        if (n < cn)
+            cn = n;
+        getargaddress(argv[10], &y3ptr, &y3fptr, &n, &y3stride);
+        if (n < cn)
+            cn = n;
+        n = cn;
+    }
+    if (n == 1)
+    {
+        c = gui_fcolour;
+        f = -1;
+        x1 = getinteger(argv[0]);
+        y1 = getinteger(argv[2]);
+        x2 = getinteger(argv[4]);
+        y2 = getinteger(argv[6]);
+        x3 = getinteger(argv[8]);
+        y3 = getinteger(argv[10]);
+        if (argc >= 13 && *argv[12])
+            c = getint(argv[12], BLACK, WHITE);
+        if (argc == 15)
+            f = getint(argv[14], -1, WHITE);
+        DrawTriangle(x1, y1, x2, y2, x3, y3, c, f);
+    }
+    else
+    {
+        c = gui_fcolour;
+        f = -1;
+        if (argc >= 13 && *argv[12])
+        {
+            getargaddress(argv[12], &cptr, &cfptr, &nc, &cstride);
+            if (nc == 1)
+                c = getint(argv[12], 0, WHITE);
+            else if (nc > 1)
+            {
+                if (nc > 1 && nc < n)
+                    n = nc; // adjust the dimensionality
+                for (i = 0; i < nc; i++)
+                {
+                    c = (cfptr == NULL ? STRIDE_INT(cptr, i, cstride) : (int)STRIDE_FLOAT(cfptr, i, cstride));
+                    if (c < 0 || c > WHITE)
+                        StandardErrorParam3(26, (int)c, 0, WHITE);
+                }
+            }
+        }
+        if (argc == 15)
+        {
+            getargaddress(argv[14], &fptr, &ffptr, &nf, &fstride);
+            if (nf == 1)
+                f = getint(argv[14], -1, WHITE);
+            else if (nf > 1)
+            {
+                if (nf > 1 && nf < n)
+                    n = nf; // adjust the dimensionality
+                for (i = 0; i < nf; i++)
+                {
+                    f = (ffptr == NULL ? STRIDE_INT(fptr, i, fstride) : (int)STRIDE_FLOAT(ffptr, i, fstride));
+                    if (f < -1 || f > WHITE)
+                        StandardErrorParam3(26, (int)f, -1, WHITE);
+                }
+            }
+        }
+        for (i = 0; i < n; i++)
+        {
+            x1 = (x1fptr == NULL ? STRIDE_INT(x1ptr, i, x1stride) : (int)STRIDE_FLOAT(x1fptr, i, x1stride));
+            y1 = (y1fptr == NULL ? STRIDE_INT(y1ptr, i, y1stride) : (int)STRIDE_FLOAT(y1fptr, i, y1stride));
+            x2 = (x2fptr == NULL ? STRIDE_INT(x2ptr, i, x2stride) : (int)STRIDE_FLOAT(x2fptr, i, x2stride));
+            y2 = (y2fptr == NULL ? STRIDE_INT(y2ptr, i, y2stride) : (int)STRIDE_FLOAT(y2fptr, i, y2stride));
+            x3 = (x3fptr == NULL ? STRIDE_INT(x3ptr, i, x3stride) : (int)STRIDE_FLOAT(x3fptr, i, x3stride));
+            y3 = (y3fptr == NULL ? STRIDE_INT(y3ptr, i, y3stride) : (int)STRIDE_FLOAT(y3fptr, i, y3stride));
+            if (x1 == x2 && x1 == x3 && y1 == y2 && y1 == y3 && x1 == -1 && y1 == -1)
+                return;
+            if (nc > 1)
+                c = (cfptr == NULL ? STRIDE_INT(cptr, i, cstride) : (int)STRIDE_FLOAT(cfptr, i, cstride));
+            if (nf > 1)
+                f = (ffptr == NULL ? STRIDE_INT(fptr, i, fstride) : (int)STRIDE_FLOAT(ffptr, i, fstride));
+            DrawTriangle(x1, y1, x2, y2, x3, y3, c, f);
+        }
+    }
+    if (Option.Refresh)
+        Display_Refresh();
+}
+/*
+ * @cond
+ * The following section will be excluded from the documentation.
+ */
+char getnextuncompressednibble(char **s, int reset)
+{
+    static int toggle = 0;
+    if (reset)
+    {
+        toggle = reset - 1;
+        return 0;
+    }
+    if (!toggle)
+    {
+        toggle ^= 1;
+        return **s & 0x0f;
+    }
+    else
+    {
+        toggle ^= 1;
+        char r = (**s & 0xf0) >> 4;
+        (*s)++;
+        return r;
+    }
+}
+static inline char getnextnibble(char **fc, int reset)
+{
+    static uint8_t available;
+    static char out;
+    if (reset)
+    {
+        available = 0;
+    }
+    if (available == 0)
+    {
+        available = **fc & 0xF; // number of identical pixels
+        out = (**fc) >> 4;
+        (*fc)++;
+    }
+    if (!reset)
+        available--;
+    return out;
+}
+void docompressed(char *fc, int x1, int y1, int w, int h, int8_t blank)
+{
+#ifndef PICOMITEVGA
+    if (!WriteBuf)
+    { // direct to screen
+        if (blank == -1)
+        {
+            char tobuff[w / 2], *to;
+            int ww = w;
+            int xx1 = x1;
+            if (x1 < 0)
+            {
+                ww += x1;
+                xx1 = 0;
+            }
+            if (x1 + w > HRes)
+            {
+                ww = HRes - x1;
+            }
+            getnextnibble(&fc, 1); // reset the decoder
+            for (int y = y1; y < y1 + h; y++)
+            {
+                to = tobuff;
+                int otoggle = 0;
+                for (int x = x1; x < x1 + w; x++)
+                {
+                    if (y < 0 || y >= VRes)
+                    {
+                        getnextnibble(&fc, 0);
+                        continue;
+                    }
+                    if (x >= 0 && x < HRes)
+                    {
+                        if (otoggle == 0)
+                        {
+                            *to = getnextnibble(&fc, 0);
+                            otoggle ^= 1;
+                        }
+                        else
+                        {
+                            *to |= (getnextnibble(&fc, 0) << 4);
+                            otoggle ^= 1;
+                            to++;
+                        }
+                    }
+                    else
+                        getnextnibble(&fc, 0);
+                }
+                if (ww > 0 && xx1 < HRes)
+                    copyframetoscreen((unsigned char *)tobuff, xx1, xx1 + ww - 1, y, y, 0);
+            }
+        }
+        else
+        {
+            char tobuff[w / 2], *to;
+            getnextnibble(&fc, 1); // reset the decoder
+            for (int y = y1; y < y1 + h; y++)
+            {
+                int x = x1;
+                while (1)
+                {
+                    to = tobuff;
+                    int otoggle = 0;
+                    char c;
+                    int ww = 0;
+                    int xx = -1;
+                    while ((c = getnextnibble(&fc, 0)) == blank)
+                    {
+                        x++;
+                        if (x == x1 + w)
+                            break;
+                    }
+                    if (x == x1 + w)
+                        break; // nothing found so exit
+                    *to = c;
+                    otoggle ^= 1;
+                    xx = x;
+                    x++;
+                    ww = 1;
+                    if (xx != x1 + w - 1)
+                    {
+                        while ((c = getnextnibble(&fc, 0)) != blank)
+                        {
+                            x++;
+                            ww++;
+                            if (otoggle == 0)
+                            {
+                                *to = c;
+                                otoggle ^= 1;
+                            }
+                            else
+                            {
+                                *to |= (c << 4);
+                                otoggle ^= 1;
+                                to++;
+                            }
+                            if (x == x1 + w)
+                                break;
+                        }
+                    }
+                    x++;
+                    if (xx + ww > HRes)
+                    {
+                        ww = HRes - xx;
+                    }
+                    if (xx >= 0 && ww > 0 && y >= 0 && y < VRes)
+                        copyframetoscreen((unsigned char *)tobuff, xx, xx + ww - 1, y, y, 0);
+                    if (xx < 0 && xx + ww >= 0)
+                    {
+                        char *t = tobuff - (xx / 2) - (xx & 1);
+                        ww += xx;
+                        if (ww > 0)
+                            copyframetoscreen((unsigned char *)t, 0, ww - 1, y, y, xx & 1);
+                    }
+                    if (x >= x1 + w)
+                        break;
+                }
+            }
+        }
+    }
+    else
+#endif
+        if (x1 % 2 == 0 && w % 2 == 0 && blank == -1)
+    {
+        char c, *to;
+        c = getnextnibble(&fc, 1); // reset the decoder
+        for (int y = y1; y < y1 + h; y++)
+        {
+            to = (char *)WriteBuf + y * (HRes >> 1) + (x1 >> 1);
+            for (int x = x1; x < x1 + w; x += 2)
+            {
+                c = getnextnibble(&fc, 0);
+                c |= (getnextnibble(&fc, 0) << 4);
+                if (y < 0 || y >= VRes)
+                    continue;
+                if (x >= 0 && x < HRes)
+                    *to = c;
+                to++;
+            }
+        }
+    }
+    else
+    {
+        int otoggle = 0, itoggle = 0; // input will always start on a byte boundary
+        char c, *to;
+        c = getnextnibble(&fc, 1); // reset the decoder
+        for (int y = y1; y < y1 + h; y++)
+        {                                                        // loop though all of the output lines
+            to = (char *)WriteBuf + y * (HRes >> 1) + (x1 >> 1); // get the byte that will start the output
+            if (x1 & 1)
+                otoggle = 1; // if x1 is odd then we will start on the high nibble
+            else
+                otoggle = 0;
+            for (int x = x1; x < x1 + w; x++)
+            {
+                if (itoggle == 0)
+                {
+                    c = getnextnibble(&fc, 0);
+                    itoggle = 1;
+                }
+                else
+                {
+                    c = getnextnibble(&fc, 0);
+                    itoggle = 0;
+                }
+                if (y < 0 || y >= VRes)
+                    continue;
+                if (otoggle == 0)
+                {
+                    if (x >= 0 && x < HRes)
+                    {
+                        if (c != blank)
+                        {
+                            *to &= 0xF0;
+                            *to |= c;
+                        }
+                    }
+                }
+                else
+                {
+                    if (x >= 0 && x < HRes)
+                    {
+                        if (c != blank)
+                        {
+                            *to &= 0x0f;
+                            *to |= (c << 4);
+                        }
+                    }
+                    to++;
+                }
+                otoggle ^= 1;
+            }
+        }
+    }
+}
+/*  @endcond */
+
+void cmd_blitmemory(void)
+{
+    int x1, y1, w, h;
+    int8_t blank = -1;
+    getcsargs(&cmdline, 7);
+    if (argc < 5)
+        SyntaxError();
+    ;
+    char *from = (char *)GetPeekAddr(argv[0]);
+    x1 = (int)getinteger(argv[2]);
+    y1 = (int)getinteger(argv[4]);
+    uint16_t *size = (uint16_t *)from;
+    w = (size[0] & 0x7FFF);
+    h = (size[1] & 0x7FFF);
+    from += 4;
+    if (argc == 7)
+        blank = getint(argv[6], -1, 15);
+    if (size[0] & 0x8000 || size[1] & 0x8000)
+    {
+        docompressed(from, x1, y1, w, h, blank);
+    }
+    else
+    {
+#ifndef PICOMITEVGA
+        if (!WriteBuf)
+        {
+            if (blank == -1)
+            {
+                char *fc = from;
+                char tobuff[w / 2], *to;
+                int ww = w;
+                int xx1 = x1;
+                if (x1 < 0)
+                {
+                    ww += x1;
+                    xx1 = 0;
+                }
+                if (x1 + w > HRes)
+                {
+                    ww = HRes - x1;
+                }
+                getnextuncompressednibble(&fc, 1); // reset the decoder
+                for (int y = y1; y < y1 + h; y++)
+                {
+                    to = tobuff;
+                    int otoggle = 0;
+                    for (int x = x1; x < x1 + w; x++)
+                    {
+                        if (y < 0 || y >= VRes)
+                        {
+                            getnextuncompressednibble(&fc, 0);
+                            continue;
+                        }
+                        if (x >= 0 && x < HRes)
+                        {
+                            if (otoggle == 0)
+                            {
+                                *to = getnextuncompressednibble(&fc, 0);
+                                otoggle ^= 1;
+                            }
+                            else
+                            {
+                                *to |= (getnextuncompressednibble(&fc, 0) << 4);
+                                otoggle ^= 1;
+                                to++;
+                            }
+                        }
+                        else
+                            getnextuncompressednibble(&fc, 0);
+                    }
+                    if (ww > 0 && xx1 < HRes)
+                        copyframetoscreen((unsigned char *)tobuff, xx1, xx1 + ww - 1, y, y, 0);
+                }
+            }
+            else
+            {
+                char *fc = from;
+                char tobuff[w / 2], *to;
+                getnextuncompressednibble(&fc, 1); // reset the decoder
+                for (int y = y1; y < y1 + h; y++)
+                {
+                    int x = x1;
+                    while (1)
+                    {
+                        to = tobuff;
+                        int otoggle = 0;
+                        char c;
+                        int ww = 0;
+                        int xx = -1;
+                        while ((c = getnextuncompressednibble(&fc, 0)) == blank)
+                        {
+                            x++;
+                            if (x == x1 + w)
+                                break;
+                        }
+                        if (x == x1 + w)
+                            break; // nothing found so exit
+                        *to = c;
+                        otoggle ^= 1;
+                        xx = x;
+                        x++;
+                        ww = 1;
+                        if (xx != x1 + w - 1)
+                        {
+                            while ((c = getnextuncompressednibble(&fc, 0)) != blank)
+                            {
+                                x++;
+                                ww++;
+                                if (otoggle == 0)
+                                {
+                                    *to = c;
+                                    otoggle ^= 1;
+                                }
+                                else
+                                {
+                                    *to |= (c << 4);
+                                    otoggle ^= 1;
+                                    to++;
+                                }
+                                if (x == x1 + w)
+                                    break;
+                            }
+                        }
+                        x++;
+                        if (xx + ww > HRes)
+                        {
+                            ww = HRes - xx;
+                        }
+                        if (xx >= 0 && ww > 0 && y >= 0 && y < VRes)
+                            copyframetoscreen((unsigned char *)tobuff, xx, xx + ww - 1, y, y, 0);
+                        if (xx < 0 && xx + ww >= 0)
+                        {
+                            char *t = tobuff - (xx / 2) - (xx & 1);
+                            ww += xx;
+                            if (ww > 0)
+                                copyframetoscreen((unsigned char *)t, 0, ww - 1, y, y, xx & 1);
+                        }
+                        if (x >= x1 + w)
+                            break;
+                    }
+                }
+            }
+        }
+        else
+#endif
+            if (x1 % 2 == 0 && w % 2 == 0 && blank == -1)
+        {
+            char c, *to;
+            for (int y = y1; y < y1 + h; y++)
+            {
+                to = (char *)WriteBuf + y * (HRes >> 1) + (x1 >> 1);
+                for (int x = x1; x < x1 + w; x += 2)
+                {
+                    c = *from++;
+                    if (y < 0 || y >= VRes)
+                        continue;
+                    if (x >= 0 && x < HRes)
+                        *to = c;
+                    to++;
+                }
+            }
+        }
+        else
+        {
+            int otoggle = 0, itoggle = 0; // input will always start on a byte boundary
+            char c, *to;
+            for (int y = y1; y < y1 + h; y++)
+            {                                                        // loop though all of the output lines
+                to = (char *)WriteBuf + y * (HRes >> 1) + (x1 >> 1); // get the byte that will start the output
+                if (x1 & 1)
+                    otoggle = 1; // if x1 is odd then we will start on the high nibble
+                else
+                    otoggle = 0;
+                for (int x = x1; x < x1 + w; x++)
+                {
+                    if (itoggle == 0)
+                    {
+                        c = *from & 0x0f;
+                        itoggle = 1;
+                    }
+                    else
+                    {
+                        c = *from >> 4;
+                        from++;
+                        itoggle = 0;
+                    }
+                    if (y < 0 || y >= VRes)
+                        continue;
+                    if (otoggle == 0)
+                    {
+                        if (x >= 0 && x < HRes)
+                        {
+                            if (c != blank)
+                            {
+                                *to &= 0xF0;
+                                *to |= c;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        if (x >= 0 && x < HRes)
+                        {
+                            if (c != blank)
+                            {
+                                *to &= 0x0f;
+                                *to |= (c << 4);
+                            }
+                        }
+                        to++;
+                    }
+                    otoggle ^= 1;
+                }
+            }
+        }
+    }
+}
+/*
+ * @cond
+ * The following section will be excluded from the documentation.
+ */
+
+int blitother(void)
+{
+    int x1, y1, x2, y2, w, h;
+    unsigned char *p;
+    if ((p = checkstring(cmdline, (unsigned char *)"COMPRESSED")))
+    {
+        int8_t blank = -1;
+        getcsargs(&p, 7);
+        if (argc < 5)
+            SyntaxError();
+        ;
+        char *fc = (char *)GetPeekAddr(argv[0]);
+        x1 = (int)getinteger(argv[2]);
+        y1 = (int)getinteger(argv[4]);
+        uint16_t *size = (uint16_t *)fc;
+        w = size[0];
+        h = size[1];
+        if (w > HRes || h > VRes)
+            error("Invalid dimensions, w=%, h=%", w, h);
+        fc += 4;
+        if (argc == 7)
+            blank = getint(argv[6], -1, 15);
+        docompressed(fc, x1, y1, w, h, blank);
+        return 1;
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"FLASH")))
+    {
+        unsigned char *d = NULL;
+        unsigned char *s = NULL;
+        int blank = -1;
+        getcsargs(&p, 17);
+        if (!(argc == 15 || argc == 17))
+            SyntaxError();
+        ;
+        int i = getint(argv[0], 1, MAXFLASHSLOTS);
+        s = (unsigned char *)(flash_target_contents + (i - 1) * MAX_PROG_SIZE);
+        uint32_t *x = (uint32_t *)s;
+        HResS = x[0];
+        VResS = x[1];
+        if (HResS < 0 || HResS > 3840 || VResS < 0 || VResS > 2160)
+            error("Invalid Image");
+        HResD = HRes;
+        VResD = VRes;
+        s += 8;
+        if (checkstring(argv[2], (unsigned char *)"L"))
+            d = LayerBuf;
+        else if (checkstring(argv[2], (unsigned char *)"F"))
+            d = FrameBuf;
+#ifdef PICOMITEVGA
+        else if (checkstring(argv[2], (unsigned char *)"N"))
+            d = DisplayBuf;
+#ifdef rp2350
+        else if (checkstring(argv[2], (unsigned char *)"T"))
+            d = SecondLayer;
+#endif
+#else
+        else if (checkstring(argv[2], (unsigned char *)"N"))
+            StandardError(1);
+#endif
+        else
+            SyntaxError();
+        x1 = getinteger(argv[4]);
+        y1 = getinteger(argv[6]);
+        x2 = getinteger(argv[8]);
+        y2 = getinteger(argv[10]);
+        w = getinteger(argv[12]);
+        h = getinteger(argv[14]);
+        if (x1 < 0 || y1 < 0 || x1 + w > HResS || y1 + h > VResS)
+            StandardError(21);
+        if (argc == 17)
+            blank = getint(argv[16], -1, 15);
+        blit121(s, d, x1, y1, w, h, x2, y2, blank);
+        return 1;
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"FRAMEBUFFER")))
+    {
+        int8_t blank = -1;
+#ifndef PICOMITEVGA
+        int otoggle = 0, itoggle = 0; // input will always start on a byte boundary
+        volatile unsigned char c, *to;
+#endif
+        volatile unsigned char *s = NULL, *d = NULL;
+        getcsargs(&p, 17);
+        if (argc < 15)
+            SyntaxError();
+        ;
+        if (checkstring(argv[0], (unsigned char *)"L"))
+            s = LayerBuf;
+        else if (checkstring(argv[0], (unsigned char *)"F"))
+            s = FrameBuf;
+#ifdef PICOMITEVGA
+        else if (checkstring(argv[0], (unsigned char *)"N"))
+            s = DisplayBuf;
+#ifdef rp2350
+        else if (checkstring(argv[0], (unsigned char *)"T"))
+            s = SecondLayer;
+#endif
+#else
+        else if (checkstring(argv[0], (unsigned char *)"N"))
+            s = NULL;
+#endif
+        else
+            SyntaxError();
+        ;
+        if (checkstring(argv[2], (unsigned char *)"L"))
+            d = LayerBuf;
+        else if (checkstring(argv[2], (unsigned char *)"F"))
+            d = FrameBuf;
+#ifdef PICOMITEVGA
+        else if (checkstring(argv[2], (unsigned char *)"N"))
+            d = DisplayBuf;
+#ifdef rp2350
+        else if (checkstring(argv[2], (unsigned char *)"T"))
+            d = SecondLayer;
+#endif
+#else
+        else if (checkstring(argv[2], (unsigned char *)"N"))
+            d = NULL;
+#endif
+        else
+            SyntaxError();
+        ;
+        if (s == d)
+            error("Same framebuffer");
+        if (s == NULL && (void *)ReadBuffer == (void *)DisplayNotSet)
+            StandardError(11);
+        x1 = (int)getinteger(argv[4]);
+        y1 = (int)getinteger(argv[6]);
+        x2 = (int)getinteger(argv[8]);
+        y2 = (int)getinteger(argv[10]);
+        w = (int)getinteger(argv[12]);
+        h = (int)getinteger(argv[14]);
+        if (argc == 17)
+            blank = getint(argv[16], -1, 15);
+        if (d != NULL && s != NULL)
+        {
+            // RGB121 blit
+            HResD = HRes;
+            VResD = VRes;
+            HResS = HRes;
+            VResS = VRes;
+            blit121((uint8_t *)s, (uint8_t *)d, x1, y1, w, h, x2, y2, blank);
+            return 1;
+        }
+#ifndef PICOMITEVGA
+        else if (s != NULL)
+        { // writing to a physical LCD display
+            if (x1 == 0 && x2 == 0 && w == HRes && blank == -1)
+            {
+                s += y1 * HRes / 2;
+                copyframetoscreen((void *)s, 0, HRes - 1, y2, y2 + h - 1, 0);
+            }
+            else
+            {
+                if (screen320 && Option.DISPLAY_TYPE != SSD1963_4_16)
+                    x2 *= 2;
+                char tobuff[w / 2], *to;
+                for (int y = y1, yo = y2; y < y1 + h; y++, yo++)
+                {
+                    char *fc = (char *)s + y * HRes / 2 + x1 / 2;
+                    getnextuncompressednibble(&fc, 1 + (x1 & 1)); // reset the decoder
+                    int x = x1;
+                    while (1)
+                    {
+                        to = tobuff;
+                        int otoggle = 0;
+                        char c;
+                        int ww = 0;
+                        int xx = -1;
+                        while ((c = getnextuncompressednibble(&fc, 0)) == blank)
+                        {
+                            x++;
+                            if (x == x1 + w)
+                                break;
+                        }
+                        if (x == x1 + w)
+                            break; // nothing found so exit
+                        *to = c;
+                        otoggle ^= 1;
+                        xx = x;
+                        x++;
+                        ww = 1;
+                        if (xx != x1 + w - 1)
+                        {
+                            while ((c = getnextuncompressednibble(&fc, 0)) != blank)
+                            {
+                                x++;
+                                ww++;
+                                if (otoggle == 0)
+                                {
+                                    *to = c;
+                                    otoggle ^= 1;
+                                }
+                                else
+                                {
+                                    *to |= (c << 4);
+                                    otoggle ^= 1;
+                                    to++;
+                                }
+                                if (x == x1 + w)
+                                    break;
+                            }
+                        }
+                        x++;
+                        if (xx + ww > HRes)
+                        {
+                            ww = HRes - xx;
+                        }
+                        if (x2 >= 0 && ww > 0 && yo >= 0 && yo < VRes)
+                        {
+                            copyframetoscreen((unsigned char *)tobuff, x2, x2 + ww - 1, yo, yo, 0);
+                        }
+                        if (x2 < 0 && x2 + ww >= 0)
+                        {
+                            char *t = tobuff - ((x2) / 2) - (x2 & 1);
+                            ww += x2;
+                            if (ww > 0)
+                            {
+                                copyframetoscreen((unsigned char *)t, 0, ww - 1, yo, yo, x2 & 1);
+                            }
+                        }
+                        if (x >= x1 + w)
+                            break;
+                    }
+                }
+            }
+            return 1;
+        }
+        else if (d != NULL)
+        { // reading from a physical LCD display
+            union colourmap
+            {
+                char rgbbytes[4];
+                unsigned int rgb;
+            } cb;
+            unsigned char *rbuff = (unsigned char *)GetTempMainMemory(w * 4);
+            char *from = GetTempMainMemory((w + 1) / 2);
+            for (int y = y1, toy = y2; y < y1 + h; y++, toy++)
+            { // loop though all of the output lines
+                ReadBuffer(x1, y, x1 + w - 1, y, rbuff);
+                uint8_t *p = rbuff;
+                char *pp = from;
+                for (int x = x1; x < x1 + w; x++)
+                {
+                    cb.rgbbytes[0] = *p++; // this order swaps the bytes to match the .BMP file
+                    cb.rgbbytes[1] = *p++;
+                    cb.rgbbytes[2] = *p++;
+                    int fcolour = RGB121(cb.rgb);
+                    if (x & 1)
+                    {
+                        *pp &= 0x0F;
+                        *pp |= (fcolour << 4);
+                        pp++;
+                    }
+                    else
+                    {
+                        *pp &= 0xF0;
+                        *pp |= fcolour;
+                    }
+                }
+                to = d + toy * (HRes >> 1) + (x2 >> 1); // get the byte that will start the output
+                itoggle = 0;
+                pp = from;
+                if (x2 & 1)
+                    otoggle = 1; // if x1 is odd then we will start on the high nibble
+                else
+                    otoggle = 0;
+                for (int x = x1, tox = x2; x < x1 + w; x++, tox++)
+                {
+                    if (itoggle == 0)
+                    {
+                        if (tox >= 0 && tox < HRes)
+                            c = *pp & 0x0f;
+                        else
+                            c = 0;
+                        itoggle = 1;
+                    }
+                    else
+                    {
+                        if (tox >= 0 && tox < HRes)
+                            c = *pp >> 4;
+                        else
+                            c = 0;
+                        pp++;
+                        itoggle = 0;
+                    }
+                    if (y < 0 || y >= VRes)
+                        continue;
+                    if (otoggle == 0)
+                    {
+                        if (tox >= 0 && tox < HRes)
+                        {
+                            if (c != blank)
+                            {
+                                *to &= 0xF0;
+                                *to |= c;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        if (tox >= 0 && tox < HRes)
+                        {
+                            if (c != blank)
+                            {
+                                *to &= 0x0f;
+                                *to |= (c << 4);
+                            }
+                        }
+                        to++;
+                    }
+                    otoggle ^= 1;
+                }
+            }
+            return 1;
+        }
+#endif
+    }
+    return 0;
+}
+/*  @endcond */
+void cmd_cls(void)
+{
+    CheckDisplay();
+
+#ifdef GUICONTROLS
+    HideAllControls();
+#endif
+    skipspace(cmdline);
+    if (!(*cmdline == 0 || *cmdline == '\''))
+    { // Colour specified
+#ifdef PICOMITEVGA
+        if (DISPLAY_TYPE == SCREENMODE2 || DISPLAY_TYPE == SCREENMODE3)
+        {
+            int fc = getint(cmdline, 0, WHITE);
+            unsigned char fcolour = RGB121(fc);
+            fcolour |= (fcolour << 4);
+            memset((void *)WriteBuf, fcolour, ScreenSize);
+        }
+        else
+        {
+            ClearScreen(getint(cmdline, 0, WHITE));
+        }
+#else
+        ClearScreen(getint(cmdline, 0, WHITE));
+#endif
+    }
+    else
+    { // Default colour
+#ifdef PICOMITEVGA
+        if ((WriteBuf == LayerBuf && (DISPLAY_TYPE == SCREENMODE2 || DISPLAY_TYPE == SCREENMODE3) && LayerBuf != DisplayBuf) || (WriteBuf == SecondLayer && (DISPLAY_TYPE == SCREENMODE2 || DISPLAY_TYPE == SCREENMODE3) && SecondLayer != DisplayBuf))
+        {
+            uint8_t colour = (WriteBuf == LayerBuf ? transparent | (transparent << 4) : transparents | (transparents << 4));
+            memset((void *)WriteBuf, colour, HRes * VRes / 2);
+#ifdef HDMI
+        }
+        else if (WriteBuf == LayerBuf && (DISPLAY_TYPE == SCREENMODE5) && LayerBuf != DisplayBuf)
+        {
+            memset((void *)WriteBuf, transparent, HRes * VRes);
+        }
+        else if ((void *)WriteBuf == LayerBuf && (DISPLAY_TYPE == SCREENMODE4) && LayerBuf != DisplayBuf)
+        {
+            uint16_t *p = (uint16_t *)WriteBuf;
+            for (int i = 0; i < HRes * VRes; i++)
+                *p++ = RGBtransparent;
+#endif
+        }
+        else
+#endif
+            ClearScreen(gui_bcolour);
+    }
+    CurrentX = CurrentY = 0;
+    if (Option.Refresh)
+        Display_Refresh();
+}
+
+void fun_rgb(void)
+{
+    getcsargs(&ep, 5);
+    if (argc == 5)
+        iret = rgb(getint(argv[0], 0, 255), getint(argv[2], 0, 255), getint(argv[4], 0, 255));
+    else if (argc == 1)
+    {
+        if (checkstring(argv[0], (unsigned char *)"WHITE"))
+            iret = WHITE;
+        else if (checkstring(argv[0], (unsigned char *)"YELLOW"))
+            iret = YELLOW;
+        else if (checkstring(argv[0], (unsigned char *)"LILAC"))
+            iret = LILAC;
+        else if (checkstring(argv[0], (unsigned char *)"BROWN"))
+            iret = BROWN;
+        else if (checkstring(argv[0], (unsigned char *)"FUCHSIA"))
+            iret = FUCHSIA;
+        else if (checkstring(argv[0], (unsigned char *)"RUST"))
+            iret = RUST;
+        else if (checkstring(argv[0], (unsigned char *)"MAGENTA"))
+            iret = MAGENTA;
+        else if (checkstring(argv[0], (unsigned char *)"RED"))
+            iret = RED;
+        else if (checkstring(argv[0], (unsigned char *)"CYAN"))
+            iret = CYAN;
+        else if (checkstring(argv[0], (unsigned char *)"GREEN"))
+            iret = GREEN;
+        else if (checkstring(argv[0], (unsigned char *)"CERULEAN"))
+            iret = CERULEAN;
+        else if (checkstring(argv[0], (unsigned char *)"MIDGREEN"))
+            iret = MIDGREEN;
+        else if (checkstring(argv[0], (unsigned char *)"COBALT"))
+            iret = COBALT;
+        else if (checkstring(argv[0], (unsigned char *)"MYRTLE"))
+            iret = MYRTLE;
+        else if (checkstring(argv[0], (unsigned char *)"BLUE"))
+            iret = BLUE;
+        else if (checkstring(argv[0], (unsigned char *)"BLACK"))
+            iret = BLACK;
+        else if (checkstring(argv[0], (unsigned char *)"GRAY"))
+            iret = GRAY;
+        else if (checkstring(argv[0], (unsigned char *)"GREY"))
+            iret = GRAY;
+        else if (checkstring(argv[0], (unsigned char *)"LIGHTGRAY"))
+            iret = LITEGRAY;
+        else if (checkstring(argv[0], (unsigned char *)"LIGHTGREY"))
+            iret = LITEGRAY;
+        else if (checkstring(argv[0], (unsigned char *)"ORANGE"))
+            iret = ORANGE;
+        else if (checkstring(argv[0], (unsigned char *)"PINK"))
+            iret = PINK;
+        else if (checkstring(argv[0], (unsigned char *)"GOLD"))
+            iret = GOLD;
+        else if (checkstring(argv[0], (unsigned char *)"SALMON"))
+            iret = SALMON;
+        else if (checkstring(argv[0], (unsigned char *)"BEIGE"))
+            iret = BEIGE;
+        else
+            error("Invalid colour: $", argv[0]);
+    }
+    else
+        SyntaxError();
+    ;
+    targ = T_INT;
+}
+/*
+ * @cond
+ * The following section will be excluded from the documentation.
+ */
+
+void fun_mmhres(void)
+{
+    iret = HRes;
+    targ = T_INT;
+}
+
+void fun_mmvres(void)
+{
+    iret = VRes;
+    targ = T_INT;
+}
+extern BYTE BDEC_bReadHeader(BMPDECODER *pBmpDec, int fnbr);
+extern BYTE BMP_bDecode_memory(int x, int y, int xlen, int ylen, int fnbr, char *p);
+
+// Color lookup tables for sprite file loading
+// Mode 1 (alternate palette): ' '=0, 0-9, A-F map to specific colors
+static const uint32_t sprite_color_mode1[16] = {
+    BLACK, BLUE, MYRTLE, COBALT, MIDGREEN, CERULEAN, GREEN, CYAN,
+    RED, MAGENTA, RUST, FUCHSIA, BROWN, LILAC, YELLOW, WHITE};
+
+// Mode 0 (standard palette): ' '=0, 0-9, A-F map to specific colors
+static const uint32_t sprite_color_mode0[16] = {
+    BLACK, BLUE, GREEN, CYAN, RED, MAGENTA, YELLOW, WHITE,
+    MYRTLE, COBALT, MIDGREEN, CERULEAN, RUST, FUCHSIA, BROWN, LILAC};
+
+// Helper function to convert sprite file character to color index (0-15, or -1 for invalid)
+static inline int spriteCharToColorIndex(unsigned char c)
+{
+    if (c == ' ')
+        return -1; // transparent
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    if (c >= 'A' && c <= 'F')
+        return c - 'A' + 10;
+    if (c >= 'a' && c <= 'f')
+        return c - 'a' + 10;
+    return -1; // invalid character treated as transparent
+}
+
+// Sprite pool allocator - allocates sprites in chunks of 3 per 256-byte page
+// Returns pointer to allocated sprite structure, or NULL on failure
+static struct spritebuffer *allocSpriteBuff(int bnbr)
+{
+    if (spritebuff[bnbr] != NULL)
+        return spritebuff[bnbr]; // Already allocated
+
+    int chunk_idx = bnbr / SPRITES_PER_CHUNK;
+    int slot_in_chunk = bnbr % SPRITES_PER_CHUNK;
+
+    // Allocate chunk if not already allocated
+    if (sprite_chunks[chunk_idx] == NULL)
+    {
+        sprite_chunks[chunk_idx] = (struct spritebuffer *)GetMemory(sizeof(struct spritebuffer) * SPRITES_PER_CHUNK);
+        memset(sprite_chunks[chunk_idx], 0, sizeof(struct spritebuffer) * SPRITES_PER_CHUNK);
+        sprite_chunk_used[chunk_idx] = 0;
+    }
+
+    spritebuff[bnbr] = &sprite_chunks[chunk_idx][slot_in_chunk];
+    sprite_chunk_used[chunk_idx]++;
+
+    // Also allocate spritebuff[0] if this is the first sprite being allocated (and bnbr != 0)
+    if (bnbr != 0 && spritebuff[0] == NULL)
+    {
+        allocSpriteBuff(0);
+    }
+
+    return spritebuff[bnbr];
+}
+
+// Helper function to initialize a sprite buffer with default inactive values
+
+// Helper function to initialize a sprite buffer with default inactive values
+// Allocates the sprite if not already allocated
+static void initSpriteBuff(int bnbr, int w, int h)
+{
+    if (spritebuff[bnbr] == NULL)
+    {
+        allocSpriteBuff(bnbr);
+    }
+    spritebuff[bnbr]->w = w;
+    spritebuff[bnbr]->h = h;
+    spritebuff[bnbr]->master = 0;
+    spritebuff[bnbr]->mymaster = -1;
+    spritebuff[bnbr]->x = SPRITE_POS_INACTIVE;
+    spritebuff[bnbr]->y = SPRITE_POS_INACTIVE;
+    spritebuff[bnbr]->layer = -1;
+    spritebuff[bnbr]->next_x = SPRITE_POS_INACTIVE;
+    spritebuff[bnbr]->next_y = SPRITE_POS_INACTIVE;
+    spritebuff[bnbr]->active = false;
+    spritebuff[bnbr]->lastcollisions = 0;
+    spritebuff[bnbr]->edges = 0;
+    spritebuff[bnbr]->boundsleft = NULL;
+    spritebuff[bnbr]->boundsright = NULL;
+    spritebuff[bnbr]->boundstop = NULL;
+    spritebuff[bnbr]->boundsbottom = NULL;
+}
+
+void LIFOadd(int n)
+{
+    int i, j = 0;
+    for (i = 0; i < LIFOpointer; i++)
+    {
+        if (LIFO[i] != n)
+        {
+            LIFO[j] = LIFO[i];
+            j++;
+        }
+    }
+    LIFO[j] = n;
+    LIFOpointer = j + 1;
+}
+void LIFOremove(int n)
+{
+    int i, j = 0;
+    for (i = 0; i < LIFOpointer; i++)
+    {
+        if (LIFO[i] != n)
+        {
+            LIFO[j] = LIFO[i];
+            j++;
+        }
+    }
+    LIFOpointer = j;
+}
+void LIFOswap(int n, int m)
+{
+    int i;
+    for (i = 0; i < LIFOpointer; i++)
+    {
+        if (LIFO[i] == n)
+            LIFO[i] = m;
+    }
+}
+void zeroLIFOadd(int n)
+{
+    int i, j = 0;
+    for (i = 0; i < zeroLIFOpointer; i++)
+    {
+        if (zeroLIFO[i] != n)
+        {
+            zeroLIFO[j] = zeroLIFO[i];
+            j++;
+        }
+    }
+    zeroLIFO[j] = n;
+    zeroLIFOpointer = j + 1;
+}
+void zeroLIFOremove(int n)
+{
+    int i, j = 0;
+    for (i = 0; i < zeroLIFOpointer; i++)
+    {
+        if (zeroLIFO[i] != n)
+        {
+            zeroLIFO[j] = zeroLIFO[i];
+            j++;
+        }
+    }
+    zeroLIFOpointer = j;
+}
+void zeroLIFOswap(int n, int m)
+{
+    int i;
+    for (i = 0; i < zeroLIFOpointer; i++)
+    {
+        if (zeroLIFO[i] == n)
+            zeroLIFO[i] = m;
+    }
+}
+void getspritebounds(int bnbr)
+{
+    if (spritebuff[bnbr]->boundsleft != NULL)
+    {
+        return;
+    }
+    int w = spritebuff[bnbr]->w;
+    int h = spritebuff[bnbr]->h;
+    int sprite_transparent2 = sprite_transparent << 4;
+    char *c = (char *)spritebuff[bnbr]->spritebuffptr;
+
+    // Free old bounds if they exist (only free boundsleft as others are part of same allocation)
+
+    // Allocate all bounds arrays in a single block to minimize memory page usage
+    // Layout: [boundsleft: h shorts][boundsright: h shorts][boundstop: w shorts][boundsbottom: w shorts]
+    int bounds_size = (h + h + w + w) * sizeof(short);
+    short *bounds_block = (short *)GetMemory(bounds_size);
+    spritebuff[bnbr]->boundsleft = bounds_block;
+    spritebuff[bnbr]->boundsright = bounds_block + h;
+    spritebuff[bnbr]->boundstop = bounds_block + h + h;
+    spritebuff[bnbr]->boundsbottom = bounds_block + h + h + w;
+    for (int x = 0; x < w; ++x)
+    {
+        spritebuff[bnbr]->boundstop[x] = SHRT_MAX;
+        spritebuff[bnbr]->boundsbottom[x] = -1;
+    }
+    int nib = 1;
+    for (int y = 0; y < h; ++y)
+    {
+        int x;
+        spritebuff[bnbr]->boundsleft[y] = w;
+        spritebuff[bnbr]->boundsright[y] = -1;
+        for (x = 0; x < w; ++x)
+        {
+            nib ^= 1;
+            if (nib)
+            { // odd x upper nipple
+                if ((*c++ & 0xf0) == sprite_transparent2)
+                    continue;
+            }
+            else
+            { // even x lower nipple
+                if ((*c & 0x0f) == sprite_transparent)
+                    continue;
+            }
+            if (spritebuff[bnbr]->boundsleft[y] == w)
+                spritebuff[bnbr]->boundsleft[y] = x;
+            spritebuff[bnbr]->boundsright[y] = x;
+            spritebuff[bnbr]->boundsbottom[x] = y;
+            if (spritebuff[bnbr]->boundstop[x] == SHRT_MAX)
+                spritebuff[bnbr]->boundstop[x] = y;
+        }
+    }
+}
+void MIPS16 closeallsprites(void)
+{
+    int i;
+
+    // Free sub-allocations for all sprites
+    for (i = 0; i <= MAXBLITBUF; i++)
+    {
+        if (i <= MAXLAYER)
+            layer_in_use[i] = 0;
+
+        if (spritebuff[i] != NULL)
+        {
+            if (i)
+            {
+                if (spritebuff[i]->mymaster == -1)
+                {
+                    // Master sprite: spritebuffptr and blitstoreptr are in one block
+                    FreeMemory((unsigned char *)spritebuff[i]->spritebuffptr);
+                    // boundsleft, boundsright, boundstop, boundsbottom are all in one block
+                    FreeMemory((unsigned char *)spritebuff[i]->boundsleft);
+                }
+                else
+                {
+                    // Copy sprite: only blitstoreptr is allocated separately
+                    if (spritebuff[i]->blitstoreptr != NULL)
+                    {
+                        FreeMemory((unsigned char *)spritebuff[i]->blitstoreptr);
+                    }
+                }
+            }
+            spritebuff[i] = NULL;
+        }
+    }
+
+    // Free all sprite chunks
+    for (i = 0; i < SPRITE_CHUNK_COUNT; i++)
+    {
+        if (sprite_chunks[i] != NULL)
+        {
+            FreeMemory((unsigned char *)sprite_chunks[i]);
+            sprite_chunks[i] = NULL;
+            sprite_chunk_used[i] = 0;
+        }
+    }
+
+    LIFOpointer = 0;
+    zeroLIFOpointer = 0;
+    sprites_in_use = 0;
+    hideall = 0;
+}
+
+void MIPS16 closeallstobjects(void)
+{
+    int i;
+    for (i = 1; i <= MAXSTOBJECTS; i++)
+    {
+        stobjects[i].x = 0;
+        stobjects[i].y = 0;
+        stobjects[i].w = 0;
+        stobjects[i].h = 0;
+        stobjects[i].active = 0;
+    }
+    STCollisionInterrupt = NULL;
+    STCollisionFound = false;
+    sprite_hit_st = -1;
+    st_which_collided = -1;
+}
+
+// Check for collisions between a sprite and all active static objects
+// Called from ProcessCollisions after sprite-to-sprite collision detection
+// Stores collision info in spritebuff[bnbr]->collisions array
+void CheckSTCollisions(int bnbr, int *n)
+{
+    struct spritebuffer *sb = spritebuff[bnbr];
+    int sw = sb->w;
+    int sh = sb->h;
+    int sx = sb->x;
+    int sy = sb->y;
+
+    for (int i = 1; i <= MAXSTOBJECTS; i++)
+    {
+        if (!stobjects[i].active)
+            continue;
+
+        // AABB intersection test
+        if (!(sx + sw <= stobjects[i].x ||
+              sx >= stobjects[i].x + stobjects[i].w ||
+              sy + sh <= stobjects[i].y ||
+              sy >= stobjects[i].y + stobjects[i].h))
+        {
+            // Collision detected - store in collisions array with high bit marker (0x80 + static object number)
+            if (*n < MAXCOLLISIONS)
+            {
+                sb->collisions[(*n)++] = (char)(0x80 | i); // Mark as ST collision with object number
+            }
+            STCollisionFound = true;
+            sprite_hit_st = bnbr;
+            st_which_collided = i;
+        }
+    }
+}
+
+void checklimits(int bnbr, int *n)
+{
+    int maxW = HRes;
+    int maxH = VRes;
+    struct spritebuffer *sb = spritebuff[bnbr]; // Cache pointer for performance
+    sb->collisions[*n] = 0;
+    if (sb->x < 0)
+    {
+        if (!(sb->edges & 1))
+        {
+            sb->edges |= 1;
+            sb->collisions[*n] = (char)0xF1;
+            (*n)++;
+        }
+    }
+    else
+        sb->edges &= ~1;
+
+    if (sb->y < 0)
+    {
+        if (!(sb->edges & 2))
+        {
+            sb->edges |= 2;
+            if (sb->collisions[*n] & 0xF0)
+                sb->collisions[*n] |= 0xF2;
+            else
+            {
+                sb->collisions[*n] = (char)0xF2;
+                (*n)++;
+            }
+        }
+    }
+    else
+        sb->edges &= ~2;
+
+    if (sb->x + sb->w > maxW)
+    {
+        if (!(sb->edges & 4))
+        {
+            sb->edges |= 4;
+            if (sb->collisions[*n] & 0xF0)
+                sb->collisions[*n] |= 0xF4;
+            else
+            {
+                sb->collisions[*n] = (char)0xF4;
+                (*n)++;
+            }
+        }
+    }
+    else
+        sb->edges &= ~4;
+
+    if (sb->y + sb->h > maxH)
+    {
+        if (!(sb->edges & 8))
+        {
+            sb->edges |= 8;
+            if (sb->collisions[*n] & 0xF0)
+                sb->collisions[*n] |= 0xF8;
+            else
+            {
+                sb->collisions[*n] = (char)0xF8;
+                (*n)++;
+            }
+        }
+    }
+    else
+        sb->edges &= ~8;
+}
+void ProcessCollisions(int bnbr)
+{
+    int k, j = 1, n = 1, bcol = 1;
+    // We know that any collision is caused by movement of sprite bnbr
+    //  a value of zero indicates that we are processing movement of layer 0 and any
+    //  sprites on that layer
+    CollisionFound = false;
+    sprite_which_collided = -1;
+    uint64_t mask, mymask = (uint64_t)1 << ((uint64_t)bnbr - (uint64_t)1);
+    struct spritebuffer *sb = spritebuff[bnbr]; // Cache pointer for performance
+    memset(spritebuff[0]->collisions, 0, MAXCOLLISIONS);
+    if (bnbr != 0)
+    {                                             // a specific sprite has moved
+        memset(sb->collisions, 0, MAXCOLLISIONS); // clear our previous collisions
+        if (sb->layer != 0)
+        {
+            if (layer_in_use[sb->layer] + layer_in_use[0] > 1)
+            { // other sprites in this layer
+                for (k = 1; k <= MAXBLITBUF; k++)
+                {
+                    struct spritebuffer *sk = spritebuff[k]; // Cache inner loop pointer
+                    if (sk == NULL)
+                        continue;
+                    mask = (uint64_t)1 << ((uint64_t)k - (uint64_t)1);
+                    if (!(sk->active))
+                    {
+                        sb->lastcollisions &= ~mask;
+                        continue;
+                    }
+                    if (k == bnbr)
+                        continue;
+                    if (j == layer_in_use[sb->layer] + layer_in_use[0])
+                        break; // nothing left to process
+                    if ((sk->layer == sb->layer || sk->layer == 0))
+                    {
+                        j++;
+                        if (!(sk->x + sk->w < sb->x ||
+                              sk->x > sb->x + sb->w ||
+                              sk->y + sk->h < sb->y ||
+                              sk->y > sb->y + sb->h))
+                        {
+                            if (n < MAXCOLLISIONS && !(sb->lastcollisions & mask))
+                                sb->collisions[n++] = k;
+                            sb->lastcollisions |= mask;
+                            sk->lastcollisions |= mymask;
+                        }
+                        else
+                        {
+                            sb->lastcollisions &= ~mask;
+                            sk->lastcollisions &= ~mymask;
+                        }
+                    }
+                }
+            }
+        }
+        else
+        {
+            for (k = 1; k <= MAXBLITBUF; k++)
+            {
+                struct spritebuffer *sk = spritebuff[k]; // Cache inner loop pointer
+                if (sk == NULL)
+                    continue;
+                if (j == sprites_in_use)
+                    break; // nothing left to process
+                if (k == bnbr)
+                    continue;
+                mask = (uint64_t)1 << ((uint64_t)k - (uint64_t)1);
+                if (!(sk->active))
+                {
+                    sb->lastcollisions &= ~mask;
+                    continue;
+                }
+                else
+                    j++;
+                if (!(sk->x + sk->w < sb->x ||
+                      sk->x > sb->x + sb->w ||
+                      sk->y + sk->h < sb->y ||
+                      sk->y > sb->y + sb->h))
+                {
+                    if (n < MAXCOLLISIONS && !(sb->lastcollisions & mask))
+                        sb->collisions[n++] = k;
+                    sb->lastcollisions |= mask;
+                    sk->lastcollisions |= mymask;
+                }
+                else
+                {
+                    sb->lastcollisions &= ~mask;
+                    sk->lastcollisions &= ~mymask;
+                }
+            }
+        }
+        // now look for collisions with the edge of the screen
+        checklimits(bnbr, &n);
+        // now look for collisions with static objects
+        CheckSTCollisions(bnbr, &n);
+        if (n > 1)
+        {
+            CollisionFound = true;
+            sprite_which_collided = bnbr;
+            spritebuff[bnbr]->collisions[0] = n - 1;
+        }
+    }
+    else
+    { // the background layer has moved
+        j = 0;
+        for (k = 1; k <= MAXBLITBUF; k++)
+        {                                            // loop through all sprites
+            struct spritebuffer *sk = spritebuff[k]; // Cache pointer for performance
+            if (sk == NULL)
+                continue;
+            mask = (uint64_t)1 << ((uint64_t)k - (uint64_t)1);
+            n = 1;
+            int kk, jj = 1;
+            if (j == sprites_in_use)
+                break; // nothing left to process
+            if (sk->active)
+            { // sprite found
+                memset(sk->collisions, 0, MAXCOLLISIONS);
+                j++;
+                if (layer_in_use[sk->layer] + layer_in_use[0] > 1)
+                { // other sprites in this layer
+                    for (kk = 1; kk <= MAXBLITBUF; kk++)
+                    {
+                        struct spritebuffer *skk = spritebuff[kk]; // Cache inner loop pointer
+                        if (skk == NULL)
+                            continue;
+                        if (kk == k)
+                            continue;
+                        if (jj == layer_in_use[sk->layer] + layer_in_use[0])
+                            break; // nothing left to process
+                        if ((skk->layer == sk->layer || skk->layer == 0))
+                        {
+                            jj++;
+                            if (!(skk->x + skk->w < sk->x ||
+                                  skk->x > sk->x + sk->w ||
+                                  skk->y + skk->h < sk->y ||
+                                  skk->y > sk->y + sk->h))
+                            {
+                                if (n < MAXCOLLISIONS && !(sk->lastcollisions & mask))
+                                    sk->collisions[n++] = kk;
+                                sk->lastcollisions |= mask;
+                            }
+                            else
+                            {
+                                sk->lastcollisions &= ~mask;
+                            }
+                        }
+                    }
+                }
+                checklimits(k, &n);
+                CheckSTCollisions(k, &n);
+                if (n > 1 && n < MAXCOLLISIONS && bcol < MAXCOLLISIONS)
+                {
+                    spritebuff[0]->collisions[bcol] = k;
+                    bcol++;
+                    sk->collisions[0] = n - 1;
+                }
+            }
+        }
+        if (bcol > 1)
+        {
+            CollisionFound = true;
+            sprite_which_collided = 0;
+            spritebuff[0]->collisions[0] = bcol - 1;
+        }
+    }
+}
+void blithide(int bnbr)
+{
+    struct spritebuffer *sb = spritebuff[bnbr]; // Cache pointer for performance
+    int w = sb->w;
+    int h = sb->h;
+    int x1 = sb->x;
+    int y1 = sb->y;
+    sb->active = 0;
+    DrawBufferFast(x1, y1, x1 + w - 1, y1 + h - 1, -1, (unsigned char *)sb->blitstoreptr);
+}
+void expandpixel(volatile unsigned char *ii, volatile unsigned char *oo, int n, int mode)
+{
+    volatile unsigned char *o = oo, *i = ii;
+    int toggle = 0;
+    if (mode == 0)
+    {
+        while (n--)
+        {
+            if (toggle)
+            {
+                *o++ = (*i++ >> 4);
+            }
+            else
+            {
+                *o++ = *i & 0xF;
+            }
+            toggle = !toggle;
+        }
+    }
+    else
+    {
+        while (n--)
+        {
+            *o++ = (*i >> toggle++) & 0x1;
+            if (toggle == 8)
+            {
+                i++;
+                toggle = 0;
+            }
+        }
+    }
+}
+void contractpixel(volatile unsigned char *ii, volatile unsigned char *oo, int n, int mode)
+{
+    int toggle = 0;
+    volatile unsigned char *o = oo, *i = ii;
+    if (mode == 0)
+    {
+        while (n--)
+        {
+            if (toggle)
+            {
+                *o++ |= (*i++ << 4);
+            }
+            else
+            {
+                *o = *i++ & 0xF;
+            }
+            toggle = !toggle;
+        }
+    }
+    else
+    {
+        while (n--)
+        {
+            if (toggle == 0)
+                *o = 0;
+            *o |= (*i++ << toggle++);
+            if (toggle == 8)
+            {
+                toggle = 0;
+                o++;
+            }
+        }
+    }
+}
+
+void BlitShowBuffer(int bnbr, int x1, int y1, int mode)
+{
+    struct spritebuffer *sb = spritebuff[bnbr]; // Cache pointer for performance
+    char *current;
+    int x, xx, y, yy, rotation, fullmode = mode;
+    mode &= 7;
+    rotation = sb->rotation;
+    current = sb->blitstoreptr;
+    int w, h;
+    if (sb->spritebuffptr != NULL)
+    {
+        w = sb->w;
+        h = sb->h;
+        if (!(mode == 0 || mode & 4) && sb->active)
+        {
+            DrawBufferFast(sb->x, sb->y, sb->x + w - 1, sb->y + h - 1, -1, (unsigned char *)current);
+        }
+        sb->x = x1;
+        sb->y = y1;
+        if (!(mode == 2))
+            ReadBufferFast(x1, y1, x1 + w - 1, y1 + h - 1, (unsigned char *)current);
+        // we now have the old screen image stored together with the coordinates
+        if (rotation)
+        {
+            unsigned char *d = GetTempMainMemory(w * h);
+            unsigned char *r = GetTempMainMemory((w * h + 1) >> 1);
+            expandpixel((unsigned char *)sb->spritebuffptr, d, w * h, 0);
+            if (rotation & 1)
+            { // swap left/write
+                for (y = 0; y < h; y++)
+                {
+                    for (x = 0, xx = w - 1; x < (w >> 1); x++, xx--)
+                    {
+                        swap(d[y * w + x], d[y * w + xx]);
+                    }
+                }
+            }
+            if (rotation & 2)
+            {
+                for (x = 0; x < w; x++)
+                {
+                    for (y = 0, yy = h - 1; y < (h >> 1); y++, yy--)
+                    {
+                        swap(d[x + y * w], d[x + yy * w]);
+                    }
+                }
+            }
+            contractpixel(d, r, w * h, 0);
+            DrawBufferFast(x1, y1, x1 + w - 1, y1 + h - 1, ((fullmode & 8) == 0 ? 0 : -1), (unsigned char *)r);
+        }
+        else
+        {
+            DrawBufferFast(x1, y1, x1 + w - 1, y1 + h - 1, ((fullmode & 8) == 0 ? 0 : -1), (unsigned char *)sb->spritebuffptr);
+        }
+        if (!(mode & 4))
+            sb->active = 1;
+    }
+}
+int sumlayer(void)
+{
+    int i, j = 0;
+    for (i = 0; i <= MAXLAYER; i++)
+        j += layer_in_use[i];
+    return j;
+}
+void hidesafe(int bnbr)
+{
+    struct spritebuffer *sb = spritebuff[bnbr]; // Cache pointer for performance
+    int found = INT_MAX;
+    int zerolifo = 0;
+    int i;
+    for (i = LIFOpointer - 1; i >= 0; i--)
+    {
+        if (LIFO[i] == bnbr)
+        {
+            blithide(LIFO[i]);
+            found = i;
+            break;
+        }
+        blithide(LIFO[i]);
+    }
+    if (found == INT_MAX)
+    {
+        for (i = zeroLIFOpointer - 1; i >= 0; i--)
+        {
+            if (zeroLIFO[i] == bnbr)
+            {
+                blithide(zeroLIFO[i]);
+                found = -i;
+                zerolifo = 1;
+                break;
+            }
+            blithide(zeroLIFO[i]);
+        }
+    }
+    if (found != INT_MAX)
+    {
+        sprites_in_use--;
+        layer_in_use[sb->layer]--;
+        sb->x = SPRITE_POS_INACTIVE;
+        sb->y = SPRITE_POS_INACTIVE;
+        if (sb->layer == 0)
+            zeroLIFOremove(bnbr);
+        else
+            LIFOremove(bnbr);
+        sb->layer = -1;
+        sb->next_x = SPRITE_POS_INACTIVE;
+        sb->next_y = SPRITE_POS_INACTIVE;
+        sb->lastcollisions = 0;
+        sb->edges = 0;
+        if (zerolifo)
+        {
+            found = -found;
+            for (i = found; i < zeroLIFOpointer; i++)
+            {
+                int idx = zeroLIFO[i];
+                BlitShowBuffer(idx, spritebuff[idx]->x, spritebuff[idx]->y, 0);
+            }
+            for (i = 0; i < LIFOpointer; i++)
+            {
+                int idx = LIFO[i];
+                BlitShowBuffer(idx, spritebuff[idx]->x, spritebuff[idx]->y, 0);
+            }
+        }
+        else
+        {
+            for (i = found; i < LIFOpointer; i++)
+            {
+                int idx = LIFO[i];
+                BlitShowBuffer(idx, spritebuff[idx]->x, spritebuff[idx]->y, 0);
+            }
+        }
+    }
+}
+
+void showsafe(int bnbr, int x, int y)
+{
+    int found = INT_MAX;
+    int zerolifo = 0;
+    int i;
+    for (i = LIFOpointer - 1; i >= 0; i--)
+    {
+        if (LIFO[i] == bnbr)
+        {
+            blithide(LIFO[i]);
+            found = i;
+            break;
+        }
+        blithide(LIFO[i]);
+    }
+    if (found == INT_MAX)
+    {
+        for (i = zeroLIFOpointer - 1; i >= 0; i--)
+        {
+            if (zeroLIFO[i] == bnbr)
+            {
+                blithide(zeroLIFO[i]);
+                zerolifo = 1;
+                found = -i;
+                break;
+            }
+            blithide(zeroLIFO[i]);
+        }
+    }
+    BlitShowBuffer(bnbr, x, y, 1);
+    if (zerolifo)
+    {
+        found = -found;
+        for (i = found + 1; i < zeroLIFOpointer; i++)
+        {
+            int idx = zeroLIFO[i];
+            BlitShowBuffer(idx, spritebuff[idx]->x, spritebuff[idx]->y, 0);
+        }
+        for (i = 0; i < LIFOpointer; i++)
+        {
+            int idx = LIFO[i];
+            BlitShowBuffer(idx, spritebuff[idx]->x, spritebuff[idx]->y, 0);
+        }
+    }
+    else if (found != INT_MAX)
+    {
+        for (i = found + 1; i < LIFOpointer; i++)
+        {
+            int idx = LIFO[i];
+            BlitShowBuffer(idx, spritebuff[idx]->x, spritebuff[idx]->y, 0);
+        }
+    }
+}
+void MIPS16 loadsprite(unsigned char *p)
+{
+    int fnbr, width, number, height = 0, newsprite = 1, startsprite = 1, bnbr, lc, i, toggle = 0;
+    char *q, *fname;
+    unsigned char buff[256], *z;
+    uint32_t data;
+    getcsargs(&p, 5);
+    int mode = 0;
+    fnbr = FindFreeFileNbr();
+    if (!InitSDCard())
+        return;
+    fname = (char *)getFstring(argv[0]);
+    if (argc >= 3 && *argv[2])
+        startsprite = (int)getint(argv[2], 1, 64);
+    if (argc == 5)
+        mode = getint(argv[4], 0, 1);
+    if (strchr(fname, '.') == NULL)
+        strcat(fname, ".spr");
+    if (!BasicFileOpen(fname, fnbr, FA_READ))
+        error((char *)"File not found");
+    MMgetline(fnbr, (char *)buff); // get the input line
+    while (buff[0] == 39)
+        MMgetline(fnbr, (char *)buff);
+    z = buff;
+    {
+        getargs(&z, 5, (unsigned char *)", ");
+        width = getinteger(argv[0]);
+        number = getinteger(argv[2]);
+        if (argc == 5)
+            height = getinteger(argv[4]);
+        if (height == 0)
+            height = width;
+        bnbr = startsprite;
+        if (number + startsprite > MAXBLITBUF)
+        {
+            FileClose(fnbr);
+            error((char *)"Maximum of % sprites", MAXBLITBUF);
+        }
+        while (!MMfeof(fnbr) && bnbr <= number + startsprite)
+        { // while waiting for the end of file
+            if (newsprite)
+            {
+                newsprite = 0;
+                // Allocate sprite structure if needed (also allocates spritebuff[0])
+                if (spritebuff[bnbr] == NULL)
+                    allocSpriteBuff(bnbr);
+                if (spritebuff[bnbr]->spritebuffptr == NULL)
+                {
+                    // Allocate both buffers in one block to save memory pages
+                    int bufsize = (width * height + 1) >> 1;
+                    char *combined = (char *)GetMemory(bufsize * 2);
+                    spritebuff[bnbr]->spritebuffptr = combined;
+                    spritebuff[bnbr]->blitstoreptr = combined + bufsize;
+                }
+                initSpriteBuff(bnbr, width, height);
+                q = spritebuff[bnbr]->spritebuffptr;
+                lc = height;
+            }
+            while (lc--)
+            {
+                MMgetline(fnbr, (char *)buff); // get the input line
+                while (buff[0] == 39)
+                    MMgetline(fnbr, (char *)buff);
+                int bufflen = (int)strlen((char *)buff); // Cache strlen result
+                if (bufflen < width)
+                    memset(&buff[bufflen], 32, width - bufflen);
+                for (i = 0; i < width; i++)
+                {
+                    int colorIdx = spriteCharToColorIndex(buff[i]);
+                    if (colorIdx >= 0)
+                        data = mode ? sprite_color_mode1[colorIdx] : sprite_color_mode0[colorIdx];
+                    else
+                        data = 0;
+                    if (toggle)
+                    {
+                        *q++ |= (RGB121(data) << 4);
+                    }
+                    else
+                    {
+                        *q = RGB121(data);
+                    }
+                    toggle = !toggle;
+                }
+            }
+            bnbr++;
+            newsprite = 1;
+        }
+        FileClose(fnbr);
+    }
+}
+
+void MIPS16 loadarray(unsigned char *p)
+{
+    int bnbr, w, h, size, i, toggle = 0;
+    int maxH = VRes;
+    int maxW = HRes;
+    MMFLOAT *a3float = NULL;
+    int64_t *a3int = NULL;
+    char *q;
+    //    uint16_t* qq;
+    //    uint32_t* qqq;
+    getcsargs(&p, 7);
+    if (*argv[0] == '#')
+        argv[0]++;
+    bnbr = (int)getint(argv[0], 1, MAXBLITBUF);
+    // Allocate sprite structure if needed (also allocates spritebuff[0])
+    if (spritebuff[bnbr] == NULL)
+        allocSpriteBuff(bnbr);
+    if (spritebuff[bnbr]->spritebuffptr == NULL)
+    {
+        w = (int)getint(argv[2], 1, maxW);
+        h = (int)getint(argv[4], 1, maxH);
+        size = parsenumberarray(argv[6], &a3float, &a3int, 4, 1, NULL, true, NULL) - 1;
+        if (size < w * h - 1)
+            error((char *)"Array Dimensions");
+        // Allocate both buffers in one block to save memory pages
+        int bufsize = (w * h + 1) >> 1;
+        char *combined = (char *)GetMemory(bufsize * 2);
+        spritebuff[bnbr]->spritebuffptr = combined;
+        spritebuff[bnbr]->blitstoreptr = combined + bufsize;
+        initSpriteBuff(bnbr, w, h);
+        q = spritebuff[bnbr]->spritebuffptr;
+        int c;
+        for (i = 0; i < w * h; i++)
+        {
+            if (a3float)
+                c = (int)a3float[i];
+            else
+                c = (int)a3int[i];
+            if (toggle)
+            {
+                *q++ |= (RGB121(c) << 4);
+            }
+            else
+            {
+                *q = RGB121(c);
+            }
+            toggle = !toggle;
+        }
+    }
+    else
+        error((char *)"Buffer already in use");
+}
+void ScrollBufferH(int pixels)
+{
+    if (!pixels)
+        return;
+    volatile uint8_t *s, *d, *l, *ss, *dd;
+    int y;
+    if (HRes == 320 && !(pixels & 1))
+    {
+        if (pixels > 0)
+        {
+            for (y = 0; y < VRes; y++)
+            {
+                s = (((y * HRes) >> 1) + WriteBuf);
+                d = s + (pixels >> 1);
+                memmove((void *)d, (void *)s, 160 - (pixels >> 1));
+            }
+        }
+        else
+        {
+            pixels = -pixels;
+            for (y = 0; y < VRes; y++)
+            {
+                s = (((y * HRes) >> 1) + WriteBuf);
+                d = s;
+                s += (pixels >> 1);
+                memmove((void *)d, (void *)s, 160 - (pixels >> 1));
+            }
+        }
+    }
+    else
+    {
+        ss = GetTempMainMemory(HRes);
+        dd = GetTempMainMemory(HRes);
+        if (pixels > 0)
+        {
+            for (y = 0; y < VRes; y++)
+            {
+                l = (((y * HRes) >> (HRes == 320 ? 1 : 3)) + WriteBuf);
+                s = ss;
+                d = dd + pixels;
+                expandpixel(l, s, HRes, (HRes == 320 ? 0 : 1));
+                memcpy((void *)d, (void *)s, (HRes - pixels));
+                contractpixel(dd, l, HRes, (HRes == 320 ? 0 : 1));
+            }
+        }
+        else
+        {
+            pixels = -pixels;
+            for (y = 0; y < VRes; y++)
+            {
+                l = (((y * HRes) >> (HRes == 320 ? 1 : 3)) + WriteBuf);
+                s = ss;
+                d = dd;
+                expandpixel(l, s, HRes, (HRes == 320 ? 0 : 1));
+                s += pixels;
+                memcpy((void *)d, (void *)s, (HRes - pixels));
+                contractpixel(d, l, HRes, (HRes == 320 ? 0 : 1));
+            }
+        }
+    }
+}
+
+void ScrollBufferV(int lines, int blank)
+{
+    uint8_t *s, *d;
+    int y, yy;
+    if (HRes == 320)
+    {
+        int n = (HRes >> 1);
+        if (lines > 0)
+        {
+            for (y = 0; y < VRes - lines; y++)
+            {
+                yy = y + lines;
+                d = (uint8_t *)(((y * HRes) >> 1) + WriteBuf);
+                s = (uint8_t *)(((yy * HRes) >> 1) + WriteBuf);
+                memcpy(d, s, n);
+            }
+            if (blank)
+            {
+                DrawRectangle(0, VRes - lines, HRes - 1, VRes - 1, gui_bcolour); // erase the line to be scrolled off
+            }
+        }
+        else if (lines < 0)
+        {
+            lines = -lines;
+            for (y = VRes - 1; y >= lines; y--)
+            {
+                yy = y - lines;
+                d = (uint8_t *)(((y * HRes) >> 1) + WriteBuf);
+                s = (uint8_t *)(((yy * HRes) >> 1) + WriteBuf);
+                memcpy(d, s, n);
+            }
+            if (blank)
+                DrawRectangle(0, 0, HRes - 1, lines - 1, gui_bcolour); // erase the line to be scrolled off
+        }
+    }
+    else
+    {
+        int n = (HRes >> 3);
+        if (lines > 0)
+        {
+            for (y = 0; y < VRes - lines; y++)
+            {
+                yy = y + lines;
+                d = (uint8_t *)(((y * HRes) >> 3) + WriteBuf);
+                s = (uint8_t *)(((yy * HRes) >> 3) + WriteBuf);
+                memcpy(d, s, n);
+            }
+            if (blank)
+            {
+                DrawRectangle(0, VRes - lines, HRes - 1, VRes - 1, gui_bcolour); // erase the line to be scrolled off
+            }
+        }
+        else if (lines < 0)
+        {
+            lines = -lines;
+            for (y = VRes - 1; y >= lines; y--)
+            {
+                yy = y - lines;
+                d = (uint8_t *)(((y * HRes) >> 3) + WriteBuf);
+                s = (uint8_t *)(((yy * HRes) >> 3) + WriteBuf);
+                memcpy(d, s, n);
+            }
+            if (blank)
+                DrawRectangle(0, 0, HRes - 1, lines - 1, gui_bcolour); // erase the line to be scrolled off
+        }
+    }
+}
+/*  @endcond */
+void packline(uint32_t *data, int width)
+{
+    uint8_t *s = (uint8_t *)data;
+    uint8_t *d = s;
+    for (int i = 0; i < width; i++)
+    {
+        *d++ = *s++;
+        *d++ = *s++;
+        *d++ = *s++;
+        s++;
+    }
+}
+static s_ReadBMP *readstate;
+// External line callback function
+bool loadBMPlinecallback(int *imagewidth, int *imageheight, uint32_t *linedata, int *linenumber)
+{
+    if (*linenumber < readstate->img_y_offset || *linenumber >= readstate->img_y_offset + readstate->height)
+        return true;
+    packline(linedata, *imagewidth);
+    unsigned char *d = readstate->output_buffer;
+    d += (*linenumber - readstate->img_y_offset) * readstate->width * 3;
+    unsigned char *s = (uint8_t *)linedata;
+    s += readstate->img_x_offset * 3;
+    memcpy(d, s, readstate->width * 3);
+    return true;
+}
+void cmd_sprite(void)
+{
+    int x1, y1, w, h, bnbr;
+    unsigned char *p;
+    int maxW = HRes;
+    int maxH = VRes;
+    int newb = 0;
+#ifndef PICOMITEVGA
+    if (WriteBuf == NULL)
+        error("Not available on physical display");
+#endif
+    CheckDisplay();
+    if (DISPLAY_TYPE == SCREENMODE4 || DISPLAY_TYPE == SCREENMODE5)
+        error("Not available for this display mode");
+    if ((p = checkstring(cmdline, (unsigned char *)"SHOW SAFE")))
+    {
+        int layer, mode = 1;
+        getcsargs(&p, 11);
+        if (!(argc == 7 || argc == 9 || argc == 11))
+            SyntaxError();
+        if (hideall)
+            error((char *)"Sprites are hidden");
+        if (*argv[0] == '#')
+            argv[0]++;
+        bnbr = (int)getint(argv[0], 1, MAXBLITBUF); // get the number
+        if (spritebuff[bnbr] == NULL)
+            error((char *)"Buffer not in use");
+        if (spritebuff[bnbr]->h == TRIANGLE_BUFFER_MARKER)
+            StandardError(37);
+        if (spritebuff[bnbr]->spritebuffptr != NULL)
+        {
+            x1 = (int)getint(argv[2], -spritebuff[bnbr]->w + 1, maxW - 1);
+            y1 = (int)getint(argv[4], -spritebuff[bnbr]->h + 1, maxH - 1);
+            layer = (int)getint(argv[6], 0, MAXLAYER);
+            if (argc >= 9 && *argv[8])
+                spritebuff[bnbr]->rotation = (char)getint(argv[8], 0, 7);
+            else
+                spritebuff[bnbr]->rotation = 0;
+            if (spritebuff[bnbr]->rotation > 3)
+            {
+                mode |= 8;
+                spritebuff[bnbr]->rotation &= 3;
+            }
+            if (argc == 11 && *argv[10])
+            {
+                newb = (int)getint(argv[10], 0, 1);
+            }
+            //            q = spritebuff[bnbr]->spritebuffptr;
+            w = spritebuff[bnbr]->w;
+            h = spritebuff[bnbr]->h;
+            if (spritebuff[bnbr]->active)
+            {
+                if (newb)
+                {
+                    hidesafe(bnbr);
+                    spritebuff[bnbr]->layer = layer;
+                    layer_in_use[spritebuff[bnbr]->layer]++;
+                    if (spritebuff[bnbr]->layer == 0)
+                        zeroLIFOadd(bnbr);
+                    else
+                        LIFOadd(bnbr);
+                    sprites_in_use++;
+                    BlitShowBuffer(bnbr, x1, y1, mode);
+                }
+                else
+                {
+                    showsafe(bnbr, x1, y1);
+                }
+            }
+            else
+            {
+                spritebuff[bnbr]->layer = layer;
+                layer_in_use[spritebuff[bnbr]->layer]++;
+                if (spritebuff[bnbr]->layer == 0)
+                    zeroLIFOadd(bnbr);
+                else
+                    LIFOadd(bnbr);
+                sprites_in_use++;
+                BlitShowBuffer(bnbr, x1, y1, mode);
+            }
+            ProcessCollisions(bnbr);
+            if (sprites_in_use != LIFOpointer + zeroLIFOpointer || sprites_in_use != sumlayer())
+                error((char *)"sprite internal error");
+        }
+        else
+            error((char *)"Buffer not in use");
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"SHOW")))
+    {
+        int layer, mode = 1;
+        getcsargs(&p, 9);
+        if (!(argc == 7 || argc == 9))
+            SyntaxError();
+        if (hideall)
+            error((char *)"Sprites are hidden");
+        if (*argv[0] == '#')
+            argv[0]++;
+        bnbr = (int)getint(argv[0], 1, MAXBLITBUF); // get the number
+        if (spritebuff[bnbr] == NULL)
+            error((char *)"Buffer not in use");
+        if (spritebuff[bnbr]->h == TRIANGLE_BUFFER_MARKER)
+            StandardError(37);
+        if (spritebuff[bnbr]->spritebuffptr != NULL)
+        {
+            x1 = (int)getint(argv[2], -spritebuff[bnbr]->w + 1, maxW - 1);
+            y1 = (int)getint(argv[4], -spritebuff[bnbr]->h + 1, maxH - 1);
+            layer = (int)getint(argv[6], 0, MAXLAYER);
+            if (argc == 9)
+                spritebuff[bnbr]->rotation = (int)getint(argv[8], 0, 7);
+            else
+                spritebuff[bnbr]->rotation = 0;
+            if (spritebuff[bnbr]->rotation > 3)
+            {
+                mode |= 8;
+                spritebuff[bnbr]->rotation &= 3;
+            }
+            w = spritebuff[bnbr]->w;
+            h = spritebuff[bnbr]->h;
+            if (spritebuff[bnbr]->active)
+            {
+                layer_in_use[spritebuff[bnbr]->layer]--;
+                if (spritebuff[bnbr]->layer == 0)
+                    zeroLIFOremove(bnbr);
+                else
+                    LIFOremove(bnbr);
+                sprites_in_use--;
+            }
+            spritebuff[bnbr]->layer = layer;
+            layer_in_use[spritebuff[bnbr]->layer]++;
+            if (spritebuff[bnbr]->layer == 0)
+                zeroLIFOadd(bnbr);
+            else
+                LIFOadd(bnbr);
+            sprites_in_use++;
+            //            int cursorhidden = 0;
+            BlitShowBuffer(bnbr, x1, y1, mode);
+            ProcessCollisions(bnbr);
+            if (sprites_in_use != LIFOpointer + zeroLIFOpointer || sprites_in_use != sumlayer())
+                error((char *)"sprite internal error");
+        }
+        else
+            error((char *)"Buffer not in use");
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"HIDE ALL")))
+    {
+        if (hideall)
+            error((char *)"Sprites are hidden");
+        int i;
+        //        int cursorhidden = 0;
+        for (i = LIFOpointer - 1; i >= 0; i--)
+        {
+            blithide(LIFO[i]);
+        }
+        for (i = zeroLIFOpointer - 1; i >= 0; i--)
+        {
+            blithide(zeroLIFO[i]);
+        }
+        hideall = 1;
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"RESTORE")))
+    {
+        if (!hideall)
+            error((char *)"Sprites are not hidden");
+        int i;
+        //        int cursorhidden = 0;
+        for (i = 0; i < zeroLIFOpointer; i++)
+        {
+            BlitShowBuffer(zeroLIFO[i], spritebuff[zeroLIFO[i]]->x, spritebuff[zeroLIFO[i]]->y, 0);
+        }
+        for (i = 0; i < LIFOpointer; i++)
+        {
+            if (spritebuff[LIFO[i]]->next_x != SPRITE_POS_INACTIVE)
+            {
+                spritebuff[LIFO[i]]->x = spritebuff[LIFO[i]]->next_x;
+                spritebuff[LIFO[i]]->next_x = SPRITE_POS_INACTIVE;
+            }
+            if (spritebuff[LIFO[i]]->next_y != SPRITE_POS_INACTIVE)
+            {
+                spritebuff[LIFO[i]]->y = spritebuff[LIFO[i]]->next_y;
+                spritebuff[LIFO[i]]->next_y = SPRITE_POS_INACTIVE;
+            }
+            BlitShowBuffer(LIFO[i], spritebuff[LIFO[i]]->x, spritebuff[LIFO[i]]->y, 0);
+        }
+        hideall = 0;
+        ProcessCollisions(0);
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"HIDE SAFE")))
+    {
+        getcsargs(&p, 1);
+        if (sprites_in_use != LIFOpointer + zeroLIFOpointer || sprites_in_use != sumlayer())
+            error((char *)"sprite internal error");
+        if (argc != 1)
+            SyntaxError();
+        if (*argv[0] == '#')
+            argv[0]++;
+        bnbr = (int)getint(argv[0], 1, MAXBLITBUF); // get the number
+        if (hideall)
+            error((char *)"Sprites are hidden");
+        if (spritebuff[bnbr] != NULL && spritebuff[bnbr]->spritebuffptr != NULL)
+        {
+            if (spritebuff[bnbr]->active)
+            {
+                //                int cursorhidden = 0;
+                hidesafe(bnbr);
+                if (sprites_in_use != LIFOpointer + zeroLIFOpointer || sprites_in_use != sumlayer())
+                    error((char *)"sprite internal error");
+            }
+            else
+                error((char *)"Not Showing");
+        }
+        else
+            error((char *)"Buffer not in use");
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"HIDE")))
+    {
+        getcsargs(&p, 1);
+        if (argc != 1)
+            SyntaxError();
+        if (*argv[0] == '#')
+            argv[0]++;
+        bnbr = (int)getint(argv[0], 1, MAXBLITBUF); // get the number
+        if (spritebuff[bnbr] != NULL && spritebuff[bnbr]->spritebuffptr != NULL)
+        {
+            if (spritebuff[bnbr]->active)
+            {
+                sprites_in_use--;
+                //                int cursorhidden = 0;
+                blithide(bnbr);
+                layer_in_use[spritebuff[bnbr]->layer]--;
+                spritebuff[bnbr]->x = SPRITE_POS_INACTIVE;
+                spritebuff[bnbr]->y = SPRITE_POS_INACTIVE;
+                if (spritebuff[bnbr]->layer == 0)
+                    zeroLIFOremove(bnbr);
+                else
+                    LIFOremove(bnbr);
+                spritebuff[bnbr]->layer = -1;
+                spritebuff[bnbr]->next_x = SPRITE_POS_INACTIVE;
+                spritebuff[bnbr]->next_y = SPRITE_POS_INACTIVE;
+                spritebuff[bnbr]->lastcollisions = 0;
+                spritebuff[bnbr]->edges = 0;
+            }
+            else
+                error((char *)"Not Showing");
+        }
+        else
+            error((char *)"Buffer not in use");
+        if (sprites_in_use != LIFOpointer + zeroLIFOpointer || sprites_in_use != sumlayer())
+            error((char *)"sprite internal error");
+        //
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"SWAP")))
+    {
+        int rbnbr = 0, mode = 2;
+        int64_t master;
+        signed char mymaster;
+        getcsargs(&p, 5);
+        if (argc < 3)
+            SyntaxError();
+        if (hideall)
+            error((char *)"Sprites are hidden");
+        if (*argv[0] == '#')
+            argv[0]++;
+        bnbr = (int)getint(argv[0], 1, MAXBLITBUF); // get the number
+        if (*argv[2] == '#')
+            argv[2]++;
+        rbnbr = (int)getint(argv[2], 1, MAXBLITBUF); // get the number
+        if (spritebuff[bnbr] == NULL || spritebuff[bnbr]->spritebuffptr == NULL || spritebuff[bnbr]->active == false)
+            error((char *)"Original buffer not displayed");
+        //        if (spritebuff[bnbr]->master == -1)error((char *)"Can't swap a copy");
+        if (spritebuff[rbnbr] == NULL)
+            error((char *)"New buffer not defined");
+        if (spritebuff[rbnbr]->active)
+            error((char *)"New buffer already displayed");
+        //        if (spritebuff[rbnbr]->master == -1)error((char *)"Can't swap a copy");
+        if (!(spritebuff[rbnbr]->w == spritebuff[bnbr]->w && spritebuff[rbnbr]->h == spritebuff[bnbr]->h))
+            error((char *)"Size mismatch");
+        // copy the relevant data
+        master = spritebuff[rbnbr]->master;
+        mymaster = spritebuff[rbnbr]->mymaster;
+        spritebuff[rbnbr]->master = spritebuff[bnbr]->master;
+        spritebuff[rbnbr]->mymaster = spritebuff[bnbr]->mymaster;
+        spritebuff[rbnbr]->blitstoreptr = spritebuff[bnbr]->blitstoreptr;
+        spritebuff[rbnbr]->x = spritebuff[bnbr]->x;
+        spritebuff[rbnbr]->y = spritebuff[bnbr]->y;
+        spritebuff[rbnbr]->layer = spritebuff[bnbr]->layer;
+        spritebuff[rbnbr]->lastcollisions = spritebuff[bnbr]->lastcollisions;
+        spritebuff[rbnbr]->boundsleft = spritebuff[bnbr]->boundsleft;
+        spritebuff[rbnbr]->boundsright = spritebuff[bnbr]->boundsright;
+        spritebuff[rbnbr]->boundstop = spritebuff[bnbr]->boundstop;
+        spritebuff[rbnbr]->boundsbottom = spritebuff[bnbr]->boundsbottom;
+        if (spritebuff[rbnbr]->layer == 0)
+            zeroLIFOswap(bnbr, rbnbr);
+        else
+            LIFOswap(bnbr, rbnbr);
+        // "Hide" the old sprite
+        spritebuff[bnbr]->master = master;
+        spritebuff[bnbr]->mymaster = mymaster;
+        spritebuff[bnbr]->x = SPRITE_POS_INACTIVE;
+        spritebuff[bnbr]->y = SPRITE_POS_INACTIVE;
+        spritebuff[bnbr]->layer = -1;
+        spritebuff[bnbr]->next_x = SPRITE_POS_INACTIVE;
+        spritebuff[bnbr]->next_y = SPRITE_POS_INACTIVE;
+        spritebuff[bnbr]->active = 0;
+        spritebuff[bnbr]->lastcollisions = 0;
+        if (argc == 5)
+            spritebuff[rbnbr]->rotation = (int)getint(argv[4], 0, 7);
+        else
+            spritebuff[rbnbr]->rotation = 0;
+        if (spritebuff[rbnbr]->rotation > 3)
+        {
+            mode |= 8;
+            spritebuff[rbnbr]->rotation &= 3;
+        }
+        BlitShowBuffer(rbnbr, spritebuff[rbnbr]->x, spritebuff[rbnbr]->y, mode);
+        if (sprites_in_use != LIFOpointer + zeroLIFOpointer || sprites_in_use != sumlayer())
+            error((char *)"sprite internal error");
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"READ")))
+    {
+        getcsargs(&p, 11);
+        if (!(argc == 9))
+            SyntaxError();
+        if (*argv[0] == '#')
+            argv[0]++;
+        bnbr = (int)getint(argv[0], 1, MAXBLITBUF); // get the number
+        x1 = (int)getinteger(argv[2]);
+        y1 = (int)getinteger(argv[4]);
+        w = (int)getinteger(argv[6]);
+        h = (int)getinteger(argv[8]);
+        if (w < 1 || h < 1)
+            return;
+        // Allocate sprite structure if needed (also allocates spritebuff[0])
+        if (spritebuff[bnbr] == NULL)
+            allocSpriteBuff(bnbr);
+        if (spritebuff[bnbr]->spritebuffptr == NULL)
+        {
+            // Allocate both sprite buffer and blit store in one block to save memory pages
+            int bufsize = (w * h + 1) >> 1;
+            char *combined = (char *)GetMemory(bufsize * 2);
+            spritebuff[bnbr]->spritebuffptr = combined;
+            spritebuff[bnbr]->blitstoreptr = combined + bufsize;
+            initSpriteBuff(bnbr, w, h);
+        }
+        else
+        {
+            if (spritebuff[bnbr]->mymaster != -1)
+                error((char *)"Can't read into a copy", bnbr);
+            if (spritebuff[bnbr]->master > 0)
+                error((char *)"Copies exist", bnbr);
+            if (!(spritebuff[bnbr]->w == w && spritebuff[bnbr]->h == h))
+                error((char *)"Existing buffer is incorrect size");
+        }
+        ReadBufferFast(x1, y1, x1 + w - 1, y1 + h - 1, (unsigned char *)spritebuff[bnbr]->spritebuffptr);
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"COPY")))
+    {
+        int cpy, nbr, c1, n1;
+        getcsargs(&p, 5);
+        if (argc != 5)
+            SyntaxError();
+        if (*argv[0] == '#')
+            argv[0]++;
+        bnbr = (int)getint(argv[0], 1, MAXBLITBUF); // get the number
+        if (spritebuff[bnbr] != NULL && spritebuff[bnbr]->spritebuffptr != NULL)
+        {
+            if (*argv[2] == '#')
+                argv[2]++;
+            c1 = cpy = (int)getint(argv[2], 1, MAXBLITBUF);
+            n1 = nbr = (int)getint(argv[4], 1, MAXBLITBUF - 1);
+
+            while (n1)
+            {
+                if (spritebuff[c1] != NULL && spritebuff[c1]->spritebuffptr != NULL)
+                    error((char *)"Buffer already in use %", c1);
+                if (spritebuff[bnbr]->master == -1)
+                    error((char *)"Can't copy a copy");
+                ;
+                n1--;
+                c1++;
+            }
+            while (nbr)
+            {
+                // Allocate sprite structure for copy if needed
+                if (spritebuff[cpy] == NULL)
+                    allocSpriteBuff(cpy);
+                spritebuff[cpy]->spritebuffptr = spritebuff[bnbr]->spritebuffptr;
+                spritebuff[cpy]->w = spritebuff[bnbr]->w;
+                spritebuff[cpy]->h = spritebuff[bnbr]->h;
+                spritebuff[cpy]->blitstoreptr = (char *)GetMemory((spritebuff[cpy]->w * spritebuff[cpy]->h + 1) >> 1);
+                spritebuff[cpy]->x = SPRITE_POS_INACTIVE;
+                spritebuff[cpy]->y = SPRITE_POS_INACTIVE;
+                spritebuff[cpy]->next_x = SPRITE_POS_INACTIVE;
+                spritebuff[cpy]->next_y = SPRITE_POS_INACTIVE;
+                spritebuff[cpy]->layer = -1;
+                spritebuff[cpy]->mymaster = bnbr;
+                spritebuff[cpy]->master = -1;
+                spritebuff[cpy]->edges = 0;
+                spritebuff[bnbr]->master |= ((int64_t)1 << (int64_t)cpy);
+                spritebuff[bnbr]->lastcollisions = 0;
+                spritebuff[cpy]->active = false;
+                spritebuff[cpy]->boundsleft = spritebuff[bnbr]->boundsleft;
+                spritebuff[cpy]->boundsright = spritebuff[bnbr]->boundsright;
+                spritebuff[cpy]->boundstop = spritebuff[bnbr]->boundstop;
+                spritebuff[cpy]->boundsbottom = spritebuff[bnbr]->boundsbottom;
+                nbr--;
+                cpy++;
+            }
+        }
+        else
+            error((char *)"Buffer not in use");
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"LOADARRAY")))
+    {
+        loadarray(p);
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"LOAD")))
+    {
+        loadsprite(p);
+        return;
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"STATIC CLEAR")))
+    {
+        closeallstobjects();
+        return;
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"STATIC")))
+    {
+        getcsargs(&p, 9);
+        if (*argv[0] == '#')
+            argv[0]++;
+        int stnum = (int)getint(argv[0], 1, MAXSTOBJECTS);
+        if (argc == 3 && checkstring(argv[2], (unsigned char *)"OFF"))
+        {
+            // SPRITE STATIC n, OFF - remove static object
+            stobjects[stnum].active = 0;
+            stobjects[stnum].x = 0;
+            stobjects[stnum].y = 0;
+            stobjects[stnum].w = 0;
+            stobjects[stnum].h = 0;
+        }
+        else if (argc == 9)
+        {
+            // SPRITE STATIC n, x, y, w, h - define static object
+            stobjects[stnum].x = (short)getint(argv[2], -32768, 32767);
+            stobjects[stnum].y = (short)getint(argv[4], -32768, 32767);
+            stobjects[stnum].w = (short)getint(argv[6], 1, 32767);
+            stobjects[stnum].h = (short)getint(argv[8], 1, 32767);
+            stobjects[stnum].active = 1;
+        }
+        else
+            SyntaxError();
+        return;
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"STINTERRUPT")))
+    {
+        getcsargs(&p, 1);
+        STCollisionInterrupt = (char *)GetIntAddress(argv[0]); // get the interrupt location
+        InterruptUsed = true;
+        return;
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"NOSTINTERRUPT")))
+    {
+        STCollisionInterrupt = NULL;
+        return;
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"INTERRUPT")))
+    {
+        getcsargs(&p, 1);
+        COLLISIONInterrupt = (char *)GetIntAddress(argv[0]); // get the interrupt location
+        InterruptUsed = true;
+        return;
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"NOINTERRUPT")))
+    {
+        COLLISIONInterrupt = NULL; // get the interrupt location
+        return;
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"CLOSE ALL")))
+    {
+        closeallsprites();
+        closeallstobjects();
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"CLOSE")))
+    {
+        getcsargs(&p, 1);
+        if (hideall)
+            error((char *)"Sprites are hidden");
+        if (*argv[0] == '#')
+            argv[0]++;
+        bnbr = (int)getint(argv[0], 1, MAXBLITBUF);
+        if (spritebuff[bnbr] == NULL)
+            error((char *)"Buffer not in use");
+        if (spritebuff[bnbr]->master > 0)
+            error((char *)"Copies still open");
+        if (spritebuff[bnbr]->spritebuffptr != NULL)
+        {
+            if (spritebuff[bnbr]->active)
+            {
+                blithide(bnbr);
+                if (spritebuff[bnbr]->layer == 0)
+                    zeroLIFOremove(bnbr);
+                else
+                    LIFOremove(bnbr);
+                layer_in_use[spritebuff[bnbr]->layer]--;
+                sprites_in_use--;
+            }
+            if (spritebuff[bnbr]->mymaster == -1)
+            {
+                // Master sprite: spritebuffptr and blitstoreptr are in one block
+                FreeMemorySafe((void **)&spritebuff[bnbr]->spritebuffptr);
+                // boundsleft, boundsright, boundstop, boundsbottom are all in one block
+                FreeMemorySafe((void **)&spritebuff[bnbr]->boundsleft);
+                spritebuff[bnbr]->boundsright = NULL;
+                spritebuff[bnbr]->boundstop = NULL;
+                spritebuff[bnbr]->boundsbottom = NULL;
+            }
+            else
+            {
+                // Copy sprite: only blitstoreptr is allocated separately
+                spritebuff[spritebuff[bnbr]->mymaster]->master &= ~(1 << bnbr);
+                FreeMemorySafe((void **)&spritebuff[bnbr]->blitstoreptr);
+            }
+            spritebuff[bnbr]->spritebuffptr = NULL;
+            spritebuff[bnbr]->blitstoreptr = NULL;
+            spritebuff[bnbr]->master = -1;
+            spritebuff[bnbr]->mymaster = -1;
+            spritebuff[bnbr]->x = SPRITE_POS_INACTIVE;
+            spritebuff[bnbr]->y = SPRITE_POS_INACTIVE;
+            spritebuff[bnbr]->w = 0;
+            spritebuff[bnbr]->h = 0;
+            spritebuff[bnbr]->next_x = SPRITE_POS_INACTIVE;
+            spritebuff[bnbr]->next_y = SPRITE_POS_INACTIVE;
+            spritebuff[bnbr]->layer = -1;
+            spritebuff[bnbr]->active = false;
+            spritebuff[bnbr]->edges = 0;
+            spritebuff[bnbr]->boundsleft = NULL;
+            spritebuff[bnbr]->boundsright = NULL;
+            spritebuff[bnbr]->boundstop = NULL;
+            spritebuff[bnbr]->boundsbottom = NULL;
+        }
+        else
+            error((char *)"Buffer not in use");
+        if (sprites_in_use != LIFOpointer + zeroLIFOpointer || sprites_in_use != sumlayer())
+            error((char *)"sprite internal error");
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"NEXT")))
+    {
+        getcsargs(&p, 5);
+        if (!(argc == 5))
+            SyntaxError();
+        if (*argv[0] == '#')
+            argv[0]++;
+        bnbr = (int)getint(argv[0], 1, MAXBLITBUF); // get the number
+        if (spritebuff[bnbr] == NULL)
+            error((char *)"Buffer not in use");
+        spritebuff[bnbr]->next_x = (short)getint(argv[2], -spritebuff[bnbr]->w + 1, maxW - 1);
+        spritebuff[bnbr]->next_y = (short)getint(argv[4], -spritebuff[bnbr]->h + 1, maxH - 1);
+        //
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"WRITE")))
+    {
+        int mode = 4;
+        getcsargs(&p, 7);
+        if (!(argc == 5 || argc == 7))
+            SyntaxError();
+        if (*argv[0] == '#')
+            argv[0]++;
+        bnbr = (int)getint(argv[0], 1, MAXBLITBUF); // get the number
+        if (spritebuff[bnbr] == NULL)
+            error((char *)"Buffer not in use");
+        if (spritebuff[bnbr]->h == TRIANGLE_BUFFER_MARKER)
+            StandardError(37);
+        if (spritebuff[bnbr]->spritebuffptr != NULL)
+        {
+            x1 = (int)getint(argv[2], -spritebuff[bnbr]->w + 1, maxW);
+            y1 = (int)getint(argv[4], -spritebuff[bnbr]->h + 1, maxH);
+            if (argc == 7)
+                spritebuff[bnbr]->rotation = (char)getint(argv[6], 0, 7);
+            else
+                spritebuff[bnbr]->rotation = 4;
+            if ((spritebuff[bnbr]->rotation & 4) == 0)
+                mode |= 8;
+            spritebuff[bnbr]->rotation &= 3;
+            w = spritebuff[bnbr]->w;
+            h = spritebuff[bnbr]->h;
+            //            int cursorhidden = 0;
+            BlitShowBuffer(bnbr, x1, y1, mode);
+        }
+        else
+            error((char *)"Buffer not in use");
+    }
+#ifdef rp2350
+    else if ((p = checkstring(cmdline, (unsigned char *)"LOADPNG")))
+    {
+        int toggle = 0, transparent = 0, cutoff = 30, remap_colour = -1;
+        int w, h;
+        upng_t *upng;
+        // get the command line arguments
+        getcsargs(&p, 11); // this MUST be the first executable line in the function
+        if (*argv[0] == '#')
+            argv[0]++;                         // check if the first arg is prefixed with a #
+        bnbr = getint(argv[0], 1, MAXBLITBUF); // get the buffer number
+        if (spritebuff[bnbr] != NULL && spritebuff[bnbr]->spritebuffptr)
+            error("Buffer % in use", bnbr);
+        if (argc == 0)
+            StandardError(2);
+        if (!InitSDCard())
+            return;
+        unsigned char *q = getFstring(argv[2]); // get the file name
+        if (argc >= 5 && *argv[4])
+        {
+            int targ = getint(argv[4], -15, 15);
+            if (targ < 0)
+            {
+                remap_colour = -targ; // RGB121 index to substitute for opaque black
+                transparent = 0;
+            }
+            else
+            {
+                transparent = targ;
+            }
+        }
+        transparent = RGB121map[transparent];
+        if (argc == 7)
+            cutoff = getint(argv[6], 1, 254);
+        if (strchr((char *)q, '.') == NULL)
+            strcat((char *)q, ".png");
+        upng = upng_new_from_file((char *)q);
+        routinechecks();
+        upng_header(upng);
+        w = upng_get_width(upng);
+        h = upng_get_height(upng);
+        // Allocate sprite structure if needed
+        if (spritebuff[bnbr] == NULL)
+            allocSpriteBuff(bnbr);
+        // Allocate both buffers in one block to save memory pages
+        {
+            int bufsize = (w * h + 4) >> 1;
+            char *combined = GetMemory(bufsize * 2);
+            spritebuff[bnbr]->spritebuffptr = combined;
+            spritebuff[bnbr]->blitstoreptr = combined + bufsize;
+        }
+        initSpriteBuff(bnbr, w, h);
+        unsigned char *t = (unsigned char *)spritebuff[bnbr]->spritebuffptr;
+        if (w > HRes || h > VRes)
+        {
+            upng_free(upng);
+            error("Image too large");
+        }
+        routinechecks();
+        upng_decode(upng);
+        if (!(upng_get_format(upng) == UPNG_RGBA8))
+        {
+            upng_free(upng);
+            error("Invalid format, must be RGBA8888 or indexed PNG");
+        }
+        unsigned char *rr;
+        routinechecks();
+        rr = (unsigned char *)upng_get_buffer(upng);
+        unsigned char *pp = rr;
+        char d[3];
+        int i = w * h;
+        while (i--)
+        {
+            d[0] = rr[2];
+            d[1] = rr[1];
+            d[2] = rr[0];
+            if (rr[3] > cutoff)
+            {
+                pp[0] = d[0];
+                pp[1] = d[1];
+                pp[2] = d[2];
+            }
+            else
+            {
+                pp[0] = (transparent & 0xFF0000) >> 16;
+                pp[1] = (transparent & 0xFF00) >> 8;
+                pp[2] = (transparent & 0xFF);
+            }
+            {
+                uint8_t c4;
+                if (DISPLAY_TYPE == SCREENMODE1)
+                    c4 = (((uint16_t)pp[2] + (uint16_t)pp[1] + (uint16_t)pp[0]) < 0x180) ? 0 : 0xF;
+                else
+                    c4 = ((pp[2] & 0x80) >> 4) | ((pp[1] & 0xC0) >> 5) | ((pp[0] & 0x80) >> 7);
+                if (remap_colour >= 0 && c4 == 0 && rr[3] > cutoff)
+                    c4 = (uint8_t)remap_colour;
+                if (toggle)
+                    *t |= (c4 << 4);
+                else
+                    *t = c4;
+            }
+            if (toggle)
+                t++;
+            toggle = !toggle;
+            pp += 3;
+            rr += 4;
+        }
+        upng_free(upng);
+        return;
+    }
+#endif
+    else if ((p = checkstring(cmdline, (unsigned char *)"LOADBMP")))
+    {
+        int toggle = 0;
+        //        int xOrigin, yOrigin, xlen, ylen;
+        s_ReadBMP state;
+        readstate = &state; // store the various variables for use in the callback
+        // get the command line arguments
+        getcsargs(&p, 11); // this MUST be the first executable line in the function
+        if (*argv[0] == '#')
+            argv[0]++;                         // check if the first arg is prefixed with a #
+        bnbr = getint(argv[0], 1, MAXBLITBUF); // get the buffer number
+        if (spritebuff[bnbr] != NULL && spritebuff[bnbr]->spritebuffptr)
+            error("Buffer % in use", bnbr);
+        if (argc == 0)
+            StandardError(2);
+        if (!InitSDCard())
+            return;
+        unsigned char *pp = getFstring(argv[2]); // get the file name
+        state.img_x_offset = 0;
+        state.img_y_offset = 0;
+        if (argc >= 5 && *argv[4])
+            state.img_x_offset = getinteger(argv[4]); // get the x origin (optional) argument
+        if (argc >= 7 && *argv[6])
+            state.img_y_offset = getinteger(argv[6]); // get the y origin (optional) argument
+        if (state.img_x_offset < 0 || state.img_y_offset < 0)
+            StandardError(34);
+        state.width = state.height = -1;
+        if (argc >= 9 && *argv[8])
+            state.width = getinteger(argv[8]); // get the x length (optional) argument
+        if (argc == 11)
+            state.height = getinteger(argv[10]); // get the y length (optional) argument
+        // open the file
+        if (strchr((char *)pp, '.') == NULL)
+            strcat((char *)pp, ".bmp");
+        BMPfnbr = FindFreeFileNbr();
+        if (!BasicFileOpen((char *)pp, BMPfnbr, FA_READ))
+            return;
+        decodeBMPheader(&state.image_width, &state.image_height); //        BDEC_bReadHeader(&BmpDec, fnbr);
+        if (state.width == -1)
+            state.width = state.image_width - state.img_x_offset;
+        if (state.height == -1)
+            state.height = state.image_height - state.img_y_offset;
+        if (state.width + state.img_x_offset > state.image_width || state.height + state.img_y_offset > state.image_height)
+            StandardError(34);
+        state.output_buffer = GetTempMainMemory(state.width * state.height * 3);
+        // Allocate sprite structure if needed
+        if (spritebuff[bnbr] == NULL)
+            allocSpriteBuff(bnbr);
+        // Allocate both buffers in one block to save memory pages
+        {
+            int bufsize = (state.width * state.height + 4) >> 1;
+            char *combined = GetMemory(bufsize * 2);
+            spritebuff[bnbr]->spritebuffptr = combined;
+            spritebuff[bnbr]->blitstoreptr = combined + bufsize;
+        }
+        memset(state.output_buffer, 0xFF, state.width * state.height * 3);
+        linecallback = loadBMPlinecallback;
+        decodeBMP(0);
+        FileClose(BMPfnbr);
+        initSpriteBuff(bnbr, state.width, state.height);
+        char *t = spritebuff[bnbr]->spritebuffptr;
+        int i = state.width * state.height;
+        unsigned char *q = state.output_buffer;
+        while (i--)
+        {
+            if (DISPLAY_TYPE == SCREENMODE1)
+            {
+                if (toggle)
+                {
+                    *t |= (char)(((uint16_t)q[2] + (uint16_t)q[1] + (uint16_t)q[0]) < 0x180 ? 0 : 0xF0);
+                }
+                else
+                {
+                    *t = (char)(((uint16_t)q[2] + (uint16_t)q[1] + (uint16_t)q[0]) < 0x180 ? 0 : 0xF);
+                }
+            }
+            else
+            {
+                if (toggle)
+                {
+                    *t |= ((q[2] & 0x80)) | ((q[1] & 0xC0) >> 1) | ((q[0] & 0x80) >> 3);
+                }
+                else
+                {
+                    *t = ((q[2] & 0x80) >> 4) | ((q[1] & 0xC0) >> 5) | ((q[0] & 0x80) >> 7);
+                }
+            }
+            if (toggle)
+                t++;
+            toggle = !toggle;
+            q += 3;
+        }
+        return;
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"MOVE")))
+    {
+        if (hideall)
+            error((char *)"Sprites are hidden");
+        int i;
+        //        int cursorhidden = 0;
+        for (i = LIFOpointer - 1; i >= 0; i--)
+            blithide(LIFO[i]);
+        for (i = zeroLIFOpointer - 1; i >= 0; i--)
+            blithide(zeroLIFO[i]);
+        //
+        for (i = 0; i < zeroLIFOpointer; i++)
+        {
+            if (spritebuff[zeroLIFO[i]]->next_x != SPRITE_POS_INACTIVE)
+            {
+                spritebuff[zeroLIFO[i]]->x = spritebuff[zeroLIFO[i]]->next_x;
+                spritebuff[zeroLIFO[i]]->next_x = SPRITE_POS_INACTIVE;
+            }
+            if (spritebuff[zeroLIFO[i]]->next_y != SPRITE_POS_INACTIVE)
+            {
+                spritebuff[zeroLIFO[i]]->y = spritebuff[zeroLIFO[i]]->next_y;
+                spritebuff[zeroLIFO[i]]->next_y = SPRITE_POS_INACTIVE;
+            }
+            BlitShowBuffer(zeroLIFO[i], spritebuff[zeroLIFO[i]]->x, spritebuff[zeroLIFO[i]]->y, 0);
+        }
+        for (i = 0; i < LIFOpointer; i++)
+        {
+            if (spritebuff[LIFO[i]]->next_x != SPRITE_POS_INACTIVE)
+            {
+                spritebuff[LIFO[i]]->x = spritebuff[LIFO[i]]->next_x;
+                spritebuff[LIFO[i]]->next_x = SPRITE_POS_INACTIVE;
+            }
+            if (spritebuff[LIFO[i]]->next_y != SPRITE_POS_INACTIVE)
+            {
+                spritebuff[LIFO[i]]->y = spritebuff[LIFO[i]]->next_y;
+                spritebuff[LIFO[i]]->next_y = SPRITE_POS_INACTIVE;
+            }
+            BlitShowBuffer(LIFO[i], spritebuff[LIFO[i]]->x, spritebuff[LIFO[i]]->y, 0);
+        }
+        ProcessCollisions(0);
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"SCROLL")))
+    {
+        int i, n, m = 0, blank = -2, x, y;
+        char *current = NULL;
+        getcsargs(&p, 5);
+        if (hideall)
+            error((char *)"Sprites are hidden");
+        x = (int)getint(argv[0], -maxW / 2 - 1, maxW);
+        y = (int)getint(argv[2], -maxH / 2 - 1, maxH);
+        if (argc == 5)
+            blank = (int)getColour((char *)argv[4], 1);
+        if (!(x == 0 && y == 0))
+        {
+            m = ((maxW * (y > 0 ? y : -y) + 1) >> 1);
+            n = ((maxH * (x > 0 ? x : -x) + 1) >> 1);
+            if (n > m)
+                m = n;
+            if (blank == -2)
+                current = (char *)GetMemory(m);
+            for (i = LIFOpointer - 1; i >= 0; i--)
+                blithide(LIFO[i]);
+            for (i = zeroLIFOpointer - 1; i >= 0; i--)
+            {
+                int xs = spritebuff[zeroLIFO[i]]->x + (spritebuff[zeroLIFO[i]]->w >> 1);
+                int ys = spritebuff[zeroLIFO[i]]->y + (spritebuff[zeroLIFO[i]]->h >> 1);
+                blithide(zeroLIFO[i]);
+                xs += x;
+                if (xs >= maxW)
+                    xs -= maxW;
+                if (xs < 0)
+                    xs += maxW;
+                spritebuff[zeroLIFO[i]]->x = xs - (spritebuff[zeroLIFO[i]]->w >> 1);
+                ys -= y;
+                if (ys >= maxH)
+                    ys -= maxH;
+                if (ys < 0)
+                    ys += maxH;
+                spritebuff[zeroLIFO[i]]->y = ys - (spritebuff[zeroLIFO[i]]->h >> 1);
+            }
+            // Scroll static objects with the background
+            for (i = 1; i <= MAXSTOBJECTS; i++)
+            {
+                if (stobjects[i].active)
+                {
+                    int bx = stobjects[i].x + (stobjects[i].w >> 1);
+                    int by = stobjects[i].y + (stobjects[i].h >> 1);
+                    bx += x;
+                    if (bx >= maxW)
+                        bx -= maxW;
+                    if (bx < 0)
+                        bx += maxW;
+                    stobjects[i].x = bx - (stobjects[i].w >> 1);
+                    by -= y;
+                    if (by >= maxH)
+                        by -= maxH;
+                    if (by < 0)
+                        by += maxH;
+                    stobjects[i].y = by - (stobjects[i].h >> 1);
+                }
+            }
+            if (x > 0)
+            {
+                if (blank == -2)
+                    ReadBufferFast(maxW - x, 0, maxW - 1, maxH - 1, (unsigned char *)current);
+                ScrollBufferH(x);
+                if (blank == -2)
+                    DrawBufferFast(0, 0, x - 1, maxH - 1, -1, (unsigned char *)current);
+                else if (blank != -1)
+                    DrawRectangle(0, 0, x - 1, maxH - 1, blank);
+            }
+            else if (x < 0)
+            {
+                x = -x;
+                if (blank == -2)
+                    ReadBufferFast(0, 0, x - 1, maxH - 1, (unsigned char *)current);
+                ScrollBufferH(-x);
+                if (blank == -2)
+                    DrawBufferFast(maxW - x, 0, maxW - 1, maxH - 1, -1, (unsigned char *)current);
+                else if (blank != -1)
+                    DrawRectangle(maxW - x, 0, maxW - 1, maxH - 1, blank);
+            }
+            if (y > 0)
+            {
+                if (blank == -2)
+                    ReadBufferFast(0, 0, maxW - 1, y - 1, (unsigned char *)current);
+                ScrollBufferV(y, 0);
+                if (blank == -2)
+                    DrawBufferFast(0, maxH - y, maxW - 1, maxH - 1, -1, (unsigned char *)current);
+                else if (blank != -1)
+                    DrawRectangle(0, maxH - y, maxW - 1, maxH - 1, blank);
+            }
+            else if (y < 0)
+            {
+                y = -y;
+                if (blank == -2)
+                    ReadBufferFast(0, maxH - y, maxW - 1, maxH - 1, (unsigned char *)current);
+                ScrollBufferV(-y, 0);
+                if (blank == -2)
+                    DrawBufferFast(0, 0, maxW - 1, y - 1, -1, (unsigned char *)current);
+                else if (blank != -1)
+                    DrawRectangle(0, 0, maxW - 1, y - 1, blank);
+            }
+            for (i = 0; i < zeroLIFOpointer; i++)
+            {
+                BlitShowBuffer(zeroLIFO[i], spritebuff[zeroLIFO[i]]->x, spritebuff[zeroLIFO[i]]->y, 0);
+            }
+            for (i = 0; i < LIFOpointer; i++)
+            {
+                if (spritebuff[LIFO[i]]->next_x != SPRITE_POS_INACTIVE)
+                {
+                    spritebuff[LIFO[i]]->x = spritebuff[LIFO[i]]->next_x;
+                    spritebuff[LIFO[i]]->next_x = SPRITE_POS_INACTIVE;
+                }
+                if (spritebuff[LIFO[i]]->next_y != SPRITE_POS_INACTIVE)
+                {
+                    spritebuff[LIFO[i]]->y = spritebuff[LIFO[i]]->next_y;
+                    spritebuff[LIFO[i]]->next_y = SPRITE_POS_INACTIVE;
+                }
+
+                BlitShowBuffer(LIFO[i], spritebuff[LIFO[i]]->x, spritebuff[LIFO[i]]->y, 0);
+            }
+            ProcessCollisions(0);
+            if (current)
+                FreeMemory((unsigned char *)current);
+        }
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"SET TRANSPARENT")))
+    {
+        sprite_transparent = getint((unsigned char *)p, 0, 15);
+    }
+    else
+        SyntaxError();
+}
+void fun_sprite(void)
+{
+    int bnbr = 0, w = -1, h = -1, t = 0, x = SPRITE_POS_INACTIVE, y = SPRITE_POS_INACTIVE, l = 0, n, c = 0;
+    getcsargs(&ep, 5);
+    // Static object queries
+    if (checkstring(argv[0], (unsigned char *)"ST"))
+    {
+        if (argc < 3)
+            SyntaxError();
+        if (checkstring(argv[2], (unsigned char *)"COLLISION"))
+        {
+            // SPRITE(ST, COLLISION) - which sprite hit a static object
+            iret = sprite_hit_st;
+            targ = T_INT;
+            return;
+        }
+        else if (checkstring(argv[2], (unsigned char *)"OBJECT"))
+        {
+            // SPRITE(ST, OBJECT) - which static object was hit
+            iret = st_which_collided;
+            targ = T_INT;
+            return;
+        }
+        else
+        {
+            // SPRITE(ST, n, property) - get static object properties
+            if (argc < 5)
+                SyntaxError();
+            if (*argv[2] == '#')
+                argv[2]++;
+            int stnum = (int)getint(argv[2], 1, MAXSTOBJECTS);
+            if (checkstring(argv[4], (unsigned char *)"X"))
+                iret = stobjects[stnum].active ? stobjects[stnum].x : -1;
+            else if (checkstring(argv[4], (unsigned char *)"Y"))
+                iret = stobjects[stnum].active ? stobjects[stnum].y : -1;
+            else if (checkstring(argv[4], (unsigned char *)"W"))
+                iret = stobjects[stnum].active ? stobjects[stnum].w : -1;
+            else if (checkstring(argv[4], (unsigned char *)"H"))
+                iret = stobjects[stnum].active ? stobjects[stnum].h : -1;
+            else if (checkstring(argv[4], (unsigned char *)"A"))
+                iret = stobjects[stnum].active;
+            else
+                SyntaxError();
+            targ = T_INT;
+            return;
+        }
+    }
+    if (checkstring(argv[0], (unsigned char *)"B"))
+        t = 14;
+    else if (checkstring(argv[0], (unsigned char *)"H"))
+        t = 2;
+    else if (checkstring(argv[0], (unsigned char *)"X"))
+        t = 3;
+    else if (checkstring(argv[0], (unsigned char *)"Y"))
+        t = 4;
+    else if (checkstring(argv[0], (unsigned char *)"L"))
+        t = 5;
+    else if (checkstring(argv[0], (unsigned char *)"C"))
+        t = 6;
+    else if (checkstring(argv[0], (unsigned char *)"V"))
+        t = 7;
+    else if (checkstring(argv[0], (unsigned char *)"T"))
+        t = 8;
+    else if (checkstring(argv[0], (unsigned char *)"E"))
+        t = 9;
+    else if (checkstring(argv[0], (unsigned char *)"D"))
+        t = 10;
+    else if (checkstring(argv[0], (unsigned char *)"A"))
+        t = 11;
+    else if (checkstring(argv[0], (unsigned char *)"N"))
+        t = 12;
+    else if (checkstring(argv[0], (unsigned char *)"S"))
+        t = 13;
+    else if (checkstring(argv[0], (unsigned char *)"W"))
+        t = 1;
+    else
+        SyntaxError();
+    if (t < 12)
+    {
+        if (argc < 3)
+            SyntaxError();
+        if (*argv[2] == '#')
+            argv[2]++;
+        bnbr = (int)getint(argv[2], 0, MAXBLITBUF);
+        if (bnbr == 0)
+        {
+            if (spritebuff[0] == NULL)
+                error((char *)"No sprites defined");
+            if (argc == 5 && !(t == 7 || t == 10))
+            {
+                n = (int)getint(argv[4], 1, spritebuff[0]->collisions[0]);
+                c = spritebuff[0]->collisions[n];
+            }
+            else
+                c = spritebuff[0]->collisions[0];
+        }
+        if (spritebuff[bnbr] != NULL && spritebuff[bnbr]->spritebuffptr != NULL)
+        {
+            w = spritebuff[bnbr]->w;
+            h = spritebuff[bnbr]->h;
+        }
+        if (spritebuff[bnbr] != NULL && spritebuff[bnbr]->active)
+        {
+            x = spritebuff[bnbr]->x;
+            y = spritebuff[bnbr]->y;
+            l = spritebuff[bnbr]->layer;
+            if (argc == 5 && !(t == 7 || t == 10))
+            {
+                n = (int)getint(argv[4], 1, spritebuff[bnbr]->collisions[0]);
+                c = spritebuff[bnbr]->collisions[n];
+            }
+            else
+                c = spritebuff[bnbr]->collisions[0];
+        }
+    }
+    if (t == 1)
+        iret = w;
+    else if (t == 2)
+        iret = h;
+    else if (t == 3)
+    {
+        if (spritebuff[bnbr] != NULL && spritebuff[bnbr]->active)
+            iret = x;
+        else
+            iret = SPRITE_POS_INACTIVE;
+    }
+    else if (t == 4)
+    {
+        if (spritebuff[bnbr] != NULL && spritebuff[bnbr]->active)
+            iret = y;
+        else
+            iret = SPRITE_POS_INACTIVE;
+    }
+    else if (t == 5)
+    {
+        if (spritebuff[bnbr] != NULL && spritebuff[bnbr]->active)
+            iret = l;
+        else
+            iret = -1;
+    }
+    else if (t == 8)
+    {
+        if (spritebuff[bnbr] != NULL && spritebuff[bnbr]->active)
+            iret = spritebuff[bnbr]->lastcollisions;
+        else
+            iret = 0;
+    }
+    else if (t == 9)
+    {
+        if (spritebuff[bnbr] != NULL && spritebuff[bnbr]->active)
+            iret = spritebuff[bnbr]->edges;
+        else
+            iret = 0;
+    }
+    else if (t == 6)
+    {
+        if (spritebuff[bnbr] != NULL && spritebuff[bnbr]->collisions[0])
+            iret = c;
+        else
+            iret = -1;
+    }
+    else if (t == 11)
+        iret = (spritebuff[bnbr] != NULL) ? (int64_t)((uint32_t)spritebuff[bnbr]->spritebuffptr) : 0;
+    else if (t == 7)
+    {
+        int rbnbr = 0;
+        int x1 = 0, y1 = 0, h1 = 0, w1 = 0;
+        MMFLOAT vector;
+        if (argc < 5)
+            SyntaxError();
+        if (*argv[4] == '#')
+            argv[4]++;
+        rbnbr = (int)getint(argv[4], 1, MAXBLITBUF);
+        if (spritebuff[rbnbr] != NULL && spritebuff[rbnbr]->spritebuffptr != NULL)
+        {
+            w1 = spritebuff[rbnbr]->w;
+            h1 = spritebuff[rbnbr]->h;
+        }
+        if (spritebuff[rbnbr] != NULL && spritebuff[rbnbr]->active)
+        {
+            x1 = spritebuff[rbnbr]->x;
+            y1 = spritebuff[rbnbr]->y;
+        }
+        if (!(spritebuff[bnbr] != NULL && spritebuff[bnbr]->active && spritebuff[rbnbr] != NULL && spritebuff[rbnbr]->active))
+            fret = -1.0;
+        else
+        {
+            x += w / 2;
+            y += h / 2;
+            x1 += w1 / 2;
+            y1 += h1 / 2;
+            y1 -= y;
+            x1 -= x;
+            vector = atan2(y1, x1);
+            vector += M_PI_2;
+            if (vector < 0)
+                vector += M_TWOPI;
+            fret = vector;
+        }
+        targ = T_NBR;
+        return;
+    }
+    else if (t == 10)
+    {
+        int rbnbr = 0;
+        int x1 = 0, y1 = 0, h1 = 0, w1 = 0;
+        if (argc < 5)
+            SyntaxError();
+        if (*argv[4] == '#')
+            argv[4]++;
+        rbnbr = (int)getint(argv[4], 1, MAXBLITBUF);
+        if (spritebuff[rbnbr] != NULL && spritebuff[rbnbr]->spritebuffptr != NULL)
+        {
+            w1 = spritebuff[rbnbr]->w;
+            h1 = spritebuff[rbnbr]->h;
+        }
+        if (spritebuff[rbnbr] != NULL && spritebuff[rbnbr]->active)
+        {
+            x1 = spritebuff[rbnbr]->x;
+            y1 = spritebuff[rbnbr]->y;
+        }
+        if (!(spritebuff[bnbr] != NULL && spritebuff[bnbr]->active && spritebuff[rbnbr] != NULL && spritebuff[rbnbr]->active))
+            fret = -1.0;
+        else
+        {
+            x += w / 2;
+            y += h / 2;
+            x1 += w1 / 2;
+            y1 += h1 / 2;
+            fret = sqrt((x1 - x) * (x1 - x) + (y1 - y) * (y1 - y));
+        }
+        targ = T_NBR;
+        return;
+    }
+    else if (t == 12)
+    {
+        if (argc == 3)
+        {
+            n = (int)getint(argv[2], 0, MAXLAYER);
+            iret = layer_in_use[n];
+        }
+        else
+            iret = sprites_in_use;
+    }
+    else if (t == 13)
+        iret = sprite_which_collided;
+    else if (t == 14)
+    {
+        if (argc < 3)
+            SyntaxError();
+        if (*argv[2] == '#')
+            argv[2]++;
+        bnbr = (int)getint(argv[2], 1, MAXBLITBUF);
+
+        // Cache the sprite pointer to avoid repeated array indexing
+        struct spritebuffer *sp = spritebuff[bnbr];
+
+        if (argc == 3)
+        {
+            if (sp != NULL && sp->active)
+            {
+                // Lazy initialization of bounds arrays - only allocate when SPRITE(B is used
+                if (sp->boundsleft == NULL)
+                    getspritebounds(bnbr);
+
+                int sprite_transparent2 = sprite_transparent << 4;
+                int sh = sp->h;
+                int sw = sp->w;
+                int rowbytes = (sw + 1) >> 1; // bytes per row in packed 4-bit format
+
+                // Cache backgroundcollision array pointer
+                short *bgc = sp->backgroundcollision;
+
+                iret = 0;
+                bgc[0] = -1;       // left (max x)
+                bgc[1] = SHRT_MAX; // right (min x)
+                bgc[2] = -1;       // top (max y)
+                bgc[3] = SHRT_MAX; // bottom (min y)
+                bgc[4] = -1;       // left offset
+                bgc[5] = -1;       // right offset
+                bgc[6] = -1;       // top offset
+                bgc[7] = -1;       // bottom offset
+
+                char *bstore = sp->blitstoreptr;
+                if (!bstore)
+                    error((char *)"Buffers are empty");
+
+                // Cache bounds arrays
+                short *boundsleft = sp->boundsleft;
+                short *boundsright = sp->boundsright;
+                short *boundstop = sp->boundstop;
+                short *boundsbottom = sp->boundsbottom;
+
+                // Get rotation to transform coordinates for bounds checking
+                // Bounds arrays are calculated from original sprite orientation
+                // but sprite may be displayed flipped, so we need to transform
+                // the background pixel coordinates to match original orientation
+                int rotation = sp->rotation;
+
+                // Scan all pixels in the background store
+                for (int py = 0; py < sh; ++py)
+                {
+                    char *rowptr = bstore + py * rowbytes;
+
+                    for (int px = 0; px < sw; ++px)
+                    {
+                        // Check if background pixel at (px, py) is non-transparent
+                        int bytepos = px >> 1;
+                        int is_transparent;
+                        if (px & 1)
+                        {
+                            // Odd x - upper nibble
+                            is_transparent = ((rowptr[bytepos] & 0xf0) == sprite_transparent2);
+                        }
+                        else
+                        {
+                            // Even x - lower nibble
+                            is_transparent = ((rowptr[bytepos] & 0x0f) == sprite_transparent);
+                        }
+
+                        if (is_transparent)
+                            continue;
+
+                        // Found a non-transparent background pixel
+                        // Update bounding box of all background collisions
+                        if (px > bgc[0])
+                            bgc[0] = px;
+                        if (px < bgc[1])
+                            bgc[1] = px;
+                        if (py > bgc[2])
+                            bgc[2] = py;
+                        if (py < bgc[3])
+                            bgc[3] = py;
+
+                        if (iret == 0)
+                            iret = 1;
+
+                        // Transform coordinates to match original sprite orientation
+                        // for bounds checking (bounds are from unrotated sprite)
+                        int bx = (rotation & 1) ? (sw - 1 - px) : px; // horizontal flip
+                        int by = (rotation & 2) ? (sh - 1 - py) : py; // vertical flip
+
+                        // Check if this background pixel overlaps with sprite's non-transparent area
+                        if (bx >= boundsleft[by] && bx <= boundsright[by])
+                        {
+                            int leftOffset = bx - boundsleft[by];
+                            int rightOffset = boundsright[by] - bx;
+                            if (leftOffset > bgc[4])
+                            {
+                                bgc[4] = leftOffset;
+                                iret = 2;
+                            }
+                            if (rightOffset > bgc[5])
+                            {
+                                bgc[5] = rightOffset;
+                                iret = 2;
+                            }
+                        }
+                        if (by >= boundstop[bx] && by <= boundsbottom[bx])
+                        {
+                            int topOffset = by - boundstop[bx];
+                            int bottomOffset = boundsbottom[bx] - by;
+                            if (topOffset > bgc[6])
+                            {
+                                bgc[6] = topOffset;
+                                iret = 2;
+                            }
+                            if (bottomOffset > bgc[7])
+                            {
+                                bgc[7] = bottomOffset;
+                                iret = 2;
+                            }
+                        }
+                    }
+                }
+
+                // Post-processing: convert to final format
+                bgc[0] = (bgc[0] == -1) ? 0 : bgc[0] + 1;
+                bgc[1] = (bgc[1] == SHRT_MAX) ? 0 : sw - bgc[1];
+                bgc[2] = (bgc[2] == -1) ? 0 : bgc[2] + 1;
+                bgc[3] = (bgc[3] == SHRT_MAX) ? 0 : sh - bgc[3];
+                bgc[4] = (bgc[4] == -1) ? 0 : bgc[4] + 1;
+                bgc[5] = (bgc[5] == -1) ? 0 : bgc[5] + 1;
+                bgc[6] = (bgc[6] == -1) ? 0 : bgc[6] + 1;
+                bgc[7] = (bgc[7] == -1) ? 0 : bgc[7] + 1;
+
+                // Cleanup reporting
+                if (bgc[0] == sw)
+                    bgc[0] = 0;
+                if (bgc[1] == sw)
+                    bgc[1] = 0;
+                if (bgc[2] == sh)
+                    bgc[2] = 0;
+                if (bgc[3] == sh)
+                    bgc[3] = 0;
+
+                if (bgc[4] != 0 && bgc[5] != 0)
+                {
+                    if (bgc[4] < bgc[5])
+                        bgc[5] = 0;
+                    else if (bgc[4] > bgc[5])
+                        bgc[4] = 0;
+                    else
+                    { // both sides meaning that we have top bottom hit
+                        bgc[4] = 0;
+                        bgc[5] = 0;
+                    }
+                }
+                if (bgc[6] != 0 && bgc[7] != 0)
+                {
+                    if (bgc[6] < bgc[7])
+                        bgc[7] = 0;
+                    else if (bgc[6] > bgc[7])
+                        bgc[6] = 0;
+                    else
+                    { // top bottom meaning that we have left right hit
+                        bgc[6] = 0;
+                        bgc[7] = 0;
+                    }
+                }
+            }
+        }
+        else if (argc == 5)
+        {
+            int side = (int)getint(argv[4], 0, 7);
+            iret = sp->backgroundcollision[side];
+        }
+        else
+            SyntaxError();
+    }
+    else
+    {
+    }
+    targ = T_INT;
+}
+/*
+ * @cond
+ * The following section will be excluded from the documentation.
+ */
+#ifndef PICOMITEVGA
+void restorepanel(void)
+{
+    if (Option.DISPLAY_TYPE >= VIRTUAL && Option.DISPLAY_TYPE <= VIRTUAL_M)
+    {
+        InitDisplayVirtual();
+        return;
+    }
+    if (Option.DISPLAY_TYPE > I2C_PANEL && Option.DISPLAY_TYPE < BufferedPanel)
+    {
+        if (Option.DISPLAY_ORIENTATION == PORTRAIT)
+        {
+            DrawRectangle = DrawRectangleSPISCR;
+            DrawBitmap = DrawBitmapSPISCR;
+            DrawBuffer = DrawBufferSPISCR;
+            DrawPixel = DrawPixelNormal;
+            ScrollLCD = ScrollLCDSPISCR;
+            DrawBLITBuffer = DrawBufferSPISCR;
+            if (Option.DISPLAY_TYPE == ILI9341 || Option.DISPLAY_TYPE == ST7796SP || Option.DISPLAY_TYPE == ST7796S || Option.DISPLAY_TYPE == ILI9488 || Option.DISPLAY_TYPE == ILI9488P || Option.DISPLAY_TYPE == ST7789B)
+            {
+                ReadBuffer = ReadBufferSPISCR;
+                ReadBLITBuffer = ReadBufferSPISCR;
+            }
+        }
+        else
+        {
+            DrawRectangle = DrawRectangleSPI;
+            DrawBitmap = DrawBitmapSPI;
+            DrawBuffer = DrawBufferSPI;
+            DrawBLITBuffer = DrawBufferSPI;
+            DrawPixel = DrawPixelNormal;
+            if (Option.DISPLAY_TYPE == ILI9341 || Option.DISPLAY_TYPE == ST7796SP || Option.DISPLAY_TYPE == ST7796S || Option.DISPLAY_TYPE == ILI9488 || Option.DISPLAY_TYPE == ILI9488P || Option.DISPLAY_TYPE == ST7789B)
+            {
+                ReadBLITBuffer = ReadBufferSPI;
+                ReadBuffer = ReadBufferSPI;
+                ScrollLCD = ScrollLCDSPI;
+            }
+        }
+    }
+    else if (Option.DISPLAY_TYPE >= SSDPANEL && Option.DISPLAY_TYPE < VIRTUAL)
+    {
+        if (screen320)
+        {
+            DrawRectangle = DrawRectangle320;
+            DrawBitmap = DrawBitmap320;
+            DrawBuffer = DrawBuffer320;
+            ReadBuffer = ReadBuffer320;
+        }
+        else
+        {
+            DrawRectangle = DrawRectangleSSD1963;
+            DrawBitmap = DrawBitmapSSD1963;
+            DrawBuffer = DrawBufferSSD1963;
+            ReadBuffer = ReadBufferSSD1963;
+            if (SSD16TYPE || Option.DISPLAY_TYPE == IPS_4_16)
+            {
+                DrawBLITBuffer = DrawBLITBufferSSD1963;
+                ReadBLITBuffer = ReadBLITBufferSSD1963;
+            }
+            else
+            {
+                DrawBLITBuffer = DrawBufferSSD1963;
+                ReadBLITBuffer = ReadBufferSSD1963;
+            }
+        }
+        DrawPixel = DrawPixelNormal;
+        if (!(Option.DISPLAY_TYPE == ILI9341_8 || Option.DISPLAY_TYPE == ILI9341_16 || Option.DISPLAY_TYPE == IPS_4_16))
+            ScrollLCD = ScrollSSD1963;
+        else
+            ScrollLCD = ScrollLCDSPI;
+#if PICOMITERP2350
+    }
+    else if (Option.DISPLAY_TYPE >= VGA222 && Option.DISPLAY_TYPE < NEXTGEN)
+    {
+        DrawRectangle = DrawRectangle222;
+        DrawBitmap = DrawBitmap222;
+        DrawBuffer = DrawBuffer222;
+        ReadBuffer = ReadBuffer222;
+        DrawBLITBuffer = DrawBuffer222;
+        ReadBLITBuffer = ReadBuffer222;
+        ScrollLCD = ScrollLCD222;
+        DrawPixel = DrawPixel222;
+    }
+    else if (Option.DISPLAY_TYPE > NEXTGEN)
+    {
+        DrawRectangle = DrawRectangleMEM332;
+        DrawBitmap = DrawBitmapMEM332;
+        DrawBuffer = DrawBufferMEM332;
+        ReadBuffer = ReadBufferMEM332;
+        DrawBLITBuffer = DrawBlitBufferMEM332;
+        ReadBLITBuffer = ReadBlitBufferMEM332;
+        ScrollLCD = ScrollLCDMEM332;
+        DrawPixel = DrawPixelMEM332;
+#endif
+    }
+    WriteBuf = NULL;
+}
+void setframebuffer(void)
+{
+#if PICOMITERP2350
+    if (!((Option.DISPLAY_TYPE > I2C_PANEL && Option.DISPLAY_TYPE < BufferedPanel) || (Option.DISPLAY_TYPE >= SSDPANEL && Option.DISPLAY_TYPE < VIRTUAL) || Option.DISPLAY_TYPE >= VGA222))
+        return;
+#else
+    if (!((Option.DISPLAY_TYPE > I2C_PANEL && Option.DISPLAY_TYPE < BufferedPanel) || (Option.DISPLAY_TYPE >= SSDPANEL && Option.DISPLAY_TYPE < VIRTUAL)))
+        return;
+#endif
+    DrawRectangle = DrawRectangle16;
+    DrawBitmap = DrawBitmap16;
+    ScrollLCD = ScrollLCD16;
+    DrawBuffer = DrawBuffer16;
+    ReadBLITBuffer = ReadBuffer16;
+    DrawBLITBuffer = DrawBuffer16;
+    ReadBuffer = ReadBuffer16;
+    DrawBufferFast = DrawBuffer16Fast;
+    ReadBufferFast = ReadBuffer16Fast;
+    DrawPixel = DrawPixel16;
+}
+void closeframebuffer(char layer)
+{
+#ifdef PICOMITE
+    if (mergerunning)
+    {
+        multicore_fifo_push_blocking(0xFF);
+        busy_wait_ms(mergetimer + 200);
+        if (mergerunning)
+        {
+            SoftReset(SOFT_RESET);
+        }
+    }
+#endif
+    if (FrameBuf)
+        FreeMemory(FrameBuf);
+    if (LayerBuf)
+        FreeMemory(LayerBuf);
+    if (FrameBuf || LayerBuf)
+        restorepanel();
+    FrameBuf = NULL;
+    WriteBuf = NULL;
+}
+#include <stdint.h>
+#include <string.h>
+
+#include <stdint.h>
+
+#include <stdint.h>
+
+#include <stdint.h>
+
+// External globals
+extern uint8_t *ScreenBuffer; // RGB222 framebuffer
+extern short HRes, VRes;      // screen resolution
+
+// 4-bit RGB121 → 6-bit RGB222 lookup table
+static uint8_t rgb121_to_rgb222_lut[16];
+static int lut_initialized = 0;
+
+static inline uint32_t pack5(const uint8_t *p)
+{
+    return ((uint32_t)p[0]) |
+           ((uint32_t)p[1] << 6) |
+           ((uint32_t)p[2] << 12) |
+           ((uint32_t)p[3] << 18) |
+           ((uint32_t)p[4] << 24);
+}
+
+// Read-modify-write helper for arbitrary X
+static inline void store_pixel_rmw(uint32_t *dst_line, int x, uint8_t pix6)
+{
+    int word = x / 5;
+    int bit = (x % 5) * 6;
+    uint32_t mask = (uint32_t)0x3F << bit;
+    uint32_t val = ((uint32_t)pix6 << bit);
+    dst_line[word] = (dst_line[word] & ~mask) | (val & mask);
+}
+
+void copy_rgb121_to_rgb222(uint8_t *s, int xstart, int xend, int ystart, int yend, int odd)
+{
+    // Initialize lookup table once
+    if (!lut_initialized)
+    {
+        for (int i = 0; i < 16; ++i)
+        {
+            uint32_t r = ((i >> 3) & 0x1) * 3; // 1-bit → 2-bit
+            uint32_t g = ((i >> 1) & 0x3);     // 2-bit unchanged
+            uint32_t b = ((i >> 0) & 0x1) * 3; // 1-bit → 2-bit
+            rgb121_to_rgb222_lut[i] = (uint8_t)((r << 4) | (g << 2) | b);
+        }
+        lut_initialized = 1;
+    }
+
+    // Clamp bounds
+    if (xstart < 0)
+        xstart = 0;
+    if (ystart < 0)
+        ystart = 0;
+    if (xend >= (int)HRes)
+        xend = HRes - 1;
+    if (yend >= (int)VRes)
+        yend = VRes - 1;
+    if (xstart > xend || ystart > yend)
+        return;
+
+    // --- FAST PATH: full-frame copy, aligned, odd==0 ---
+    if (xstart == 0 && ystart == 0 && xend == HRes - 1 && yend == VRes - 1 && odd == 0)
+    {
+        uint32_t *src = (uint32_t *)s;
+        uint32_t *dst = (uint32_t *)(void *)ScreenBuffer;
+
+        int total_pixels = (int)HRes * (int)VRes;
+        int blocks = total_pixels / 40;
+
+        for (int blk = 0; blk < blocks; blk++)
+        {
+            uint32_t sv[5];
+            for (int i = 0; i < 5; i++)
+                sv[i] = *src++;
+
+            uint8_t p[40];
+            int k = 0;
+            for (int i = 0; i < 5; i++)
+            {
+                uint32_t v = sv[i];
+                for (int n = 0; n < 8; n++, v >>= 4)
+                    p[k++] = rgb121_to_rgb222_lut[v & 0xF];
+            }
+
+            for (int i = 0; i < 8; i++)
+                *dst++ = pack5(&p[i * 5]);
+        }
+
+        // Handle leftovers if total pixels not multiple of 40
+        int leftover = total_pixels % 40;
+        if (leftover)
+        {
+            uint8_t *srcb = s + (blocks * 20); // each 40 pixels = 20 bytes (40 nibbles)
+            int nibstate = 0;
+            for (int i = 0; i < leftover; i++)
+            {
+                uint8_t nib;
+                if (nibstate == 0)
+                {
+                    nib = (*srcb & 0x0F);
+                    nibstate = 1;
+                }
+                else
+                {
+                    nib = (*srcb >> 4);
+                    srcb++;
+                    nibstate = 0;
+                }
+                uint8_t pix6 = rgb121_to_rgb222_lut[nib];
+                int pix_index = (blocks * 40) + i;
+                int y = pix_index / HRes;
+                int x = pix_index % HRes;
+                uint32_t *dst_line = (uint32_t *)(void *)(ScreenBuffer + (y * ((HRes + 4) / 5) * 4));
+                store_pixel_rmw(dst_line, x, pix6);
+            }
+        }
+        return;
+    }
+
+    // --- GENERAL PATH: arbitrary subrectangle and/or odd nibble start ---
+    uint8_t *src = s;
+    int dst_words_per_line = ((int)HRes + 4) / 5;
+
+    for (int y = ystart; y <= yend; ++y)
+    {
+        uint32_t *dst_line = (uint32_t *)(void *)(ScreenBuffer + (y * dst_words_per_line * 4));
+        int x = xstart;
+        while (x <= xend)
+        {
+            uint8_t pix6buf[5];
+            int cnt = 0;
+
+            for (; cnt < 5 && x <= xend; ++cnt, ++x)
+            {
+                uint8_t nib;
+                if (odd == 0)
+                {
+                    nib = (*src) & 0x0F; // low nibble
+                    odd = 1;             // next read high nibble
+                }
+                else
+                {
+                    nib = ((*src) >> 4) & 0x0F; // high nibble
+                    src++;
+                    odd = 0; // next read low nibble
+                }
+                pix6buf[cnt] = rgb121_to_rgb222_lut[nib];
+            }
+
+            if (cnt == 5)
+            {
+                int word_index = (x - 5) / 5;
+                dst_line[word_index] = pack5(pix6buf);
+            }
+            else
+            {
+                int startx = x - cnt;
+                for (int i = 0; i < cnt; ++i)
+                    store_pixel_rmw(dst_line, startx + i, pix6buf[i]);
+            }
+        }
+    }
+}
+
+void copyframetoscreen(uint8_t *s, int xstart, int xend, int ystart, int yend, int odd)
+{
+#ifndef PICOMITEWEB
+#if PICOMITERP2350
+    if (Option.DISPLAY_TYPE >= VGA222 && Option.DISPLAY_TYPE < NEXTGEN)
+    {
+        copy_rgb121_to_rgb222(s, xstart, xend, ystart, yend, odd);
+        return;
+    }
+#endif
+#endif
+    low_x = xstart;
+    low_y = ystart;
+    high_x = xend;
+    high_y = yend;
+    unsigned char col[3] = {0};
+    uint64_t c;
+    if (Option.DISPLAY_TYPE > I2C_PANEL && Option.DISPLAY_TYPE < BufferedPanel)
+        DefineRegionSPI(xstart, ystart, xend, yend, 1);
+    else if (Option.DISPLAY_TYPE == ILI9341_8)
+    {
+        SetAreaILI9341(xstart, ystart, xend, yend, 1);
+    }
+    else if (Option.DISPLAY_TYPE == ILI9341_16 || Option.DISPLAY_TYPE == ILI9486_16)
+    {
+        if (Option.DISPLAY_TYPE == ILI9486_16)
+        {
+            Write16bitCommand(ILI9341_PIXELFORMAT);
+            WriteData16bit(0x55);
+        }
+        SetAreaILI9341(xstart, ystart, xend, yend, 1);
+    }
+    else if (Option.DISPLAY_TYPE == IPS_4_16)
+    {
+        if (LCDAttrib == 1)
+            WriteCmdDataIPS_4_16(0x3A00, 1, 0x55);
+        if (screen320)
+        {
+            SetAreaIPS_4_16(xstart + 80, ystart * 2, xend * 2 - xstart + 81, yend * 2 + 1, 1); // setup the area to be filled
+        }
+        else
+        {
+            SetAreaIPS_4_16(xstart, ystart, xend, yend, 1); // setup the area to be filled
+        }
+#if PICOMITERP2350
+    }
+    else if (Option.DISPLAY_TYPE >= VGA222)
+    {
+        // nothing to do
+#endif
+    }
+    else
+    {
+        if (screen320)
+        {
+            if (Option.DISPLAY_TYPE != SSD1963_4_16)
+                SetAreaSSD1963(xstart + 80, ystart * 2, xend * 2 - xstart + 81, yend * 2 + 1); // setup the area to be filled
+            else
+                SetAreaSSD1963(xstart + 80, ystart + 16, xend + 80, yend + 16);
+        }
+        else
+        {
+            SetAreaSSD1963(xstart, ystart, xend, yend); // setup the area to be filled
+        }
+        WriteComand(CMD_WR_MEMSTART);
+    }
+    int i;
+    int cnt = 2;
+    if (Option.DISPLAY_TYPE == ILI9488 || Option.DISPLAY_TYPE == ILI9488P || Option.DISPLAY_TYPE == ILI9481IPS || (Option.DISPLAY_TYPE >= SSDPANEL && Option.DISPLAY_TYPE <= SSD_PANEL_8))
+    {
+        cnt = 3;
+    }
+    if (map[15] == 0)
+    {
+        for (i = 0; i < 16; i++)
+        {
+            if (Option.DISPLAY_TYPE == ILI9488 || Option.DISPLAY_TYPE == ILI9488P || Option.DISPLAY_TYPE == ILI9481IPS)
+            {
+                col[0] = (RGB121map[i] >> 16);
+                col[1] = (RGB121map[i] >> 8) & 0xFF;
+                col[2] = (RGB121map[i] & 0xFF);
+            }
+            else if (Option.DISPLAY_TYPE >= SSDPANEL && Option.DISPLAY_TYPE <= SSD_PANEL_8)
+            {
+                col[2] = (RGB121map[i] >> 16);
+                col[1] = (RGB121map[i] >> 8) & 0xFF;
+                col[0] = (RGB121map[i] & 0xFF);
+#if PICOMITERP2350
+            }
+            else if (Option.DISPLAY_TYPE > SSD_PANEL_8 && Option.DISPLAY_TYPE < NEXTGEN)
+            {
+#else
+            }
+            else if (Option.DISPLAY_TYPE > SSD_PANEL_8)
+            {
+#endif
+                map[i] = ((RGB121map[i] >> 8) & 0xf800) | ((RGB121map[i] >> 5) & 0x07e0) | ((RGB121map[i] >> 3) & 0x001f);
+                continue;
+#if PICOMITERP2350
+            }
+            else if (Option.DISPLAY_TYPE >= NEXTGEN)
+            {
+                map[i] = RGB332(RGB121map[i]);
+                continue;
+#endif
+            }
+            else
+            {
+                col[0] = ((RGB121map[i] >> 16) & 0b11111000) | ((RGB121map[i] >> 13) & 0b00000111);
+                col[1] = ((RGB121map[i] >> 5) & 0b11100000) | ((RGB121map[i] >> 3) & 0b00011111);
+            }
+            if (Option.DISPLAY_TYPE == GC9A01)
+            {
+                col[0] = ~col[0];
+                col[1] = ~col[1];
+            }
+            map[i] = col[0] | (col[1] << 8) | (col[2] << 16);
+        }
+    }
+    i = (xend - xstart + 1) * (yend - ystart + 1);
+    if (Option.DISPLAY_TYPE > I2C_PANEL && Option.DISPLAY_TYPE < BufferedPanel)
+    {
+#if PICOMITERP2350
+        if (PinDef[Option.LCD_CLK].mode & SPI0SCK)
+        {
+#else
+        if (PinDef[Option.SYSTEM_CLK].mode & SPI0SCK)
+        {
+#endif
+            if (odd)
+            {
+                c = map[(*s & 0xF0) >> 4];
+                spi_write_fast(spi0, (uint8_t *)&c, cnt);
+                s++;
+                i--;
+            }
+            while (i > 0)
+            {
+                c = map[*s & 0xF];
+                spi_write_fast(spi0, (uint8_t *)&c, cnt);
+                if (i > 1)
+                {
+                    c = map[(*s & 0xF0) >> 4];
+                    spi_write_fast(spi0, (uint8_t *)&c, cnt);
+                }
+                s++;
+                i -= 2;
+            }
+        }
+        else
+        {
+            if (odd)
+            {
+                c = map[(*s & 0xF0) >> 4];
+                spi_write_fast(spi1, (uint8_t *)&c, cnt);
+                s++;
+                i--;
+            }
+            while (i > 0)
+            {
+                c = map[*s & 0xF];
+                spi_write_fast(spi1, (uint8_t *)&c, cnt);
+                if (i > 1)
+                {
+                    c = map[(*s & 0xF0) >> 4];
+                    spi_write_fast(spi1, (uint8_t *)&c, cnt);
+                }
+                s++;
+                i -= 2;
+            }
+        }
+#if PICOMITERP2350
+        if (PinDef[Option.LCD_CLK].mode & SPI0SCK)
+            spi_finish(spi0);
+#else
+        if (PinDef[Option.SYSTEM_CLK].mode & SPI0SCK)
+            spi_finish(spi0);
+#endif
+        else
+            spi_finish(spi1);
+        ClearCS(Option.LCD_CS); // set CS high
+#if PICOMITERP2350
+    }
+    else if (Option.DISPLAY_TYPE >= VGA222 && Option.DISPLAY_TYPE < NEXTGEN)
+    {
+    }
+    else if (Option.DISPLAY_TYPE >= NEXTGEN)
+    {
+        unsigned char *screen = (unsigned char *)(ScreenBuffer);
+        for (int y = ystart; y <= yend; y++)
+        {
+            unsigned char *p = screen + (y + ScrollStart < VRes ? y + ScrollStart : y + ScrollStart - VRes) * HRes;
+            for (int x = xstart; x <= xend; x++)
+            {
+                if (odd)
+                {
+                    c = map[(*s & 0xF0) >> 4];
+                    s++;
+                    odd ^= 1;
+                }
+                else
+                {
+                    c = map[*s & 0xF];
+                    odd ^= 1;
+                }
+                p[x] = c;
+            }
+        }
+#endif
+    }
+    else
+    {
+        if (screen320 && Option.DISPLAY_TYPE != SSD1963_4_16)
+        {
+            unsigned char *q = buff320;
+            HRes = 720;
+            VRes = 480;
+            uint16_t *pp = (uint16_t *)q;
+            if (odd)
+            { // only used for a single line
+                if (odd)
+                {
+                    c = map[(*s & 0xF0) >> 4];
+                    *pp++ = c;
+                    gpio_put(SSD1963_WR_GPPIN, 0);
+                    gpio_put_masked64((uint64_t)0xFFFF << SSD1963data, (uint64_t)c << SSD1963data);
+                    nop;
+                    gpio_put(SSD1963_WR_GPPIN, 1);
+                    nop;
+                    gpio_put(SSD1963_WR_GPPIN, 0);
+                    nop;
+                    gpio_put(SSD1963_WR_GPPIN, 1);
+                    s++;
+                    i--;
+                    int x = 1;
+                    while (x <= xend - xstart)
+                    {
+                        c = map[*s & 0xF];
+                        *pp++ = c;
+                        gpio_put(SSD1963_WR_GPPIN, 0);
+                        gpio_put_masked64((uint64_t)0xFFFF << SSD1963data, (uint64_t)c << SSD1963data);
+                        nop;
+                        gpio_put(SSD1963_WR_GPPIN, 1);
+                        nop;
+                        gpio_put(SSD1963_WR_GPPIN, 0);
+                        nop;
+                        gpio_put(SSD1963_WR_GPPIN, 1);
+                        if (i > 1)
+                        {
+                            c = map[(*s & 0xF0) >> 4];
+                            *pp++ = c;
+                            gpio_put(SSD1963_WR_GPPIN, 0);
+                            gpio_put_masked64((uint64_t)0xFFFF << SSD1963data, (uint64_t)c << SSD1963data);
+                            nop;
+                            gpio_put(SSD1963_WR_GPPIN, 1);
+                            nop;
+                            gpio_put(SSD1963_WR_GPPIN, 0);
+                            nop;
+                            gpio_put(SSD1963_WR_GPPIN, 1);
+                        }
+                        s++;
+                        i -= 2;
+                        x += 2;
+                    }
+                    pp = (uint16_t *)q;
+                    for (int x = xstart; x <= xend; x++)
+                    {
+                        gpio_put(SSD1963_WR_GPPIN, 0);
+                        gpio_put_masked64((uint64_t)0xFFFF << SSD1963data, (uint64_t)(*pp++) << SSD1963data);
+                        nop;
+                        gpio_put(SSD1963_WR_GPPIN, 1);
+                        nop;
+                        gpio_put(SSD1963_WR_GPPIN, 0);
+                        nop;
+                        gpio_put(SSD1963_WR_GPPIN, 1);
+                    }
+                }
+            }
+            else
+            {
+                for (int y = ystart; y <= yend; y++)
+                {
+                    pp = (uint16_t *)q;
+                    int x = 0;
+                    while (x <= xend - xstart)
+                    {
+                        c = map[*s & 0xF];
+                        *pp++ = c;
+                        gpio_put(SSD1963_WR_GPPIN, 0);
+                        gpio_put_masked64((uint64_t)0xFFFF << SSD1963data, (uint64_t)c << SSD1963data);
+                        nop;
+                        gpio_put(SSD1963_WR_GPPIN, 1);
+                        nop;
+                        gpio_put(SSD1963_WR_GPPIN, 0);
+                        nop;
+                        gpio_put(SSD1963_WR_GPPIN, 1);
+                        if (i > 1)
+                        {
+                            c = map[(*s & 0xF0) >> 4];
+                            *pp++ = c;
+                            gpio_put(SSD1963_WR_GPPIN, 0);
+                            gpio_put_masked64((uint64_t)0xFFFF << SSD1963data, (uint64_t)c << SSD1963data);
+                            nop;
+                            gpio_put(SSD1963_WR_GPPIN, 1);
+                            nop;
+                            gpio_put(SSD1963_WR_GPPIN, 0);
+                            nop;
+                            gpio_put(SSD1963_WR_GPPIN, 1);
+                        }
+                        s++;
+                        i -= 2;
+                        x += 2;
+                    }
+                    pp = (uint16_t *)q;
+                    for (int x = xstart; x <= xend; x++)
+                    {
+                        gpio_put(SSD1963_WR_GPPIN, 0);
+                        gpio_put_masked64((uint64_t)0xFFFF << SSD1963data, (uint64_t)(*pp++) << SSD1963data);
+                        nop;
+                        gpio_put(SSD1963_WR_GPPIN, 1);
+                        nop;
+                        gpio_put(SSD1963_WR_GPPIN, 0);
+                        nop;
+                        gpio_put(SSD1963_WR_GPPIN, 1);
+                    }
+                }
+            }
+            HRes = 320;
+            VRes = 240;
+        }
+        else
+        {
+            if (Option.DISPLAY_TYPE > SSD_PANEL_8)
+            {
+                if (odd)
+                {
+                    c = map[(*s & 0xF0) >> 4];
+                    gpio_put_masked64((uint64_t)0xFFFF << SSD1963data, (uint64_t)c << SSD1963data);
+                    nop;
+                    gpio_put(SSD1963_WR_GPPIN, 0);
+                    nop;
+                    nop;
+                    gpio_put(SSD1963_WR_GPPIN, 1);
+                    s++;
+                    i--;
+                }
+                while (i > 0)
+                {
+                    c = map[*s & 0xF];
+                    gpio_put_masked64((uint64_t)0xFFFF << SSD1963data, (uint64_t)c << SSD1963data);
+                    nop;
+                    gpio_put(SSD1963_WR_GPPIN, 0);
+                    nop;
+                    nop;
+                    gpio_put(SSD1963_WR_GPPIN, 1);
+                    if (i > 1)
+                    {
+                        c = map[(*s & 0xF0) >> 4];
+                        gpio_put_masked64((uint64_t)0xFFFF << SSD1963data, (uint64_t)c << SSD1963data);
+                        nop;
+                        gpio_put(SSD1963_WR_GPPIN, 0);
+                        nop;
+                        nop;
+                        gpio_put(SSD1963_WR_GPPIN, 1);
+                    }
+                    s++;
+                    i -= 2;
+                }
+            }
+            else
+            {
+                if (odd)
+                {
+                    c = map[(*s & 0xF0) >> 4];
+                    gpio_put_masked64((uint64_t)0b11111111 << SSD1963data, (uint64_t)((c >> 16) & 0xff) << SSD1963data);
+                    nop;
+                    gpio_put(SSD1963_WR_GPPIN, 0);
+                    nop;
+                    nop;
+                    gpio_put(SSD1963_WR_GPPIN, 1);
+                    gpio_put_masked64((uint64_t)0b11111111 << SSD1963data, (uint64_t)((c >> 8) & 0xff) << SSD1963data);
+                    nop;
+                    gpio_put(SSD1963_WR_GPPIN, 0);
+                    nop;
+                    nop;
+                    gpio_put(SSD1963_WR_GPPIN, 1);
+                    nop;
+                    gpio_put_masked64((uint64_t)0b11111111 << SSD1963data, (uint64_t)(c & 0xff) << SSD1963data);
+                    gpio_put(SSD1963_WR_GPPIN, 0);
+                    nop;
+                    nop;
+                    gpio_put(SSD1963_WR_GPPIN, 1);
+                    s++;
+                    i--;
+                }
+                while (i > 0)
+                {
+                    c = map[*s & 0xF];
+                    gpio_put_masked64((uint64_t)0b11111111 << SSD1963data, (uint64_t)((c >> 16) & 0xff) << SSD1963data);
+                    nop;
+                    gpio_put(SSD1963_WR_GPPIN, 0);
+                    nop;
+                    nop;
+                    gpio_put(SSD1963_WR_GPPIN, 1);
+                    gpio_put_masked64((uint64_t)0b11111111 << SSD1963data, (uint64_t)((c >> 8) & 0xff) << SSD1963data);
+                    nop;
+                    gpio_put(SSD1963_WR_GPPIN, 0);
+                    nop;
+                    nop;
+                    gpio_put(SSD1963_WR_GPPIN, 1);
+                    nop;
+                    gpio_put_masked64((uint64_t)0b11111111 << SSD1963data, (uint64_t)(c & 0xff) << SSD1963data);
+                    gpio_put(SSD1963_WR_GPPIN, 0);
+                    nop;
+                    nop;
+                    gpio_put(SSD1963_WR_GPPIN, 1);
+                    if (i > 1)
+                    {
+                        c = map[(*s & 0xF0) >> 4];
+                        gpio_put_masked64((uint64_t)0b11111111 << SSD1963data, (uint64_t)((c >> 16) & 0xff) << SSD1963data);
+                        nop;
+                        gpio_put(SSD1963_WR_GPPIN, 0);
+                        nop;
+                        nop;
+                        gpio_put(SSD1963_WR_GPPIN, 1);
+                        gpio_put_masked64((uint64_t)0b11111111 << SSD1963data, (uint64_t)((c >> 8) & 0xff) << SSD1963data);
+                        nop;
+                        gpio_put(SSD1963_WR_GPPIN, 0);
+                        nop;
+                        nop;
+                        gpio_put(SSD1963_WR_GPPIN, 1);
+                        nop;
+                        gpio_put_masked64((uint64_t)0b11111111 << SSD1963data, (uint64_t)(c & 0xff) << SSD1963data);
+                        gpio_put(SSD1963_WR_GPPIN, 0);
+                        nop;
+                        nop;
+                        gpio_put(SSD1963_WR_GPPIN, 1);
+                    }
+                    s++;
+                    i -= 2;
+                }
+            }
+        }
+    }
+}
+// Batch size for scanline accumulation (tune based on available RAM)
+#define MERGE_BATCH_LINES 8
+
+// Core merge logic - optimized with reduced branching
+static inline void merge_scanline(uint8_t *dst, const uint8_t *src, int width, uint8_t colour)
+{
+    uint8_t highcolour = colour << 4;
+
+    for (int x = 0; x < width; x++)
+    {
+        uint8_t src_pixel = src[x];
+        uint8_t top = src_pixel & 0xF0;
+        uint8_t bottom = src_pixel & 0x0F;
+
+        // Skip if both pixels are transparent
+        if (top == highcolour && bottom == colour)
+            continue;
+
+        // Branchless merge: use source pixel if not transparent, else keep destination
+        uint8_t new_top = (top != highcolour) ? top : (dst[x] & 0xF0);
+        uint8_t new_bottom = (bottom != colour) ? bottom : (dst[x] & 0x0F);
+        dst[x] = new_top | new_bottom;
+    }
+}
+
+void merge(uint8_t colour)
+{
+    if (LayerBuf == NULL || FrameBuf == NULL)
+        return;
+    uint8_t *s = LayerBuf;
+    uint8_t *d = FrameBuf;
+    int bytes_per_line = HRes / 2;
+
+    // Allocate batch buffer for multiple scanlines
+    uint8_t BatchBuf[MERGE_BATCH_LINES * (HRes / 2)];
+
+#ifdef PICOMITE
+    mutex_enter_blocking(&frameBufferMutex);
+#endif
+
+    if (Option.DISPLAY_TYPE == ILI9341 || Option.DISPLAY_TYPE == ST7796SP ||
+        Option.DISPLAY_TYPE == ST7796S || Option.DISPLAY_TYPE == ST7789B ||
+        Option.DISPLAY_TYPE == ILI9488 || Option.DISPLAY_TYPE == ILI9488P)
+    {
+        while (GetLineILI9341() != 0)
+        {
+        }
+    }
+
+    // Process in batches
+    for (int y = 0; y < VRes; y += MERGE_BATCH_LINES)
+    {
+        int batch_size = (y + MERGE_BATCH_LINES > VRes) ? (VRes - y) : MERGE_BATCH_LINES;
+
+        // Process batch of scanlines
+        for (int i = 0; i < batch_size; i++)
+        {
+            int curr_y = y + i;
+            uint8_t *dst_line = BatchBuf + i * bytes_per_line;
+            uint8_t *src_line = s + curr_y * bytes_per_line;
+            uint8_t *frame_line = d + curr_y * bytes_per_line;
+
+            // Copy framebuffer line to batch buffer
+            memcpy(dst_line, frame_line, bytes_per_line);
+
+            // Merge layer into batch buffer
+            merge_scanline(dst_line, src_line, bytes_per_line, colour);
+        }
+
+        // Send entire batch to screen in one call
+        int y_start = y;
+        int y_end = y + batch_size - 1;
+        copyframetoscreen(BatchBuf, 0, HRes - 1, y_start, y_end, 0);
+    }
+
+#ifdef PICOMITE
+    mutex_exit(&frameBufferMutex);
+    mergedone = true;
+    __dmb();
+    low_x = 0;
+    low_y = 0;
+    high_x = HRes - 1;
+    high_y = VRes - 1;
+#endif
+}
+
+void blitmerge(int x0, int y0, int w, int h, uint8_t colour)
+{
+    if (LayerBuf == NULL || FrameBuf == NULL)
+        return;
+
+    uint8_t *s = LayerBuf;
+    uint8_t *d = FrameBuf;
+    int bytes_per_line = HRes / 2;
+    int x0_bytes = x0 / 2;
+    int w_bytes = w / 2;
+
+    // Allocate batch buffer for multiple scanlines
+    uint8_t BatchBuf[MERGE_BATCH_LINES * (HRes / 2)];
+
+#ifdef PICOMITE
+    mutex_enter_blocking(&frameBufferMutex);
+#endif
+
+    if (Option.DISPLAY_TYPE == ILI9341 || Option.DISPLAY_TYPE == ST7796SP ||
+        Option.DISPLAY_TYPE == ST7796S || Option.DISPLAY_TYPE == ST7789B ||
+        Option.DISPLAY_TYPE == ILI9488 || Option.DISPLAY_TYPE == ILI9488P)
+    {
+        while (GetLineILI9341() != 0)
+        {
+        }
+    }
+
+    int y_end = (y0 + h > VRes) ? VRes : (y0 + h);
+
+    // Process in batches
+    for (int y = y0; y < y_end; y += MERGE_BATCH_LINES)
+    {
+        int batch_size = (y + MERGE_BATCH_LINES > y_end) ? (y_end - y) : MERGE_BATCH_LINES;
+
+        // Process batch of scanlines
+        for (int i = 0; i < batch_size; i++)
+        {
+            int curr_y = y + i;
+            uint8_t *dst_line = BatchBuf + i * bytes_per_line;
+            uint8_t *src_line = s + curr_y * bytes_per_line;
+            uint8_t *frame_line = d + curr_y * bytes_per_line;
+
+            // Copy entire framebuffer line to batch buffer
+            memcpy(dst_line, frame_line, bytes_per_line);
+
+            // Merge only the specified region
+            merge_scanline(dst_line + x0_bytes, src_line + x0_bytes, w_bytes, colour);
+        }
+
+        // Send entire batch to screen in one call
+        int y_start = y;
+        int y_batch_end = y + batch_size - 1;
+        copyframetoscreen(&BatchBuf[x0_bytes], x0, x0 + w - 1, y_start, y_batch_end, 0);
+    }
+
+#ifdef PICOMITE
+    mutex_exit(&frameBufferMutex);
+    mergedone = true;
+    __dmb();
+#endif
+}
+/*  @endcond */
+void cmd_framebuffer(void)
+{
+    unsigned char *p = NULL;
+    if ((p = checkstring(cmdline, (unsigned char *)"CREATE")))
+    {
+        if (FrameBuf == NULL)
+        {
+            FrameBuf = GetMemory(HRes * VRes / 2);
+        }
+        else
+            error("Framebuffer already exists");
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"WRITE")))
+    {
+        if (checkstring(p, (unsigned char *)"N"))
+        {
+#ifdef PICOMITE
+            if (mergerunning)
+                error("Display in use for merged operation");
+#endif
+            restorepanel();
+            return;
+        }
+        else if (checkstring(p, (unsigned char *)"L"))
+        {
+            if (!LayerBuf)
+                error("Layer buffer not created");
+            WriteBuf = LayerBuf;
+            setframebuffer();
+            return;
+        }
+        else if (checkstring(p, (unsigned char *)"F"))
+        {
+            if (!FrameBuf)
+                StandardError(38);
+            WriteBuf = FrameBuf;
+            setframebuffer();
+            return;
+        }
+        {
+            getcsargs(&p, 1);
+            if (argc != 1)
+                SyntaxError();
+            ;
+            char *q = (char *)getCstring(argv[0]);
+            if (strcasecmp(q, "N") == 0)
+            {
+#ifdef PICOMITE
+                if (mergerunning)
+                    error("Display in use for merged operation");
+#endif
+                restorepanel();
+            }
+            else if (strcasecmp(q, "L") == 0)
+            {
+                if (!LayerBuf)
+                    error("Layer buffer not created");
+                WriteBuf = LayerBuf;
+                setframebuffer();
+            }
+            else if (strcasecmp(q, "F") == 0)
+            {
+                if (!FrameBuf)
+                    StandardError(38);
+                WriteBuf = FrameBuf;
+                setframebuffer();
+            }
+            else
+                SyntaxError();
+            ;
+        }
+#ifndef PICOMITEVGA
+#ifdef PICOMITE
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"SYNC")))
+    { // merge the layer onto the physical display
+        uint64_t time = time_us_64() + 100000;
+        mergedone = false;
+        while (mergedone == false && time_us_64() < time)
+        {
+            CheckAbort();
+        }
+#endif
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"MERGE")))
+    { // merge the layer onto the physical display
+        if (!LayerBuf)
+            error("Layer not created");
+        if (!FrameBuf)
+            error("Framebuffer not created");
+        uint8_t colour = 0;
+        getcsargs(&p, 5);
+        if (argc >= 1 && *argv[0])
+        {
+            colour = getint(argv[0], 0, 15);
+        }
+#ifdef PICOMITE
+        uint8_t background = 0;
+        if (argc >= 3 && *argv[2])
+        {
+            if (checkstring(argv[2], (unsigned char *)"B"))
+                background = 1;
+            else if (checkstring(argv[2], (unsigned char *)"R"))
+                background = 2;
+            else if (checkstring(argv[2], (unsigned char *)"A"))
+                background = 3;
+            else
+                SyntaxError();
+            ;
+        }
+#if defined(rp2350)
+        if (Option.DISPLAY_TYPE >= VGA222 && Option.DISPLAY_TYPE < NEXTGEN)
+            background = 0;
+        if (background == 1)
+        {
+            if (!(((Option.DISPLAY_TYPE > I2C_PANEL && Option.DISPLAY_TYPE < BufferedPanel) || Option.DISPLAY_TYPE >= VGA222 || (Option.DISPLAY_TYPE >= SSDPANEL && Option.DISPLAY_TYPE < VIRTUAL))))
+                StandardError(1);
+            ;
+#else
+        if (background == 1)
+        {
+            if (!(((Option.DISPLAY_TYPE > I2C_PANEL && Option.DISPLAY_TYPE < BufferedPanel) || (Option.DISPLAY_TYPE >= SSDPANEL && Option.DISPLAY_TYPE < VIRTUAL))))
+                StandardError(1);
+            ;
+#endif
+            if (diskchecktimer < 200 && SPIatRisk)
+                diskchecktimer = 200;
+            multicore_fifo_push_blocking(2);
+            multicore_fifo_push_blocking((uint32_t)colour);
+        }
+        else if (background == 2)
+        {
+            mergetimer = 0;
+            if (argc == 5)
+                mergetimer = getint(argv[4], 0, 60 * 10 * 1000);
+            if (!(((Option.DISPLAY_TYPE > I2C_PANEL && Option.DISPLAY_TYPE < BufferedPanel) || (Option.DISPLAY_TYPE >= SSDPANEL && Option.DISPLAY_TYPE < VIRTUAL))))
+                StandardError(1);
+            ;
+            if (WriteBuf == NULL)
+                WriteBuf = FrameBuf;
+            setframebuffer();
+            multicore_fifo_push_blocking(3);
+            multicore_fifo_push_blocking((uint32_t)colour);
+            multicore_fifo_push_blocking((uint32_t)mergetimer * 1000);
+        }
+        else if (background == 3)
+        {
+            if (mergerunning)
+            {
+                multicore_fifo_push_blocking(0xFF);
+                busy_wait_ms(mergetimer + 200);
+                if (mergerunning)
+                {
+                    SoftReset(SOFT_RESET);
+                }
+            }
+        }
+        else
+#endif
+            merge(colour);
+#endif
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"LAYER")))
+    {
+        if (LayerBuf == NULL)
+        {
+            LayerBuf = GetMemory(HRes * VRes / 2);
+        }
+        else
+            error("Layer already exists");
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"WAIT")))
+    {
+        if (Option.DISPLAY_TYPE == ILI9341 || Option.DISPLAY_TYPE == ST7796SP || Option.DISPLAY_TYPE == ST7796S || Option.DISPLAY_TYPE == ST7789B || Option.DISPLAY_TYPE == ILI9488 || Option.DISPLAY_TYPE == ILI9488P)
+        {
+            while (GetLineILI9341() != 0)
+            {
+            }
+        }
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"CLOSE")))
+    {
+        if (checkstring(p, (unsigned char *)"F"))
+        {
+#ifdef PICOMITE
+            if (mergerunning)
+            {
+                multicore_fifo_push_blocking(0xFF);
+                busy_wait_ms(mergetimer + 200);
+                if (mergerunning)
+                {
+                    SoftReset(SOFT_RESET);
+                }
+            }
+#endif
+            if (WriteBuf != LayerBuf)
+                restorepanel();
+            if (FrameBuf)
+                FreeMemory(FrameBuf);
+            FrameBuf = NULL;
+        }
+        else if (checkstring(p, (unsigned char *)"L"))
+        {
+#ifdef PICOMITE
+            if (mergerunning)
+            {
+                multicore_fifo_push_blocking(0xFF);
+                busy_wait_ms(mergetimer + 200);
+                if (mergerunning)
+                {
+                    SoftReset(SOFT_RESET);
+                }
+            }
+#endif
+            if (WriteBuf != FrameBuf)
+                restorepanel();
+            if (LayerBuf)
+                FreeMemory(LayerBuf);
+            LayerBuf = NULL;
+        }
+        else
+            closeframebuffer('A');
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"COPY")))
+    {
+#ifdef PICOMITE
+        int complex = 0, background = 0;
+        unsigned char *buff = WriteBuf;
+        getcsargs(&p, 5);
+        if (!(argc == 3 || argc == 5))
+            SyntaxError();
+        ;
+        if (argc == 5)
+        {
+            if (checkstring(argv[4], (unsigned char *)"B"))
+                background = 1;
+            else
+                SyntaxError();
+            ;
+        }
+#else
+        int complex = 0;
+        unsigned char *buff = WriteBuf;
+        getcsargs(&p, 3);
+        if (!(argc == 3))
+            SyntaxError();
+        ;
+#endif
+        uint8_t *s = NULL, *d = NULL;
+        if (checkstring(argv[0], (unsigned char *)"N"))
+        {
+            complex = 1;
+            if ((void *)ReadBuffer == (void *)DisplayNotSet)
+                StandardError(11);
+        }
+        else if (checkstring(argv[0], (unsigned char *)"L"))
+            s = LayerBuf;
+        else if (checkstring(argv[0], (unsigned char *)"F"))
+            s = FrameBuf;
+        else
+            SyntaxError();
+        ;
+        if (checkstring(argv[2], (unsigned char *)"N"))
+        {
+            complex = 2;
+        }
+        else if (checkstring(argv[2], (unsigned char *)"L"))
+            d = LayerBuf;
+        else if (checkstring(argv[2], (unsigned char *)"F"))
+            d = FrameBuf;
+        else
+            SyntaxError();
+        ;
+
+        if (d != s)
+        {
+            if (!complex)
+                memcpy(d, s, HRes * VRes / 2);
+            else
+            {
+                if (complex == 1)
+                { // copying from the real display
+                    char *LCDBuffer = GetTempMainMemory(HRes * 3);
+                    int DisplayMode = 0;
+                    if (DrawBufferSPI == DrawBuffer || DrawBufferSSD1963 == DrawBuffer)
+                        DisplayMode = 1;
+                    WriteBuf = d;
+                    for (int y = 0; y < VRes; y++)
+                    {
+                        restorepanel();
+                        ReadBuffer(0, y, HRes - 1, y, (unsigned char *)LCDBuffer);
+                        WriteBuf = d;
+                        setframebuffer();
+                        DrawBuffer(0, y, HRes - 1, y, (unsigned char *)LCDBuffer);
+                    }
+                    if (DisplayMode)
+                        restorepanel();
+                }
+                else
+                { // copying to the real display
+#ifdef PICOMITE
+                    if (background)
+                    {
+#ifdef rp2350
+                        if (!(((Option.DISPLAY_TYPE > I2C_PANEL && Option.DISPLAY_TYPE < BufferedPanel) || Option.DISPLAY_TYPE >= NEXTGEN || (Option.DISPLAY_TYPE >= SSDPANEL && Option.DISPLAY_TYPE < VIRTUAL))))
+                            StandardError(1);
+                        ;
+#else
+                        if (!(((Option.DISPLAY_TYPE > I2C_PANEL && Option.DISPLAY_TYPE < BufferedPanel) || (Option.DISPLAY_TYPE >= SSDPANEL && Option.DISPLAY_TYPE < VIRTUAL))))
+                            StandardError(1);
+                        ;
+#endif
+                        if (diskchecktimer < 100 && SPIatRisk)
+                            diskchecktimer = 100;
+                        multicore_fifo_push_blocking(1);
+                        multicore_fifo_push_blocking((uint32_t)s);
+                    }
+                    else
+                    {
+#endif
+                        copyframetoscreen(s, 0, HRes - 1, 0, VRes - 1, 0);
+#ifdef PICOMITE
+                    }
+#endif
+                }
+            }
+        }
+        WriteBuf = buff;
+    }
+    else
+        SyntaxError();
+    ;
+}
+#endif
+
+void cmd_blit(void)
+{
+    int x1, y1, x2, y2, w, h, bnbr;
+    unsigned char *buff = NULL;
+    unsigned char *p;
+    CheckDisplay();
+    if (blitother())
+        return;
+    p = checkstring(cmdline, (unsigned char *)"LOADBMP");
+    if (p == NULL)
+        p = checkstring(cmdline, (unsigned char *)"LOAD");
+    if (p)
+    {
+        // get the command line arguments
+        getcsargs(&p, 11); // this MUST be the first executable line in the function
+        s_ReadBMP state;
+        readstate = &state; // store the various variables for use in the callback
+        state.img_x_offset = 0;
+        state.img_y_offset = 0;
+        if (*argv[0] == '#')
+            argv[0]++;                             // check if the first arg is prefixed with a #
+        bnbr = getint(argv[0], 1, MAXBLITBUF) - 1; // get the buffer number
+        if (blitbuff[bnbr].blitbuffptr)
+            error("Buffer % in use", bnbr);
+        if (argc == 0)
+            StandardError(2);
+        if (!InitSDCard())
+            return;
+        p = getCstring(argv[2]); // get the file name
+        state.img_x_offset = state.img_y_offset = 0;
+        if (argc >= 5 && *argv[4])
+            state.img_x_offset = getinteger(argv[4]); // get the x origin (optional) argument
+        if (argc >= 7 && *argv[6])
+            state.img_y_offset = getinteger(argv[6]); // get the y origin (optional) argument
+        if (state.img_x_offset < 0 || state.img_y_offset < 0)
+            StandardError(34);
+        state.width = state.height = -1;
+        if (argc >= 9 && *argv[8])
+            state.width = getinteger(argv[8]); // get the x length (optional) argument
+        if (argc == 11)
+            state.height = getinteger(argv[10]); // get the y length (optional) argument
+        // open the file
+        if (strchr((char *)p, '.') == NULL)
+            strcat((char *)p, ".bmp");
+        BMPfnbr = FindFreeFileNbr();
+        if (!BasicFileOpen((char *)p, BMPfnbr, FA_READ))
+            return;
+        decodeBMPheader(&state.image_width, &state.image_height);
+        if (state.width == -1)
+            state.width = state.image_width - state.img_x_offset;
+        if (state.height == -1)
+            state.height = state.image_height - state.img_y_offset;
+        if (state.width + state.img_x_offset > state.image_width || state.height + state.img_y_offset > state.image_height)
+            StandardError(34);
+        blitbuff[bnbr].blitbuffptr = GetMemory(state.width * state.height * 3 + 4);
+        memset(blitbuff[bnbr].blitbuffptr, 0xFF, state.width * state.height * 3 + 4);
+        state.output_buffer = (uint8_t *)blitbuff[bnbr].blitbuffptr;
+        linecallback = loadBMPlinecallback;
+        decodeBMP(0);
+        blitbuff[bnbr].w = state.width;
+        blitbuff[bnbr].h = state.height;
+        FileClose(BMPfnbr);
+        return;
+    }
+#ifndef PICOMITEVGA
+    if ((p = checkstring(cmdline, (unsigned char *)"MERGE")))
+    { // merge the layer onto the physical display
+        if (!LayerBuf)
+            error("Layer not created");
+        if (!FrameBuf)
+            error("Framebuffer not created");
+        uint8_t colour = 0;
+        getcsargs(&p, 13);
+        if (argc >= 1 && *argv[0])
+        {
+            colour = getint(argv[0], 0, 15);
+        }
+        x1 = getinteger(argv[2]);
+        y1 = getinteger(argv[4]);
+        w = getinteger(argv[6]);
+        h = getinteger(argv[8]);
+#ifdef PICOMITE
+        uint8_t background = 0;
+        if (argc >= 11 && *argv[10])
+        {
+            if (checkstring(argv[10], (unsigned char *)"B"))
+                background = 1;
+            else if (checkstring(argv[10], (unsigned char *)"R"))
+                background = 2;
+            else if (checkstring(argv[10], (unsigned char *)"A"))
+                background = 3;
+            else
+                SyntaxError();
+            ;
+        }
+        if (background == 1)
+        {
+            if (!(((Option.DISPLAY_TYPE > I2C_PANEL && Option.DISPLAY_TYPE < BufferedPanel) || (Option.DISPLAY_TYPE >= SSDPANEL && Option.DISPLAY_TYPE < VIRTUAL))))
+                StandardError(1);
+            ;
+            if (diskchecktimer < 200 && SPIatRisk)
+                diskchecktimer = 200;
+            multicore_fifo_push_blocking(4);
+            multicore_fifo_push_blocking(x1);
+            multicore_fifo_push_blocking(y1);
+            multicore_fifo_push_blocking(w);
+            multicore_fifo_push_blocking(h);
+            multicore_fifo_push_blocking((uint32_t)colour);
+        }
+        else if (background == 2)
+        {
+            mergetimer = 0;
+            if (argc == 13)
+                mergetimer = getint(argv[12], 0, 60 * 10 * 1000);
+            if (!(((Option.DISPLAY_TYPE > I2C_PANEL && Option.DISPLAY_TYPE < BufferedPanel) || (Option.DISPLAY_TYPE >= SSDPANEL && Option.DISPLAY_TYPE < VIRTUAL))))
+                StandardError(1);
+            ;
+            if (WriteBuf == NULL)
+                WriteBuf = FrameBuf;
+            setframebuffer();
+            multicore_fifo_push_blocking(5);
+            multicore_fifo_push_blocking(x1);
+            multicore_fifo_push_blocking(y1);
+            multicore_fifo_push_blocking(w);
+            multicore_fifo_push_blocking(h);
+            multicore_fifo_push_blocking((uint32_t)colour);
+            multicore_fifo_push_blocking((uint32_t)mergetimer * 1000);
+        }
+        else if (background == 3)
+        {
+            if (mergerunning)
+            {
+                multicore_fifo_push_blocking(0xFF);
+                busy_wait_ms(mergetimer + 200);
+                if (mergerunning)
+                {
+                    SoftReset(SOFT_RESET);
+                }
+            }
+        }
+        else
+#endif
+            blitmerge(x1, y1, w, h, colour);
+        return;
+    }
+#endif
+    if ((p = checkstring(cmdline, (unsigned char *)"READ")))
+    {
+        getcsargs(&p, 9);
+        if ((void *)ReadBuffer == (void *)DisplayNotSet)
+            StandardError(11);
+        if (argc != 9)
+            SyntaxError();
+        ;
+        if (*argv[0] == '#')
+            argv[0]++;                             // check if the first arg is prefixed with a #
+        bnbr = getint(argv[0], 1, MAXBLITBUF) - 1; // get the buffer number
+        x1 = getinteger(argv[2]);
+        y1 = getinteger(argv[4]);
+        w = getinteger(argv[6]);
+        h = getinteger(argv[8]);
+        if (w < 1 || h < 1)
+            return;
+        if (x1 < 0)
+        {
+            x2 -= x1;
+            w += x1;
+            x1 = 0;
+        }
+        if (y1 < 0)
+        {
+            y2 -= y1;
+            h += y1;
+            y1 = 0;
+        }
+        if (x1 + w > HRes)
+            w = HRes - x1;
+        if (y1 + h > VRes)
+            h = VRes - y1;
+        if (w < 1 || h < 1 || x1 < 0 || x1 + w > HRes || y1 < 0 || y1 + h > VRes)
+            return;
+        if (blitbuff[bnbr].blitbuffptr == NULL)
+        {
+            blitbuff[bnbr].blitbuffptr = GetMemory(w * h * 3);
+            ReadBuffer(x1, y1, x1 + w - 1, y1 + h - 1, (unsigned char *)blitbuff[bnbr].blitbuffptr);
+            blitbuff[bnbr].w = w;
+            blitbuff[bnbr].h = h;
+        }
+        else
+            error("Buffer in use");
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"WRITE")))
+    {
+        int mode = 0;
+        getcsargs(&p, 7);
+        if (!(argc == 5 || argc == 7))
+            SyntaxError();
+        if (*argv[0] == '#')
+            argv[0]++;
+        bnbr = (int)getint(argv[0], 1, MAXBLITBUF) - 1; // get the number
+        if (blitbuff[bnbr].h == TRIANGLE_BUFFER_MARKER)
+            StandardError(37);
+        if (blitbuff[bnbr].blitbuffptr != NULL)
+        {
+            x1 = (int)getint(argv[2], -blitbuff[bnbr].w + 1, HRes);
+            y1 = (int)getint(argv[4], -blitbuff[bnbr].h + 1, VRes);
+            if (argc == 7)
+                mode = (char)getint(argv[6], 0, 7);
+            w = blitbuff[bnbr].w;
+            h = blitbuff[bnbr].h;
+            //            int cursorhidden = 0;
+            int rotation = mode & 3;
+            if (x1 >= HRes || x1 + w < 0 || y1 >= VRes || y1 + h < 0)
+                return;
+            if (x1 >= 0 && mode == 0 && x1 + w <= HRes)
+                buff = (unsigned char *)blitbuff[bnbr].blitbuffptr;
+            else
+            {
+                buff = GetTempMainMemory(w * h * 4);
+                for (int j = w * h * 4 - 1, i = w * h * 3 - 1; j >= 0; j -= 4)
+                {
+                    buff[j] = 0;
+                    buff[j - 1] = blitbuff[bnbr].blitbuffptr[i--];
+                    buff[j - 2] = blitbuff[bnbr].blitbuffptr[i--];
+                    buff[j - 3] = blitbuff[bnbr].blitbuffptr[i--];
+                }
+                int *d = (int *)buff;
+                if (rotation & 1)
+                { // swap left/write
+                    for (int y = 0; y < h; y++)
+                    {
+                        for (int x = 0, xx = w - 1; x < (w >> 1); x++, xx--)
+                        {
+                            swap(d[y * w + x], d[y * w + xx]);
+                        }
+                    }
+                }
+                if (rotation & 2)
+                {
+                    for (int x = 0; x < w; x++)
+                    {
+                        for (int y = 0, yy = h - 1; y < (h >> 1); y++, yy--)
+                        {
+                            swap(d[x + y * w], d[x + yy * w]);
+                        }
+                    }
+                }
+                if (x1 < 0)
+                { // now deal with situation where you are blitting part off the left of the screen
+                    int *s = (int *)buff;
+                    d = (int *)buff;
+                    int start = -x1;
+                    for (int y = 0; y < h; y++)
+                    {
+                        for (int x = 0; x < w; x++)
+                        {
+                            if (x >= start)
+                                *d++ = *s++;
+                            else
+                                s++;
+                        }
+                    }
+                    w -= start;
+                    x1 = 0;
+                }
+                if (x1 + w >= HRes)
+                { // now deal with situation where you are blitting part off the right of the screen
+                    int *s = (int *)buff;
+                    d = (int *)buff;
+                    int over = ((x1 + w) - HRes);
+                    int end = w - over;
+                    for (int y = 0; y < h; y++)
+                    {
+                        for (int x = 0; x < w; x++)
+                        {
+                            if (x >= end)
+                                s++;
+                            else
+                                *d++ = *s++;
+                        }
+                    }
+                    w -= over;
+                }
+                for (int i = 0, j = 0; i < w * h * 3; i += 3)
+                {
+                    buff[i] = buff[j++];
+                    buff[i + 1] = buff[j++];
+                    buff[i + 2] = buff[j++];
+                    j++;
+                }
+            }
+            if (!(mode & 4))
+            {
+                if (y1 < 0)
+                {
+                    buff -= (y1 * 3 * w);
+                    h += y1;
+                    y1 = 0;
+                }
+                DrawBuffer(x1, y1, x1 + w - 1, y1 + h - 1, buff);
+            }
+            else
+            {
+                if ((void *)ReadBuffer == (void *)DisplayNotSet)
+                    StandardError(11);
+                unsigned char *current = GetTempMainMemory(w * h * 3);
+                if (y1 < 0)
+                {
+                    buff -= (y1 * 3 * w);
+                    h += y1;
+                    y1 = 0;
+                }
+                ReadBuffer(x1, y1, x1 + w - 1, y1 + h - 1, current);
+                for (int i = 0; i < w * h * 3; i += 3)
+                {
+                    if (buff[i] || buff[i + 1] || buff[i + 2])
+                    {
+                        current[i] = buff[i];
+                        current[i + 1] = buff[i + 1];
+                        current[i + 2] = buff[i + 2];
+                    }
+                }
+                DrawBuffer(x1, y1, x1 + w - 1, y1 + h - 1, current);
+            }
+        }
+        else
+            error((char *)"Buffer not in use");
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"CLOSE")))
+    {
+        getcsargs(&p, 1);
+        if (*argv[0] == '#')
+            argv[0]++;                             // check if the first arg is prefixed with a #
+        bnbr = getint(argv[0], 1, MAXBLITBUF) - 1; // get the buffer number
+        if (blitbuff[bnbr].blitbuffptr != NULL)
+        {
+            FreeMemory((unsigned char *)blitbuff[bnbr].blitbuffptr);
+            blitbuff[bnbr].blitbuffptr = NULL;
+        }
+        else
+            error("Buffer not in use");
+        // get the number
+    }
+    else
+    {
+        getcsargs(&cmdline, 11);
+        if ((void *)ReadBuffer == (void *)DisplayNotSet)
+            StandardError(11);
+        if (argc != 11)
+            SyntaxError();
+        ;
+        x1 = getinteger(argv[0]);
+        y1 = getinteger(argv[2]);
+        x2 = getinteger(argv[4]);
+        y2 = getinteger(argv[6]);
+        w = getinteger(argv[8]);
+        h = getinteger(argv[10]);
+        //        PInt(x1);PIntComma(y1);PIntComma(x2);PIntComma(y2);PIntComma(w);PIntComma(h);PRet();
+        if (w < 1 || h < 1)
+            return;
+        if (x1 < 0)
+        {
+            x2 -= x1;
+            w += x1;
+            x1 = 0;
+        }
+        if (x2 < 0)
+        {
+            x1 -= x2;
+            w += x2;
+            x2 = 0;
+        }
+        if (y1 < 0)
+        {
+            y2 -= y1;
+            h += y1;
+            y1 = 0;
+        }
+        if (y2 < 0)
+        {
+            y1 -= y2;
+            h += y2;
+            y2 = 0;
+        }
+        if (x1 + w > HRes)
+            w = HRes - x1;
+        if (x2 + w > HRes)
+            w = HRes - x2;
+        if (y1 + h > VRes)
+            h = VRes - y1;
+        if (y2 + h > VRes)
+            h = VRes - y2;
+        if (w < 1 || h < 1 || x1 < 0 || x1 + w > HRes || x2 < 0 || x2 + w > HRes || y1 < 0 || y1 + h > VRes || y2 < 0 || y2 + h > VRes)
+            return;
+#ifdef PICOMITEVGA
+        if (DISPLAY_TYPE == SCREENMODE2 || DISPLAY_TYPE == SCREENMODE3)
+        { // RGB121 blit
+            HResD = HRes;
+            VResD = VRes;
+            HResS = HRes;
+            VResS = VRes;
+            blit121_self(WriteBuf, x1, y1, w, h, x2, y2);
+        }
+        else if (DISPLAY_TYPE && (DISPLAY_TYPE == SCREENMODE4 || DISPLAY_TYPE == SCREENMODE5))
+        {
+            unsigned char *buff = NULL;
+            int max_x;
+            if (x1 >= x2)
+            {
+                max_x = 1;
+                buff = GetMemory((max_x * h) * (DISPLAY_TYPE == SCREENMODE4 ? 2 : 1));
+                while (w > max_x)
+                {
+                    ReadBufferFast(x1, y1, x1 + max_x - 1, y1 + h - 1, buff);
+                    DrawBufferFast(x2, y2, x2 + max_x - 1, y2 + h - 1, -1, buff);
+                    x1 += max_x;
+                    x2 += max_x;
+                    w -= max_x;
+                }
+                ReadBufferFast(x1, y1, x1 + w - 1, y1 + h - 1, buff);
+                DrawBufferFast(x2, y2, x2 + w - 1, y2 + h - 1, -1, buff);
+                FreeMemory(buff);
+            }
+            if (x1 < x2)
+            {
+                int start_x1, start_x2;
+                max_x = 1;
+                buff = GetMemory((max_x * h) * (DISPLAY_TYPE == SCREENMODE4 ? 2 : 1));
+                start_x1 = x1 + w - max_x;
+                start_x2 = x2 + w - max_x;
+                while (w > max_x)
+                {
+                    ReadBufferFast(start_x1, y1, start_x1 + max_x - 1, y1 + h - 1, buff);
+                    DrawBufferFast(start_x2, y2, start_x2 + max_x - 1, y2 + h - 1, -1, buff);
+                    w -= max_x;
+                    start_x1 -= max_x;
+                    start_x2 -= max_x;
+                }
+                ReadBufferFast(x1, y1, x1 + w - 1, y1 + h - 1, buff);
+                DrawBufferFast(x2, y2, x2 + w - 1, y2 + h - 1, -1, buff);
+                FreeMemory(buff);
+            }
+        }
+        else if (DISPLAY_TYPE && DISPLAY_TYPE == SCREENMODE1)
+        {
+            unsigned char *buff = NULL;
+            int max_x, ww;
+            ww = w;
+            if (x1 >= x2)
+            {
+                max_x = 1;
+                buff = GetMemory((max_x * h) >> 1);
+                while (w > max_x)
+                {
+                    ReadBufferFast(x1, y1, x1 + max_x - 1, y1 + h - 1, buff);
+                    DrawBufferFast(x2, y2, x2 + max_x - 1, y2 + h - 1, -1, buff);
+                    x1 += max_x;
+                    x2 += max_x;
+                    w -= max_x;
+                }
+                ReadBufferFast(x1, y1, x1 + w - 1, y1 + h - 1, buff);
+                DrawBufferFast(x2, y2, x2 + w - 1, y2 + h - 1, -1, buff);
+                FreeMemory(buff);
+                if ((x1 % 8 == 0) && (x2 % 8 == 0) && (y1 % ytileheight == 0) && (y2 % ytileheight == 0) && (ww % 8 == 0) && (h % ytileheight == 0))
+                {
+                    int tx1 = x1 / 8;
+                    int xc = ww / 8;
+                    int ty1 = y1 / ytileheight;
+                    int yc = h / ytileheight;
+                    int tx2 = x2 / 8;
+                    int ty2 = y2 / ytileheight;
+                    for (int x = 0; x < xc; x++)
+                    {
+                        for (int y = 0; y < yc; y++)
+                        {
+                            int s = (y + ty1) * X_TILE + x + tx1;
+                            int d = (y + ty2) * X_TILE + x + tx2;
+                            tilefcols[d] = tilefcols[s];
+                            tilebcols[d] = tilebcols[s];
+                        }
+                    }
+                }
+                return;
+            }
+            if (x1 < x2)
+            {
+                int start_x1, start_x2;
+                max_x = 1;
+                buff = GetMemory(max_x * h);
+                start_x1 = x1 + w - max_x;
+                start_x2 = x2 + w - max_x;
+                while (w > max_x)
+                {
+                    ReadBufferFast(start_x1, y1, start_x1 + max_x - 1, y1 + h - 1, buff);
+                    DrawBufferFast(start_x2, y2, start_x2 + max_x - 1, y2 + h - 1, -1, buff);
+                    w -= max_x;
+                    start_x1 -= max_x;
+                    start_x2 -= max_x;
+                }
+                ReadBufferFast(x1, y1, x1 + w - 1, y1 + h - 1, buff);
+                DrawBufferFast(x2, y2, x2 + w - 1, y2 + h - 1, -1, buff);
+                FreeMemory(buff);
+                if ((x1 % 8 == 0) && (x2 % 8 == 0) && (y1 % ytileheight == 0) && (y2 % ytileheight == 0) && (ww % 8 == 0) && (h % ytileheight == 0))
+                {
+                    int tx1 = x1 / 8;
+                    int xc = ww / 8;
+                    int ty1 = y1 / ytileheight;
+                    int yc = h / ytileheight;
+                    int tx2 = x2 / 8;
+                    int ty2 = y2 / ytileheight;
+                    for (int x = xc - 1; x >= 0; x--)
+                    {
+                        for (int y = 0; y < yc; y++)
+                        {
+                            int s = (y + ty1) * X_TILE + x + tx1;
+                            int d = (y + ty2) * X_TILE + x + tx2;
+                            tilefcols[d] = tilefcols[s];
+                            tilebcols[d] = tilebcols[s];
+                        }
+                    }
+                }
+                return;
+            }
+        }
+    }
+#else
+        int max_x;
+        if ((WriteBuf == LayerBuf || WriteBuf == FrameBuf) && WriteBuf)
+        {
+            if ((w & 1) == 0 && (x1 & 1) == 0 && (x2 & 1) == 0)
+            { // Easiest case - byte move in the x direction with w even
+                if (y1 < y2)
+                {
+                    for (int y = h - 1; y >= 0; y--)
+                    {
+                        uint8_t *in = WriteBuf + ((y + y1) * HRes + x1) / 2;
+                        uint8_t *out = WriteBuf + ((y + y2) * HRes + x2) / 2;
+                        memcpy(out, in, w / 2);
+                    }
+                }
+                else if (y1 > y2)
+                {
+                    for (int y = 0; y < h; y++)
+                    {
+                        uint8_t *in = WriteBuf + ((y + y1) * HRes + x1) / 2;
+                        uint8_t *out = WriteBuf + ((y + y2) * HRes + x2) / 2;
+                        memcpy(out, in, w / 2);
+                    }
+                }
+                else
+                {
+                    for (int y = 0; y < h; y++)
+                    {
+                        uint8_t *in = WriteBuf + ((y + y1) * HRes + x1) / 2;
+                        uint8_t *out = WriteBuf + ((y + y2) * HRes + x2) / 2;
+                        memmove(out, in, w / 2);
+                    }
+                }
+                return;
+            }
+            else
+            { // nibble move not as easy
+                uint8_t *inbuff = GetTempMainMemory(HRes / 2);
+                int intoggle = x1 & 1;
+                int outtoggle = x2 & 1;
+                int n = w / 2;
+                if (w & 1)
+                    n++;
+                if (y1 > y2)
+                {
+                    for (int y = 0; y < h; y++)
+                    {
+                        if (!intoggle)
+                            memcpy(inbuff, WriteBuf + ((y + y1) * HRes + x1) / 2, n);
+                        else
+                        {
+                            int toggle = 1;
+                            uint8_t *in = WriteBuf + ((y + y1) * HRes + x1) / 2;
+                            uint8_t *out = inbuff;
+                            for (int x = 0; x < w; x++)
+                            {
+                                if (toggle)
+                                {
+                                    uint8_t t = *in >> 4;
+                                    *out = t;
+                                    in++;
+                                }
+                                else
+                                {
+                                    uint8_t t = (*in & 0xf) << 4;
+                                    *out |= t;
+                                    out++;
+                                }
+                                toggle ^= 1;
+                            }
+                        }
+                        if (!outtoggle)
+                        {
+                            memcpy(WriteBuf + ((y + y2) * HRes + x2) / 2, inbuff, w / 2);
+                            if (w & 1)
+                            {
+                                uint8_t *lastnibble = WriteBuf + ((y + y2) * HRes + x2 + w) / 2;
+                                *lastnibble &= 0xf0;
+                                *lastnibble |= (inbuff[w / 2] & 0xf);
+                            }
+                        }
+                        else
+                        {
+                            int toggle = 1;
+                            uint8_t *in = inbuff;
+                            uint8_t *out = WriteBuf + ((y + y2) * HRes + x2) / 2;
+                            for (int x = 0; x < w; x++)
+                            {
+                                if (toggle)
+                                {
+                                    uint8_t t = (*in & 0xf) << 4;
+                                    *out &= 0x0f; // clear the top byte of the output
+                                    *out |= t;
+                                    out++;
+                                }
+                                else
+                                {
+                                    uint8_t t = (*in >> 4);
+                                    *out &= 0xf0;
+                                    *out |= t;
+                                    in++;
+                                }
+                                toggle ^= 1;
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    for (int y = h - 1; y >= 0; y--)
+                    {
+                        if (!intoggle)
+                            memcpy(inbuff, WriteBuf + ((y + y1) * HRes + x1) / 2, n);
+                        else
+                        {
+                            int toggle = 1;
+                            uint8_t *in = WriteBuf + ((y + y1) * HRes + x1) / 2;
+                            uint8_t *out = inbuff;
+                            for (int x = 0; x < w; x++)
+                            {
+                                if (toggle)
+                                {
+                                    uint8_t t = *in >> 4;
+                                    *out = t;
+                                    in++;
+                                }
+                                else
+                                {
+                                    uint8_t t = (*in & 0xf) << 4;
+                                    *out |= t;
+                                    out++;
+                                }
+                                toggle ^= 1;
+                            }
+                        }
+                        if (!outtoggle)
+                        {
+                            memcpy(WriteBuf + ((y + y2) * HRes + x2) / 2, inbuff, w / 2);
+                            if (w & 1)
+                            {
+                                uint8_t *lastnibble = WriteBuf + ((y + y2) * HRes + x2 + w) / 2;
+                                *lastnibble &= 0xf0;
+                                *lastnibble |= (inbuff[w / 2] & 0xf);
+                            }
+                        }
+                        else
+                        {
+                            int toggle = 1;
+                            uint8_t *in = inbuff;
+                            uint8_t *out = WriteBuf + ((y + y2) * HRes + x2) / 2;
+                            for (int x = 0; x < w; x++)
+                            {
+                                if (toggle)
+                                {
+                                    uint8_t t = (*in & 0xf) << 4;
+                                    *out &= 0x0f; // clear the top byte of the output
+                                    *out |= t;
+                                    out++;
+                                }
+                                else
+                                {
+                                    uint8_t t = (*in >> 4);
+                                    *out &= 0xf0;
+                                    *out |= t;
+                                    in++;
+                                }
+                                toggle ^= 1;
+                            }
+                        }
+                    }
+                }
+                return;
+            }
+        }
+        else
+        {
+            if (x1 >= x2)
+            {
+                max_x = 1;
+#if PICOMITERP2350
+                buff = GetMemory(max_x * h * (SSD16TYPE || Option.DISPLAY_TYPE == IPS_4_16 ? 2 : (Option.DISPLAY_TYPE >= NEXTGEN ? 1 : 3)));
+#else
+                buff = GetMemory(max_x * h * (SSD16TYPE || Option.DISPLAY_TYPE == IPS_4_16 ? 2 : 3));
+#endif
+                while (w > max_x)
+                {
+                    ReadBLITBuffer(x1, y1, x1 + max_x - 1, y1 + h - 1, buff);
+                    DrawBLITBuffer(x2, y2, x2 + max_x - 1, y2 + h - 1, buff);
+                    x1 += max_x;
+                    x2 += max_x;
+                    w -= max_x;
+                }
+                ReadBLITBuffer(x1, y1, x1 + w - 1, y1 + h - 1, buff);
+                DrawBLITBuffer(x2, y2, x2 + w - 1, y2 + h - 1, buff);
+                FreeMemory(buff);
+                if (Option.Refresh)
+                    Display_Refresh();
+                return;
+            }
+            if (x1 < x2)
+            {
+                int start_x1, start_x2;
+                max_x = 1;
+#if PICOMITERP2350
+                buff = GetMemory(max_x * h * (SSD16TYPE || Option.DISPLAY_TYPE == IPS_4_16 ? 2 : (Option.DISPLAY_TYPE >= NEXTGEN ? 1 : 3)));
+#else
+                buff = GetMemory(max_x * h * (SSD16TYPE || Option.DISPLAY_TYPE == IPS_4_16 ? 2 : 3));
+#endif
+                start_x1 = x1 + w - max_x;
+                start_x2 = x2 + w - max_x;
+                while (w > max_x)
+                {
+                    ReadBLITBuffer(start_x1, y1, start_x1 + max_x - 1, y1 + h - 1, buff);
+                    DrawBLITBuffer(start_x2, y2, start_x2 + max_x - 1, y2 + h - 1, buff);
+                    w -= max_x;
+                    start_x1 -= max_x;
+                    start_x2 -= max_x;
+                }
+                ReadBLITBuffer(x1, y1, x1 + w - 1, y1 + h - 1, buff);
+                DrawBLITBuffer(x2, y2, x2 + w - 1, y2 + h - 1, buff);
+                FreeMemory(buff);
+                if (Option.Refresh)
+                    Display_Refresh();
+                return;
+            }
+        }
+    }
+#endif
+}
+
+void MIPS16 cmd_font(void)
+{
+    getcsargs(&cmdline, 3);
+    if (argc < 1)
+        StandardError(2);
+    if (*argv[0] == '#')
+        ++argv[0];
+    if (argc == 3)
+        SetFont(((getint(argv[0], 1, FONT_TABLE_SIZE) - 1) << 4) | getint(argv[2], 1, 15));
+    else
+        SetFont(((getint(argv[0], 1, FONT_TABLE_SIZE) - 1) << 4) | 1);
+    if (Option.DISPLAY_CONSOLE && !CurrentLinePtr)
+    { // if we are at the command prompt on the LCD
+#ifdef PICOMITEVGA
+        if (gui_font_height >= 8 && (gui_font_width % 8) == 0)
+        {
+            ytileheight = gui_font_height;
+            Y_TILE = (VRes + ytileheight - 1) / ytileheight;
+            for (int i = 0; i < X_TILE * Y_TILE; i++)
+            {
+#if defined(rp2350) && defined(HDMI)
+                if (FullColour)
+                {
+                    tilefcols[i] = tilefcols[0];
+                    tilebcols[i] = tilebcols[0];
+                }
+                else
+                {
+                    tilefcols_w[i] = tilefcols_w[0];
+                    tilebcols_w[i] = tilebcols_w[0];
+                }
+#else
+                tilefcols[i] = tilefcols[0];
+                tilebcols[i] = tilebcols[0];
+#endif
+            }
+        }
+#endif
+        PromptFont = gui_font;
+        if (CurrentY + gui_font_height >= VRes)
+        {
+            ScrollLCD(CurrentY + gui_font_height - VRes); // scroll up if the font change split the line over the bottom
+            CurrentY -= (CurrentY + gui_font_height - VRes);
+        }
+    }
+}
+void cmd_colourmap(void)
+{
+    long long int *cptr = NULL, *fptr = NULL;
+    MMFLOAT *cfptr = NULL, *ffptr = NULL;
+    int nf, n, i;
+    int map[16];
+    getcsargs(&cmdline, 5);
+    memcpy((void *)map, (void *)RGB121map, 16 * sizeof(int));
+    if (!(argc == 3 || argc == 5))
+        StandardError(2);
+    n = parsenumberarray(argv[0], &cfptr, &cptr, 1, 1, NULL, true, NULL);
+    if (argc == 5)
+    { // user defined mapping
+        MMFLOAT *a3float = NULL;
+        int64_t *a3int = NULL;
+        if (parsenumberarray(argv[4], &a3float, &a3int, 3, 1, NULL, true, NULL) != 16)
+            error("Array size not 16 elements");
+        if (a3int != NULL)
+        {
+            for (i = 0; i < 16; i++)
+            {
+                map[i] = a3int[i];
+                if (map[i] < 0 || map[i] > 0xFFFFFF)
+                    error("Invalid colour");
+            }
+        }
+        else
+        {
+            for (i = 0; i < 16; i++)
+            {
+                map[i] = a3float[i];
+                if (map[i] < 0 || map[i] > 0xFFFFFF)
+                    error("Invalid colour");
+            }
+        }
+    }
+    nf = parsenumberarray(argv[2], &ffptr, &fptr, 1, 1, NULL, false, NULL);
+    if (nf != n)
+        error("Array size mismatch %, %", n, nf);
+    for (int i = 0; i < n; i++)
+    {
+        int in = (cptr == NULL ? (int)cfptr[i] : cptr[i]);
+        if (in >= 16)
+            error("Input range error on element %", i);
+        if (fptr == NULL)
+            ffptr[i] = map[in];
+        else
+            fptr[i] = map[in];
+    }
+}
+
+void cmd_colour(void)
+{
+    getcsargs(&cmdline, 3);
+    if (argc < 1)
+        StandardError(2);
+    gui_fcolour = getColour((char *)argv[0], 0);
+    if (argc == 3)
+        gui_bcolour = getColour((char *)argv[2], 0);
+    last_fcolour = gui_fcolour;
+    last_bcolour = gui_bcolour;
+    if (!CurrentLinePtr)
+    {
+        PromptFC = gui_fcolour;
+        PromptBC = gui_bcolour;
+    }
+}
+#ifdef PICOMITEVGA
+void fun_map(void)
+{
+    int cl = getint(ep, 0, 255);
+    switch (DISPLAY_TYPE)
+    {
+    case SCREENMODE1:
+    case SCREENMODE4:
+        error("Invalid for Mode");
+        break;
+    case SCREENMODE2:
+    case SCREENMODE3:
+        if (cl > 15)
+            error("Mode has 16 colours - 0 to 15");
+        targ = T_INT;
+        iret = ((cl & 0b1000) << 20) | ((cl & 0b110) << 13) | ((cl & 0b1) << 7);
+        break;
+    case SCREENMODE5:
+        targ = T_INT;
+        iret = ((cl & 0b11100000) << 16) | ((cl & 0b00011100) << 11) | ((cl & 0b11) << 6);
+        break;
+    }
+}
+#ifndef HDMI
+void cmd_map(void)
+{
+    unsigned char *p;
+    //    if(Option.CPU_Speed==126000)error("CPUSPEED >= 252000 for colour mapping");
+    if (!(DISPLAY_TYPE == SCREENMODE2 || DISPLAY_TYPE == SCREENMODE3))
+        StandardError(40);
+    if ((p = checkstring(cmdline, (unsigned char *)"RESET")))
+    {
+        while (QVgaScanLine != 0)
+        {
+        }
+        for (int i = 0; i < 16; i++)
+            remap[i] = RGB121map[i];
+        for (int i = 0; i < 16; i++)
+            map16[i] = RGB121(remap[i]);
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"MAXIMITE")))
+    {
+        while (QVgaScanLine != 0)
+        {
+        }
+        for (int i = 0; i < 16; i++)
+            remap[i] = CMM1map[i];
+        for (int i = 0; i < 16; i++)
+            map16[i] = RGB121(remap[i]);
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"SET")))
+    {
+        while (QVgaScanLine != 0)
+        {
+        }
+        for (int i = 0; i < 16; i++)
+            map16[i] = RGB121(remap[i]);
+    }
+    else
+    {
+        static bool first = true;
+        int cl = getinteger(cmdline);
+        while (*cmdline && tokenfunction(*cmdline) != op_equal)
+            cmdline++;
+        if (!*cmdline)
+            SyntaxError();
+        ++cmdline;
+        if (!*cmdline)
+            SyntaxError();
+        int col = getColour((char *)cmdline, 0);
+        if (first)
+        {
+            for (int i = 0; i < 16; i++)
+                remap[i] = RGB121map[i];
+            first = false;
+        }
+        remap[cl] = col;
+    }
+}
+
+void cmd_tile(void)
+{
+    unsigned char *tp;
+    uint32_t bcolour = 0xFFFFFFFF, fcolour = 0xFFFFFFFF;
+    int xlen = 1, ylen = 1;
+    if (DISPLAY_TYPE != SCREENMODE1)
+        StandardError(40);
+    if (checkstring(cmdline, (unsigned char *)"RESET"))
+    {
+        for (int x = 0; x < X_TILE; x++)
+        {
+            for (int y = 0; y < Y_TILE; y++)
+            {
+                tilefcols[y * X_TILE + x] = RGB121pack(gui_fcolour);
+                tilebcols[y * X_TILE + x] = RGB121pack(gui_bcolour);
+            }
+        }
+    }
+    else if ((tp = checkstring(cmdline, (unsigned char *)"HEIGHT")))
+    {
+        if (!(WriteBuf == DisplayBuf))
+            error("Not available when write is set to a buffer");
+        ytileheight = getint(tp, 12, VRes);
+        Y_TILE = VRes / ytileheight;
+        if (VRes % ytileheight)
+            Y_TILE++;
+        ClearScreen(Option.DefaultBC);
+    }
+    else
+    {
+        getcsargs(&cmdline, 11);
+        if (!(DISPLAY_TYPE == SCREENMODE1))
+            return;
+        if (argc < 5)
+            SyntaxError();
+        ;
+        int x = getint(argv[0], 0, X_TILE);
+        int y = getint(argv[2], 0, Y_TILE);
+        int tilebcolour, tilefcolour;
+        if (*argv[4])
+        {
+            tilefcolour = getColour((char *)argv[4], 0);
+            fcolour = RGB121pack(tilefcolour);
+        }
+        if (argc >= 7 && *argv[6])
+        {
+            tilebcolour = getColour((char *)argv[6], 0);
+            bcolour = RGB121pack(tilebcolour);
+        }
+        if (argc >= 9 && *argv[8])
+        {
+            xlen = getint(argv[8], 1, X_TILE - x);
+        }
+        if (argc >= 11 && *argv[10])
+        {
+            ylen = getint(argv[10], 1, Y_TILE - y);
+        }
+        for (int xp = x; xp < x + xlen; xp++)
+        {
+            for (int yp = y; yp < y + ylen; yp++)
+            {
+                if (fcolour != 0xFFFFFFFF)
+                    tilefcols[yp * X_TILE + xp] = (uint16_t)fcolour;
+                if (bcolour != 0xFFFFFFFF)
+                    tilebcols[yp * X_TILE + xp] = (uint16_t)bcolour;
+            }
+        }
+    }
+}
+#else
+/*
+ * @cond
+ * The following section will be excluded from the documentation.
+ */
+void DrawRectangle555(int x1, int y1, int x2, int y2, int c)
+{
+    int x, y, t;
+    uint16_t col = ((c & 0xf8) >> 3) | ((c & 0xf800) >> 6) | ((c & 0xf80000) >> 9);
+    if (x1 < 0)
+        x1 = 0;
+    if (x1 >= HRes)
+        x1 = HRes - 1;
+    if (x2 < 0)
+        x2 = 0;
+    if (x2 >= HRes)
+        x2 = HRes - 1;
+    if (y1 < 0)
+        y1 = 0;
+    if (y1 >= VRes)
+        y1 = VRes - 1;
+    if (y2 < 0)
+        y2 = 0;
+    if (y2 >= VRes)
+        y2 = VRes - 1;
+    if (x2 <= x1)
+    {
+        t = x1;
+        x1 = x2;
+        x2 = t;
+    }
+    if (y2 <= y1)
+    {
+        t = y1;
+        y1 = y2;
+        y2 = t;
+    }
+    for (y = y1; y <= y2; y++)
+    {
+        uint16_t *p = (uint16_t *)((uint8_t *)(WriteBuf + ((y * HRes + x1) * 2)));
+        for (x = x1; x <= x2; x++)
+        {
+            *p++ = col;
+        }
+    }
+}
+void DrawBitmap555(int x1, int y1, int width, int height, int scale, int fc, int bc, unsigned char *bitmap)
+{
+    int i, j, k, m, x, y;
+    //    unsigned char mask;
+    if (x1 >= HRes || y1 >= VRes || x1 + width * scale < 0 || y1 + height * scale < 0)
+        return;
+    uint16_t fcolour = RGB555(fc);
+    uint16_t bcolour = RGB555(bc);
+    for (i = 0; i < height; i++)
+    { // step thru the font scan line by line
+        for (j = 0; j < scale; j++)
+        { // repeat lines to scale the font
+            for (k = 0; k < width; k++)
+            { // step through each bit in a scan line
+                for (m = 0; m < scale; m++)
+                { // repeat pixels to scale in the x axis
+                    x = x1 + k * scale + m;
+                    y = y1 + i * scale + j;
+                    if (x >= 0 && x < HRes && y >= 0 && y < VRes)
+                    { // if the coordinates are valid
+                        uint16_t *p = (uint16_t *)(((uint32_t)WriteBuf) + (y * (HRes << 1)) + (x << 1));
+                        if ((bitmap[((i * width) + k) / 8] >> (((height * width) - ((i * width) + k) - 1) % 8)) & 1)
+                        {
+                            *p = fcolour;
+                        }
+                        else
+                        {
+                            if (bc >= 0)
+                            {
+                                *p = bcolour;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+void DrawBuffer555(int x1, int y1, int x2, int y2, unsigned char *p)
+{
+    int x, y, t;
+    union colourmap
+    {
+        char rgbbytes[4];
+        unsigned int rgb;
+    } c;
+    uint16_t fcolour;
+    uint16_t *pp;
+    // make sure the coordinates are kept within the display area
+    if (x2 <= x1)
+    {
+        t = x1;
+        x1 = x2;
+        x2 = t;
+    }
+    if (y2 <= y1)
+    {
+        t = y1;
+        y1 = y2;
+        y2 = t;
+    }
+    if (x1 < 0)
+        x1 = 0;
+    if (x1 >= HRes)
+        x1 = HRes - 1;
+    if (x2 < 0)
+        x2 = 0;
+    if (x2 >= HRes)
+        x2 = HRes - 1;
+    if (y1 < 0)
+        y1 = 0;
+    if (y1 >= VRes)
+        y1 = VRes - 1;
+    if (y2 < 0)
+        y2 = 0;
+    if (y2 >= VRes)
+        y2 = VRes - 1;
+    for (y = y1; y <= y2; y++)
+    {
+        for (x = x1; x <= x2; x++)
+        {
+            c.rgbbytes[0] = *p++; // this order swaps the bytes to match the .BMP file
+            c.rgbbytes[1] = *p++;
+            c.rgbbytes[2] = *p++;
+            fcolour = RGB555(c.rgb);
+            pp = (uint16_t *)(((uint32_t)WriteBuf) + (y * (HRes << 1)) + (x << 1));
+            *pp = fcolour;
+        }
+    }
+}
+void DrawBuffer555Fast(int x1, int y1, int x2, int y2, int blank, unsigned char *p)
+{
+    int x, y, t;
+    uint16_t c;
+    uint16_t *pp, *qq = (uint16_t *)p;
+    // make sure the coordinates are kept within the display area
+    if (x2 <= x1)
+    {
+        t = x1;
+        x1 = x2;
+        x2 = t;
+    }
+    if (y2 <= y1)
+    {
+        t = y1;
+        y1 = y2;
+        y2 = t;
+    }
+    for (y = y1; y <= y2; y++)
+    {
+        for (x = x1; x <= x2; x++)
+        {
+            if (x >= 0 && x < HRes && y >= 0 && y < VRes)
+            {
+                pp = (uint16_t *)(WriteBuf + (y * (HRes << 1)) + (x << 1));
+                c = *qq++;
+                if (c != sprite_transparent || blank == -1)
+                    *pp = c;
+            }
+        }
+    }
+}
+void DrawPixel555(int x, int y, int c)
+{
+    if (x < 0 || y < 0 || x >= HRes || y >= VRes)
+        return;
+    uint16_t colour = RGB555(c);
+    uint16_t *p = (uint16_t *)(((uint32_t)WriteBuf) + (y * (HRes << 1)) + (x << 1));
+    *p = colour;
+}
+void ReadBuffer555(int x1, int y1, int x2, int y2, unsigned char *c)
+{
+    int x, y, t;
+    uint16_t *pp;
+    if (x2 <= x1)
+    {
+        t = x1;
+        x1 = x2;
+        x2 = t;
+    }
+    if (y2 <= y1)
+    {
+        t = y1;
+        y1 = y2;
+        y2 = t;
+    }
+    int xx1 = x1, yy1 = y1, xx2 = x2, yy2 = y2;
+    if (x1 < 0)
+        xx1 = 0;
+    if (x1 >= HRes)
+        xx1 = HRes - 1;
+    if (x2 < 0)
+        xx2 = 0;
+    if (x2 >= HRes)
+        xx2 = HRes - 1;
+    if (y1 < 0)
+        yy1 = 0;
+    if (y1 >= VRes)
+        yy1 = VRes - 1;
+    if (y2 < 0)
+        yy2 = 0;
+    if (y2 >= VRes)
+        yy2 = VRes - 1;
+    for (y = yy1; y <= yy2; y++)
+    {
+        for (x = xx1; x <= xx2; x++)
+        {
+            pp = (uint16_t *)(((uint32_t)WriteBuf) + (y * (HRes << 1)) + (x << 1));
+            t = *pp;
+            *c++ = ((t & 0x1F) << 3);
+            *c++ = (((t >> 5) & 0x1F) << 3);
+            *c++ = (((t >> 10) & 0x1F) << 3);
+        }
+    }
+}
+void ReadBuffer555Fast(int x1, int y1, int x2, int y2, unsigned char *c)
+{
+    int x, y, t;
+    uint16_t *pp, *qq = (uint16_t *)c;
+    if (x2 <= x1)
+    {
+        t = x1;
+        x1 = x2;
+        x2 = t;
+    }
+    if (y2 <= y1)
+    {
+        t = y1;
+        y1 = y2;
+        y2 = t;
+    }
+    int xx1 = x1, yy1 = y1, xx2 = x2, yy2 = y2;
+    if (x1 < 0)
+        xx1 = 0;
+    if (x1 >= HRes)
+        xx1 = HRes - 1;
+    if (x2 < 0)
+        xx2 = 0;
+    if (x2 >= HRes)
+        xx2 = HRes - 1;
+    if (y1 < 0)
+        yy1 = 0;
+    if (y1 >= VRes)
+        yy1 = VRes - 1;
+    if (y2 < 0)
+        yy2 = 0;
+    if (y2 >= VRes)
+        yy2 = VRes - 1;
+    for (y = yy1; y <= yy2; y++)
+    {
+        for (x = xx1; x <= xx2; x++)
+        {
+            pp = (uint16_t *)(((uint32_t)WriteBuf) + (y * (HRes << 1)) + (x << 1));
+            *qq++ = *pp;
+        }
+    }
+}
+void ScrollLCD555(int lines)
+{
+    if (lines == 0)
+        return;
+    if (lines >= 0)
+    {
+        for (int i = 0; i < VRes - lines; i++)
+        {
+            int d = i * (HRes << 1), s = (i + lines) * (HRes << 1);
+            for (int c = 0; c < (HRes << 1); c++)
+                WriteBuf[d + c] = WriteBuf[s + c];
+        }
+        DrawRectangle(0, VRes - lines, HRes - 1, VRes - 1, PromptBC); // erase the lines to be scrolled off
+    }
+    else
+    {
+        lines = -lines;
+        for (int i = VRes - 1; i >= lines; i--)
+        {
+            int d = i * (HRes << 1), s = (i - lines) * (HRes << 1);
+            for (int c = 0; c < (HRes << 1); c++)
+                WriteBuf[d + c] = WriteBuf[s + c];
+        }
+        DrawRectangle(0, 0, HRes - 1, lines - 1, PromptBC); // erase the lines introduced at the top
+    }
+}
+void DrawRectangle256(int x1, int y1, int x2, int y2, int c)
+{
+    int y, t;
+    uint8_t colour = RGB332(c);
+    if (x1 < 0)
+        x1 = 0;
+    if (x1 >= HRes)
+        x1 = HRes - 1;
+    if (x2 < 0)
+        x2 = 0;
+    if (x2 >= HRes)
+        x2 = HRes - 1;
+    if (y1 < 0)
+        y1 = 0;
+    if (y1 >= VRes)
+        y1 = VRes - 1;
+    if (y2 < 0)
+        y2 = 0;
+    if (y2 >= VRes)
+        y2 = VRes - 1;
+    if (x2 <= x1)
+    {
+        t = x1;
+        x1 = x2;
+        x2 = t;
+    }
+    if (y2 <= y1)
+    {
+        t = y1;
+        y1 = y2;
+        y2 = t;
+    }
+    for (y = y1; y <= y2; y++)
+    {
+        volatile uint8_t *p = WriteBuf + (y * HRes + x1);
+        memset((void *)p, colour, x2 - x1 + 1);
+    }
+}
+void DrawBitmap256(int x1, int y1, int width, int height, int scale, int fc, int bc, unsigned char *bitmap)
+{
+    int i, j, k, m, x, y;
+    //    unsigned char mask;
+    if (x1 >= HRes || y1 >= VRes || x1 + width * scale < 0 || y1 + height * scale < 0)
+        return;
+    uint8_t fcolour = RGB332(fc);
+    uint8_t bcolour = RGB332(bc);
+    for (i = 0; i < height; i++)
+    { // step thru the font scan line by line
+        for (j = 0; j < scale; j++)
+        { // repeat lines to scale the font
+            for (k = 0; k < width; k++)
+            { // step through each bit in a scan line
+                for (m = 0; m < scale; m++)
+                { // repeat pixels to scale in the x axis
+                    x = x1 + k * scale + m;
+                    y = y1 + i * scale + j;
+                    if (x >= 0 && x < HRes && y >= 0 && y < VRes)
+                    { // if the coordinates are valid
+                        uint8_t *p = (uint8_t *)((uint32_t)(WriteBuf + y * HRes + x));
+                        if ((bitmap[((i * width) + k) / 8] >> (((height * width) - ((i * width) + k) - 1) % 8)) & 1)
+                        {
+                            *p = fcolour;
+                        }
+                        else
+                        {
+                            if (bc >= 0)
+                            {
+                                *p = bcolour;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+void DrawBuffer256(int x1, int y1, int x2, int y2, unsigned char *p)
+{
+    int x, y, t;
+    union colourmap
+    {
+        char rgbbytes[4];
+        unsigned int rgb;
+    } c;
+    uint8_t fcolour;
+    uint8_t *pp;
+    // make sure the coordinates are kept within the display area
+    if (x2 <= x1)
+    {
+        t = x1;
+        x1 = x2;
+        x2 = t;
+    }
+    if (y2 <= y1)
+    {
+        t = y1;
+        y1 = y2;
+        y2 = t;
+    }
+    if (x1 < 0)
+        x1 = 0;
+    if (x1 >= HRes)
+        x1 = HRes - 1;
+    if (x2 < 0)
+        x2 = 0;
+    if (x2 >= HRes)
+        x2 = HRes - 1;
+    if (y1 < 0)
+        y1 = 0;
+    if (y1 >= VRes)
+        y1 = VRes - 1;
+    if (y2 < 0)
+        y2 = 0;
+    if (y2 >= VRes)
+        y2 = VRes - 1;
+    for (y = y1; y <= y2; y++)
+    {
+        for (x = x1; x <= x2; x++)
+        {
+            c.rgbbytes[0] = *p++; // this order swaps the bytes to match the .BMP file
+            c.rgbbytes[1] = *p++;
+            c.rgbbytes[2] = *p++;
+            fcolour = RGB332(c.rgb);
+            pp = (uint8_t *)((uint32_t)(WriteBuf + y * HRes + x));
+            *pp = fcolour;
+        }
+    }
+}
+void DrawBuffer256Fast(int x1, int y1, int x2, int y2, int blank, unsigned char *p)
+{
+    int x, y, t;
+    uint8_t c;
+    uint8_t *pp, *qq = (uint8_t *)p;
+    // make sure the coordinates are kept within the display area
+    if (x2 <= x1)
+    {
+        t = x1;
+        x1 = x2;
+        x2 = t;
+    }
+    if (y2 <= y1)
+    {
+        t = y1;
+        y1 = y2;
+        y2 = t;
+    }
+    for (y = y1; y <= y2; y++)
+    {
+        for (x = x1; x <= x2; x++)
+        {
+            if (x >= 0 && x < HRes && y >= 0 && y < VRes)
+            {
+                pp = (uint8_t *)((uint32_t)(WriteBuf + y * HRes + x));
+                c = *qq++;
+                if (c != sprite_transparent || blank == -1)
+                    *pp = c;
+            }
+        }
+    }
+}
+void DrawPixel256(int x, int y, int c)
+{
+    if (x < 0 || y < 0 || x >= HRes || y >= VRes)
+        return;
+    uint8_t colour = RGB332(c);
+    uint8_t *p = (uint8_t *)((uint32_t)(WriteBuf + y * HRes + x));
+    *p = colour;
+}
+void ReadBuffer256(int x1, int y1, int x2, int y2, unsigned char *c)
+{
+    int x, y, t;
+    uint8_t *pp;
+    if (x2 <= x1)
+    {
+        t = x1;
+        x1 = x2;
+        x2 = t;
+    }
+    if (y2 <= y1)
+    {
+        t = y1;
+        y1 = y2;
+        y2 = t;
+    }
+    int xx1 = x1, yy1 = y1, xx2 = x2, yy2 = y2;
+    if (x1 < 0)
+        xx1 = 0;
+    if (x1 >= HRes)
+        xx1 = HRes - 1;
+    if (x2 < 0)
+        xx2 = 0;
+    if (x2 >= HRes)
+        xx2 = HRes - 1;
+    if (y1 < 0)
+        yy1 = 0;
+    if (y1 >= VRes)
+        yy1 = VRes - 1;
+    if (y2 < 0)
+        yy2 = 0;
+    if (y2 >= VRes)
+        yy2 = VRes - 1;
+    for (y = yy1; y <= yy2; y++)
+    {
+        for (x = xx1; x <= xx2; x++)
+        {
+            pp = (uint8_t *)((uint32_t)(WriteBuf + y * HRes + x));
+#ifdef PICOMITEVGA
+            unsigned int q;
+            uint8_t *qq = pp;
+            if (WriteBuf == DisplayBuf && LayerBuf != DisplayBuf && LayerBuf != NULL)
+                qq = (uint8_t *)((uint32_t)(LayerBuf + y * HRes + x));
+#endif
+            t = *pp;
+#ifdef PICOMITEVGA
+            q = *qq;
+            if (!(*qq == transparent) && mergedread)
+                t = q;
+#endif
+            *c++ = ((t & 0x3) << 6);
+            *c++ = (((t >> 2) & 0x7) << 5);
+            *c++ = (((t >> 5) & 0x7) << 5);
+        }
+    }
+}
+void ReadBuffer256Fast(int x1, int y1, int x2, int y2, unsigned char *c)
+{
+    int x, y, t;
+    uint8_t *pp, *qq = (uint8_t *)c;
+    if (x2 <= x1)
+    {
+        t = x1;
+        x1 = x2;
+        x2 = t;
+    }
+    if (y2 <= y1)
+    {
+        t = y1;
+        y1 = y2;
+        y2 = t;
+    }
+    int xx1 = x1, yy1 = y1, xx2 = x2, yy2 = y2;
+    if (x1 < 0)
+        xx1 = 0;
+    if (x1 >= HRes)
+        xx1 = HRes - 1;
+    if (x2 < 0)
+        xx2 = 0;
+    if (x2 >= HRes)
+        xx2 = HRes - 1;
+    if (y1 < 0)
+        yy1 = 0;
+    if (y1 >= VRes)
+        yy1 = VRes - 1;
+    if (y2 < 0)
+        yy2 = 0;
+    if (y2 >= VRes)
+        yy2 = VRes - 1;
+    for (y = yy1; y <= yy2; y++)
+    {
+        for (x = xx1; x <= xx2; x++)
+        {
+            pp = (uint8_t *)((uint32_t)(WriteBuf + y * HRes + x));
+            *qq++ = *pp;
+        }
+    }
+}
+void ScrollLCD256(int lines)
+{
+    if (lines == 0)
+        return;
+    if (lines >= 0)
+    {
+        for (int i = 0; i < VRes - lines; i++)
+        {
+            int d = i * HRes, s = (i + lines) * HRes;
+            for (int c = 0; c < (HRes); c++)
+                WriteBuf[d + c] = WriteBuf[s + c];
+        }
+        DrawRectangle(0, VRes - lines, HRes - 1, VRes - 1, PromptBC); // erase the lines to be scrolled off
+    }
+    else
+    {
+        lines = -lines;
+        for (int i = VRes - 1; i >= lines; i--)
+        {
+            int d = i * HRes, s = (i - lines) * HRes;
+            for (int c = 0; c < (HRes << 1); c++)
+                WriteBuf[d + c] = WriteBuf[s + c];
+        }
+        DrawRectangle(0, 0, HRes - 1, lines - 1, PromptBC); // erase the lines introduced at the top
+    }
+}
+/*  @endcond */
+
+void cmd_tile(void)
+{
+    unsigned char *tp;
+    uint32_t bcolour = 0xFFFFFFFF, fcolour = 0xFFFFFFFF;
+    int xlen = 1, ylen = 1;
+    if (DISPLAY_TYPE != SCREENMODE1)
+        StandardError(40);
+    if (checkstring(cmdline, (unsigned char *)"RESET"))
+    {
+        fcolour = (FullColour) ? RGB555(Option.DefaultFC) : RGB332(Option.DefaultFC);
+        bcolour = (FullColour) ? RGB555(Option.DefaultBC) : RGB332(Option.DefaultBC);
+        for (int x = 0; x < X_TILE; x++)
+        {
+            for (int y = 0; y < Y_TILE; y++)
+            {
+#ifdef HDMI
+                if (FullColour)
+                {
+#endif
+                    if (fcolour != 0xFFFFFFFF)
+                        tilefcols[y * X_TILE + x] = fcolour;
+                    if (bcolour != 0xFFFFFFFF)
+                        tilebcols[y * X_TILE + x] = bcolour;
+#ifdef HDMI
+                }
+                else
+                {
+                    if (fcolour != 0xFFFFFFFF)
+                        tilefcols_w[y * X_TILE + x] = fcolour;
+                    if (bcolour != 0xFFFFFFFF)
+                        tilebcols_w[y * X_TILE + x] = bcolour;
+                }
+#endif
+            }
+        }
+    }
+    else if ((tp = checkstring(cmdline, (unsigned char *)"HEIGHT")))
+    {
+        ytileheight = getint(tp, 8, VRes);
+        Y_TILE = VRes / ytileheight;
+        if (VRes % ytileheight)
+            Y_TILE++;
+        ClearScreen(Option.DefaultBC);
+    }
+    else
+    {
+        getcsargs(&cmdline, 11);
+        if (!(DISPLAY_TYPE == SCREENMODE1))
+            return;
+        if (argc < 5)
+            SyntaxError();
+        ;
+        int x = getint(argv[0], 0, X_TILE - 1);
+        int y = getint(argv[2], 0, Y_TILE - 1);
+        int tilebcolour, tilefcolour;
+        if (*argv[4])
+        {
+            tilefcolour = getColour((char *)argv[4], 0);
+            fcolour = (FullColour) ? RGB555(tilefcolour) : RGB332(tilefcolour);
+        }
+        if (argc >= 7 && *argv[6])
+        {
+            tilebcolour = getColour((char *)argv[6], 0);
+            bcolour = (FullColour) ? RGB555(tilebcolour) : RGB332(tilebcolour);
+        }
+        if (argc >= 9 && *argv[8])
+        {
+            xlen = getint(argv[8], 1, X_TILE - x);
+        }
+        if (argc >= 11 && *argv[10])
+        {
+            ylen = getint(argv[10], 1, Y_TILE - y);
+        }
+        for (int xp = x; xp < x + xlen; xp++)
+        {
+            for (int yp = y; yp < y + ylen; yp++)
+            {
+#ifdef HDMI
+                if (FullColour)
+                {
+#endif
+                    if (fcolour != 0xFFFFFFFF)
+                        tilefcols[yp * X_TILE + xp] = (uint16_t)fcolour;
+                    if (bcolour != 0xFFFFFFFF)
+                        tilebcols[yp * X_TILE + xp] = (uint16_t)bcolour;
+#ifdef HDMI
+                }
+                else
+                {
+                    if (fcolour != 0xFFFFFFFF)
+                        tilefcols_w[yp * X_TILE + xp] = (uint8_t)fcolour;
+                    if (bcolour != 0xFFFFFFFF)
+                        tilebcols_w[yp * X_TILE + xp] = (uint8_t)bcolour;
+                }
+#endif
+            }
+        }
+    }
+}
+void cmd_map(void)
+{
+    unsigned char *p;
+    if (!(DISPLAY_TYPE == SCREENMODE2 || DISPLAY_TYPE == SCREENMODE3 || DISPLAY_TYPE == SCREENMODE5))
+        StandardError(40);
+    if ((p = checkstring(cmdline, (unsigned char *)"RESET")))
+    {
+        mapreset();
+    }
+    else if (checkstring(cmdline, (unsigned char *)"GRAYSCALE") || checkstring(cmdline, (unsigned char *)"GREYSCALE"))
+    {
+        while (v_scanline != 0)
+        {
+        }
+        for (int i = 1; i <= 32; i++)
+        {
+            int j = i * 8 - (8 - i / 4 + 1);
+            if (j < 0)
+                j = 0;
+            map256[i - 1] = remap256[i - 1] = RGB555(j * 65536 + j * 256 + j);
+            map256[i + 32 - 1] = remap256[i + 32 - 1] = RGB555(j);
+            map256[i + 64 - 1] = remap256[i + 64 - 1] = RGB555(j * 256);
+            map256[i + 96 - 1] = remap256[i + 96 - 1] = RGB555(j * 256 + j);
+            map256[i + 128 - 1] = remap256[i + 128 - 1] = RGB555(j * 65536);
+            map256[i + 160 - 1] = remap256[i + 160 - 1] = RGB555(j * 65536 + j);
+            map256[i + 192 - 1] = remap256[i + 192 - 1] = RGB555(j * 65536 + j * 256);
+            map256[i + 224 - 1] = remap256[i + 224 - 1] = RGB555(j * 65536 + j * 256 + j);
+        }
+        for (int i = 1; i <= 16; i++)
+        {
+            int j = i * 16 - (16 - i + 1);
+            map16quads[i - 1] = remap332[i - 1] = RGB332(j * 65536 + j * 256 + j) | (RGB332(j * 65536 + j * 256 + j) << 8) | (RGB332(j * 65536 + j * 256 + j) << 16) | (RGB332(j * 65536 + j * 256 + j) << 24);
+            map16pairs[i - 1] = remap555[i - 1] = (RGB555(j * 65536 + j * 256 + j) | (RGB555(j * 65536 + j * 256 + j) << 16));
+        }
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"MAXIMITE")))
+    {
+        while (v_scanline != 0)
+        {
+        }
+        for (int i = 0; i < 16; i++)
+            map256[i] = remap256[i] = RGB555(CMM1map[i]);
+        for (int i = 0; i < 16; i++)
+        {
+            map16quads[i] = remap332[i] = RGB332(CMM1map[i]) | (RGB332(CMM1map[i]) << 8) | (RGB332(CMM1map[i]) << 16) | (RGB332(CMM1map[i]) << 24);
+            map16pairs[i] = remap555[i] = RGB555(CMM1map[i]) | (RGB555(CMM1map[i]) << 8);
+        }
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"SET")))
+    {
+        while (v_scanline != 0)
+        {
+        }
+        for (int i = 0; i < 256; i++)
+            map256[i] = remap256[i];
+        for (int i = 0; i < 16; i++)
+        {
+            map16pairs[i] = remap555[i];
+            map16quads[i] = remap332[i];
+        }
+    }
+    else
+    {
+        int cl = getint(cmdline, 0, 255);
+        if (DISPLAY_TYPE != SCREENMODE5 && cl > 15)
+            error("Mode supports 16 colours (0-15)");
+        while (*cmdline && tokenfunction(*cmdline) != op_equal)
+            cmdline++;
+        if (!*cmdline)
+            SyntaxError();
+        ++cmdline;
+        if (!*cmdline)
+            SyntaxError();
+        int col = getColour((char *)cmdline, 0);
+        remap256[cl] = RGB555(col);
+        remap555[cl] = RGB555(col) | (RGB555(col) << 16);
+        remap332[cl] = RGB332(col) | (RGB332(col) << 8) | (RGB332(col) << 16) | (RGB332(col) << 24);
+    }
+}
+#endif
+void setmode(int mode, bool clear)
+{
+    closeframebuffer('A');
+    if (clear)
+        memset((void *)FRAMEBUFFER, 0, framebuffersize);
+#ifdef HDMI
+    while (v_scanline != 0)
+    {
+    }
+#else
+    while (QVgaScanLine != 0)
+    {
+    }
+#endif
+    if (mode == 5)
+    {
+        DISPLAY_TYPE = SCREENMODE5;
+        ScreenSize = MODE5SIZE;
+    }
+    else if (mode == 4)
+    {
+        if (!(FullColour))
+            error("Mode not available in this resolution");
+        DISPLAY_TYPE = SCREENMODE4;
+        ScreenSize = MODE4SIZE;
+    }
+    else if (mode == 3)
+    {
+        DISPLAY_TYPE = SCREENMODE3;
+        ScreenSize = MODE3SIZE;
+    }
+    else if (mode == 2)
+    {
+        DISPLAY_TYPE = SCREENMODE2;
+        ScreenSize = MODE2SIZE;
+    }
+    else
+    { // mode=1
+#ifdef rp2350
+#ifndef HDMI
+        tilefcols = (uint16_t *)((uint8_t *)FRAMEBUFFER + (MODE1SIZE * 3));
+        tilebcols = (uint16_t *)((uint8_t *)FRAMEBUFFER + (MODE1SIZE * 3) + (MODE1SIZE >> 1));
+#else
+        mapreset();
+#endif
+#endif
+        DISPLAY_TYPE = SCREENMODE1;
+        ScreenSize = MODE1SIZE;
+    }
+    //    uSec(10000);
+    ResetDisplay();
+    if (clear)
+    {
+        memset((void *)WriteBuf, 0, ScreenSize);
+        CurrentX = CurrentY = 0;
+        ClearScreen(Option.DefaultBC);
+    }
+#ifdef HDMI
+    if (FullColour || MediumRes)
+    {
+#endif
+        if (DISPLAY_TYPE == SCREENMODE2 || DISPLAY_TYPE == SCREENMODE4 || DISPLAY_TYPE == SCREENMODE5)
+        {
+            SetFont((6 << 4) | 1);
+            PromptFont = (6 << 4) | 1;
+        }
+        else
+        {
+            SetFont(1);
+            PromptFont = 1;
+        }
+#ifdef HDMI
+    }
+    else
+    {
+        if (DISPLAY_TYPE == SCREENMODE1)
+        {
+            SetFont((2 << 4) | 1);
+            PromptFont = (2 << 4) | 1;
+        }
+        else if (DISPLAY_TYPE == SCREENMODE2 || DISPLAY_TYPE == SCREENMODE5)
+        {
+            SetFont((6 << 4) | 1);
+            PromptFont = (6 << 4) | 1;
+        }
+        else if (DISPLAY_TYPE == SCREENMODE3)
+        {
+            SetFont(1);
+            PromptFont = 1;
+        }
+    }
+#endif
+    if (mode == Option.DISPLAY_TYPE - SCREENMODE1 + 1)
+    {
+        SetFont(Option.DefaultFont);
+        PromptFont = Option.DefaultFont;
+    }
+    if (DISPLAY_TYPE == SCREENMODE1)
+    {
+        ytileheight = gui_font_height;
+        Y_TILE = VRes / ytileheight;
+        if (VRes % ytileheight)
+            Y_TILE++;
+#ifdef PICOMITEVGA
+        if (DISPLAY_TYPE == SCREENMODE1 /* && WriteBuf==DisplayBuf*/)
+        {
+            gui_fcolour = Option.DefaultFC;
+            gui_bcolour = Option.DefaultBC;
+#ifdef HDMI
+            settiles();
+#else
+            int bcolour = RGB121pack(gui_bcolour);
+            int fcolour = RGB121pack(gui_fcolour);
+            for (int x = 0; x < X_TILE; x++)
+            {
+                for (int y = 0; y < Y_TILE; y++)
+                {
+                    tilefcols[y * X_TILE + x] = fcolour;
+                    tilebcols[y * X_TILE + x] = bcolour;
+                }
+            }
+#endif
+        }
+#endif
+    }
+
+#ifdef USBKEYBOARD
+    clearrepeat();
+#endif
+}
+
+void cmd_mode(void)
+{
+    int mode = getint(cmdline, 1, MAXMODES);
+    setmode(mode, true);
+}
+#endif
+/*
+ * @cond
+ * The following section will be excluded from the documentation.
+ */
+/*  @endcond */
+void fun_mmcharwidth(void)
+{
+    CheckDisplay();
+    iret = FontTable[gui_font >> 4][0] * (gui_font & 0b1111);
+    targ = T_INT;
+}
+
+void fun_mmcharheight(void)
+{
+    CheckDisplay();
+    iret = FontTable[gui_font >> 4][1] * (gui_font & 0b1111);
+    targ = T_INT;
+}
+/*  @endcond */
+
+/****************************************************************************************************
+ ****************************************************************************************************
+
+ Basic drawing primitives for a user defined LCD display driver (ie, OPTION LCDPANEL USER)
+ all drawing is done using either DrawRectangleUser() or DrawBitmapUser()
+
+ ****************************************************************************************************
+****************************************************************************************************/
+void cmd_refresh(void)
+{
+    CheckDisplay();
+
+#if PICOMITERP2350
+    if (Option.DISPLAY_TYPE >= NEXTGEN)
+    {
+        if (!Option.Refresh)
+        {
+            multicore_fifo_push_blocking(6);
+            multicore_fifo_push_blocking((uint32_t)low_x | (high_x << 16));
+            multicore_fifo_push_blocking((uint32_t)low_y | (high_y << 16));
+            multicore_fifo_push_blocking((uint32_t)ScrollStart);
+            low_x = silly_low;
+            high_y = silly_high;
+            low_y = silly_low;
+            high_x = silly_high;
+        }
+    }
+    else
+    {
+#endif
+        low_y = 0;
+        high_y = DisplayVRes - 1;
+        low_x = 0;
+        high_x = DisplayHRes - 1;
+        Display_Refresh();
+#if PICOMITERP2350
+    }
+#endif
+}
+/*
+ * @cond
+ * The following section will be excluded from the documentation.
+ */
+
+#ifdef PICOMITEVGA
+
+void Display_Refresh(void)
+{
+}
+#endif
+void DrawPixel2(int x, int y, int c)
+{
+    if (x < 0 || y < 0 || x >= HRes || y >= VRes)
+        return;
+#if PICOMITERP2350
+    if ((Option.DISPLAY_TYPE >= VIRTUAL && Option.DISPLAY_TYPE < VGA222) && WriteBuf == NULL)
+        WriteBuf = FRAMEBUFFER;
+#else
+    if ((Option.DISPLAY_TYPE >= VIRTUAL) && WriteBuf == NULL)
+        WriteBuf = FRAMEBUFFER;
+#endif
+    uint8_t *p = (uint8_t *)(((uint32_t)WriteBuf) + (y * (HRes >> 3)) + (x >> 3));
+    uint8_t bit = 1 << (x % 8);
+    if (c)
+        *p |= bit;
+    else
+        *p &= ~bit;
+}
+void DrawRectangle2(int x1, int y1, int x2, int y2, int c)
+{
+    int x, y, x1p, x2p, t;
+    unsigned char mask;
+    volatile unsigned char *p;
+#if PICOMITERP2350
+    if ((Option.DISPLAY_TYPE >= VIRTUAL && Option.DISPLAY_TYPE < VGA222) && WriteBuf == NULL)
+        WriteBuf = FRAMEBUFFER;
+#else
+    if ((Option.DISPLAY_TYPE >= VIRTUAL) && WriteBuf == NULL)
+        WriteBuf = FRAMEBUFFER;
+#endif
+    if (x1 < 0)
+        x1 = 0;
+    if (x1 >= HRes)
+        x1 = HRes - 1;
+    if (x2 < 0)
+        x2 = 0;
+    if (x2 >= HRes)
+        x2 = HRes - 1;
+    if (y1 < 0)
+        y1 = 0;
+    if (y1 >= VRes)
+        y1 = VRes - 1;
+    if (y2 < 0)
+        y2 = 0;
+    if (y2 >= VRes)
+        y2 = VRes - 1;
+    if (x2 <= x1)
+    {
+        t = x1;
+        x1 = x2;
+        x2 = t;
+    }
+    if (y2 <= y1)
+    {
+        t = y1;
+        y1 = y2;
+        y2 = t;
+    }
+    if (x2 <= x1)
+    {
+        t = x1;
+        x1 = x2;
+        x2 = t;
+    }
+    if (y2 <= y1)
+    {
+        t = y1;
+        y1 = y2;
+        y2 = t;
+    }
+    if (x1 == x2)
+    {
+        for (y = y1; y <= y2; y++)
+        {
+            p = &WriteBuf[(y * (HRes >> 3)) + (x1 >> 3)];
+            mask = 1 << (x1 % 8); // get the bit position for this bit
+            if (c)
+            {
+                *p |= mask;
+            }
+            else
+            {
+                *p &= (~mask);
+            }
+        }
+    }
+    else
+    {
+        for (y = y1; y <= y2; y++)
+        {
+            x1p = x1;
+            x2p = x2;
+            if ((x1 % 8) != 0)
+            {
+                p = &WriteBuf[(y * (HRes >> 3)) + (x1 >> 3)];
+                for (x = x1; x <= x2 && (x % 8) != 0; x++)
+                {
+                    mask = 1 << (x % 8); // get the bit position for this bit
+                    if (c)
+                    {
+                        *p |= mask;
+                    }
+                    else
+                    {
+                        *p &= (~mask);
+                    }
+                    x1p++;
+                }
+            }
+            if (x1p - 1 != x2 && (x2 % 8) != 7)
+            {
+                p = &WriteBuf[(y * (HRes >> 3)) + (x2p >> 3)];
+                for (x = (x2 & 0xFFF8); x <= x2; x++)
+                {
+                    mask = 1 << (x % 8); // get the bit position for this bit
+                    if (c)
+                    {
+                        *p |= mask;
+                    }
+                    else
+                    {
+                        *p &= (~mask);
+                    }
+                    x2p--;
+                }
+            }
+            p = &WriteBuf[(y * (HRes >> 3)) + (x1p >> 3)];
+            for (x = x1p; x < x2p; x += 8)
+            {
+                if (c)
+                {
+                    *p++ = 0xFF;
+                }
+                else
+                {
+                    *p++ = 0;
+                }
+            }
+        }
+    }
+}
+
+void DrawBitmap2(int x1, int y1, int width, int height, int scale, int fc, int bc, unsigned char *bitmap)
+{
+    int i, j, k, m, x, y, loc;
+    unsigned char mask;
+    if (x1 >= HRes || y1 >= VRes || x1 + width * scale < 0 || y1 + height * scale < 0)
+        return;
+    int tilematch = 0;
+#if PICOMITERP2350
+    if ((Option.DISPLAY_TYPE >= VIRTUAL && Option.DISPLAY_TYPE < VGA222) && WriteBuf == NULL)
+        WriteBuf = FRAMEBUFFER;
+#else
+    if ((Option.DISPLAY_TYPE >= VIRTUAL) && WriteBuf == NULL)
+        WriteBuf = FRAMEBUFFER;
+#endif
+#ifdef PICOMITEVGA
+    int xa = 8;
+    int ya = ytileheight;
+    if (x1 % xa == 0 && y1 % ya == 0 && width * scale % xa == 0 && height * scale % ya == 0)
+        tilematch = 1;
+#endif
+    if (fc == 0 && bc > 0 && (tilematch == 0 || editactive))
+    {
+        for (i = 0; i < height; i++)
+        { // step thru the font scan line by line
+            for (j = 0; j < scale; j++)
+            { // repeat lines to scale the font
+                for (k = 0; k < width; k++)
+                { // step through each bit in a scan line
+                    for (m = 0; m < scale; m++)
+                    { // repeat pixels to scale in the x axis
+                        x = x1 + k * scale + m;
+                        y = y1 + i * scale + j;
+                        mask = 1 << (x % 8); // get the bit position for this bit
+                        if (x >= 0 && x < HRes && y >= 0 && y < VRes)
+                        { // if the coordinates are valid
+                            loc = (y * (HRes >> 3)) + (x >> 3);
+                            if ((bitmap[((i * width) + k) / 8] >> (((height * width) - ((i * width) + k) - 1) % 8)) & 1)
+                            {
+                                WriteBuf[loc] &= ~mask;
+                            }
+                            else
+                                WriteBuf[loc] |= mask;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    else
+    {
+#ifdef PICOMITEVGA
+        if (tilematch)
+        {
+            // the bitmap is aligned with the tiles
+            int bcolour, fcolour;
+#ifdef HDMI
+            fcolour = (FullColour) ? RGB555(fc) : RGB332(fc);
+            bcolour = (FullColour) ? RGB555(bc) : RGB332(bc);
+#else
+            fcolour = RGB121pack(fc);
+            bcolour = RGB121pack(bc);
+#endif
+            int xt = x1 / xa;
+            int yt = y1 / ya;
+            int w = width * scale / xa;
+            int h = height * scale / ya;
+            // clamp tile loop bounds to valid tile range
+            int endx = (xt + w > X_TILE) ? X_TILE : xt + w;
+            int endy = (yt + h > Y_TILE) ? Y_TILE : yt + h;
+            if (xt < 0)
+                xt = 0;
+            if (yt < 0)
+                yt = 0;
+//            int pos;
+#ifdef HDMI
+            if (FullColour)
+            {
+#endif
+                for (int yy = yt; yy < endy; yy++)
+                {
+                    for (int xx = xt; xx < endx; xx++)
+                    {
+                        tilefcols[yy * X_TILE + xx] = (uint16_t)fcolour;
+                        tilebcols[yy * X_TILE + xx] = (uint16_t)bcolour;
+                    }
+                }
+#ifdef HDMI
+            }
+            else
+            {
+                for (int yy = yt; yy < endy; yy++)
+                {
+                    for (int xx = xt; xx < endx; xx++)
+                    {
+                        tilefcols_w[yy * X_TILE + xx] = (uint8_t)fcolour;
+                        tilebcols_w[yy * X_TILE + xx] = (uint8_t)bcolour;
+                    }
+                }
+            }
+#endif
+        }
+#endif
+        if (fc == 0 && bc != 0 && fc != bc && bc != -1)
+            fc = 1;
+        if (bc <= 0 || fc == 0)
+        {
+            for (i = 0; i < height; i++)
+            { // step thru the font scan line by line
+                for (j = 0; j < scale; j++)
+                { // repeat lines to scale the font
+                    for (k = 0; k < width; k++)
+                    { // step through each bit in a scan line
+                        for (m = 0; m < scale; m++)
+                        { // repeat pixels to scale in the x axis
+                            x = x1 + k * scale + m;
+                            y = y1 + i * scale + j;
+                            mask = 1 << (x % 8); // get the bit position for this bit
+                            if (x >= 0 && x < HRes && y >= 0 && y < VRes)
+                            { // if the coordinates are valid
+                                loc = (y * (HRes >> 3)) + (x >> 3);
+                                if ((bitmap[((i * width) + k) / 8] >> (((height * width) - ((i * width) + k) - 1) % 8)) & 1)
+                                {
+                                    if (fc)
+                                    {
+                                        WriteBuf[loc] |= mask;
+                                    }
+                                    else
+                                    {
+                                        WriteBuf[loc] &= ~mask;
+                                    }
+                                }
+                                else
+                                {
+                                    if (bc > 0)
+                                    {
+                                        WriteBuf[loc] |= mask;
+                                    }
+                                    else if (bc == 0)
+                                    {
+                                        WriteBuf[loc] &= ~mask;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        else
+        {
+            for (i = 0; i < height; i++)
+            { // step thru the font scan line by line
+                for (j = 0; j < scale; j++)
+                { // repeat lines to scale the font
+                    for (k = 0; k < width; k++)
+                    { // step through each bit in a scan line
+                        for (m = 0; m < scale; m++)
+                        { // repeat pixels to scale in the x axis
+                            x = x1 + k * scale + m;
+                            y = y1 + i * scale + j;
+                            mask = 1 << (x % 8); // get the bit position for this bit
+                            if (x >= 0 && x < HRes && y >= 0 && y < VRes)
+                            { // if the coordinates are valid
+                                loc = (y * (HRes >> 3)) + (x >> 3);
+                                if ((bitmap[((i * width) + k) / 8] >> (((height * width) - ((i * width) + k) - 1) % 8)) & 1)
+                                {
+                                    if (fc)
+                                    {
+                                        WriteBuf[loc] |= mask;
+                                    }
+                                    else
+                                    {
+                                        WriteBuf[loc] &= ~mask;
+                                    }
+                                }
+                                else
+                                    WriteBuf[loc] &= ~mask;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+void ScrollLCD2(int lines)
+{
+    if (lines == 0)
+        return;
+
+    if (lines >= 0)
+    {
+#ifdef PICOMITEVGA
+#ifndef HDMI
+        while (QVgaScanLine != 0)
+        {
+        }
+#else
+        while (v_scanline != 0)
+        {
+        }
+#endif
+        int ya = ytileheight;
+        if ((lines % ya == 0))
+        {
+            int offset = lines / ya;
+            for (int y = 0; y < Y_TILE - offset; y++)
+            {
+                int d = y * X_TILE;
+                int s = (y + offset) * X_TILE;
+                for (int x = 0; x < X_TILE; x++)
+                {
+#ifdef HDMI
+                    if (FullColour)
+                    {
+#endif
+                        tilefcols[d + x] = tilefcols[s + x];
+                        tilebcols[d + x] = tilebcols[s + x];
+#ifdef HDMI
+                    }
+                    else
+                    {
+                        tilefcols_w[d + x] = tilefcols_w[s + x];
+                        tilebcols_w[d + x] = tilebcols_w[s + x];
+                    }
+#endif
+                }
+            }
+        }
+#endif
+        for (int i = 0; i < VRes - lines; i++)
+        {
+            int d = i * (HRes >> 3), s = (i + lines) * (HRes >> 3);
+            for (int c = 0; c < (HRes >> 3); c++)
+                WriteBuf[d + c] = WriteBuf[s + c];
+        }
+        DrawRectangle(0, VRes - lines, HRes - 1, VRes - 1, 0); // erase the lines to be scrolled off
+    }
+    else
+    {
+        lines = -lines;
+#ifdef PICOMITEVGA
+#ifndef HDMI
+        while (QVgaScanLine != 0)
+        {
+        }
+#else
+        while (v_scanline != 0)
+        {
+        }
+#endif
+        int ya = ytileheight;
+        if ((lines % ya == 0))
+        {
+            int offset = lines / ya;
+            for (int y = Y_TILE - 1; y >= offset; y--)
+            {
+                int d = y * X_TILE;
+                int s = (y - offset) * X_TILE;
+                for (int x = 0; x < X_TILE; x++)
+                {
+#ifdef HDMI
+                    if (FullColour)
+                    {
+#endif
+                        tilefcols[d + x] = tilefcols[s + x];
+                        tilebcols[d + x] = tilebcols[s + x];
+#ifdef HDMI
+                    }
+                    else
+                    {
+                        tilefcols_w[d + x] = tilefcols_w[s + x];
+                        tilebcols_w[d + x] = tilebcols_w[s + x];
+                    }
+#endif
+                }
+            }
+        }
+#endif
+        for (int i = VRes - 1; i >= lines; i--)
+        {
+            int d = i * (HRes >> 3), s = (i - lines) * (HRes >> 3);
+            for (int c = 0; c < (HRes >> 3); c++)
+                WriteBuf[d + c] = WriteBuf[s + c];
+        }
+        DrawRectangle(0, 0, HRes - 1, lines - 1, 0); // erase the lines introduced at the top
+    }
+}
+void DrawBuffer2(int x1, int y1, int x2, int y2, unsigned char *p)
+{
+    int x, y, t, loc;
+    unsigned char mask;
+    union colourmap
+    {
+        char rgbbytes[4];
+        unsigned int rgb;
+    } c;
+#if PICOMITERP2350
+    if ((Option.DISPLAY_TYPE >= VIRTUAL && Option.DISPLAY_TYPE < VGA222) && WriteBuf == NULL)
+        WriteBuf = FRAMEBUFFER;
+#else
+    if ((Option.DISPLAY_TYPE >= VIRTUAL) && WriteBuf == NULL)
+        WriteBuf = FRAMEBUFFER;
+#endif
+    // make sure the coordinates are kept within the display area
+    if (x2 <= x1)
+    {
+        t = x1;
+        x1 = x2;
+        x2 = t;
+    }
+    if (y2 <= y1)
+    {
+        t = y1;
+        y1 = y2;
+        y2 = t;
+    }
+    if (x1 < 0)
+        x1 = 0;
+    if (x1 >= HRes)
+        x1 = HRes - 1;
+    if (x2 < 0)
+        x2 = 0;
+    if (x2 >= HRes)
+        x2 = HRes - 1;
+    if (y1 < 0)
+        y1 = 0;
+    if (y1 >= VRes)
+        y1 = VRes - 1;
+    if (y2 < 0)
+        y2 = 0;
+    if (y2 >= VRes)
+        y2 = VRes - 1;
+    for (y = y1; y <= y2; y++)
+    {
+        for (x = x1; x <= x2; x++)
+        {
+            c.rgbbytes[0] = *p++;
+            if (c.rgbbytes[0] < 0x40)
+                c.rgbbytes[0] = 0;
+            c.rgbbytes[1] = *p++;
+            if (c.rgbbytes[1] < 0x40)
+                c.rgbbytes[1] = 0;
+            c.rgbbytes[2] = *p++;
+            if (c.rgbbytes[2] < 0x40)
+                c.rgbbytes[2] = 0;
+            c.rgbbytes[3] = 0;
+            loc = (y * (HRes >> 3)) + (x >> 3);
+            mask = 1 << (x % 8); // get the bit position for this bit
+            if (c.rgb)
+            {
+                WriteBuf[loc] |= mask;
+            }
+            else
+            {
+                WriteBuf[loc] &= (~mask);
+            }
+        }
+    }
+}
+void DrawBuffer2Fast(int x1, int y1, int x2, int y2, int blank, unsigned char *p)
+{
+    int x, y, t, loc, toggle = 0;
+    unsigned char mask;
+    // make sure the coordinates are kept within the display area
+    if (x2 <= x1)
+    {
+        t = x1;
+        x1 = x2;
+        x2 = t;
+    }
+    if (y2 <= y1)
+    {
+        t = y1;
+        y1 = y2;
+        y2 = t;
+    }
+#if PICOMITERP2350
+    if ((Option.DISPLAY_TYPE >= VIRTUAL && Option.DISPLAY_TYPE < VGA222) && WriteBuf == NULL)
+        WriteBuf = FRAMEBUFFER;
+#else
+    if ((Option.DISPLAY_TYPE >= VIRTUAL) && WriteBuf == NULL)
+        WriteBuf = FRAMEBUFFER;
+#endif
+    for (y = y1; y <= y2; y++)
+    {
+        for (x = x1; x <= x2; x++)
+        {
+            if (x >= 0 && x < HRes && y >= 0 && y < VRes)
+            {
+                loc = (y * (HRes >> 3)) + (x >> 3);
+                mask = 1 << (x % 8); // get the bit position for this bit
+                if (toggle)
+                {
+                    if (*p++ & 0xF0)
+                    {
+                        WriteBuf[loc] |= mask;
+                    }
+                    else if (blank == -1)
+                    {
+                        WriteBuf[loc] &= (~mask);
+                    }
+                }
+                else
+                {
+                    if (*p & 0xF)
+                    {
+                        WriteBuf[loc] |= mask;
+                    }
+                    else if (blank == -1)
+                    {
+                        WriteBuf[loc] &= (~mask);
+                    }
+                }
+                toggle = !toggle;
+            }
+            else
+            {
+                if (toggle)
+                    p++;
+                toggle = !toggle;
+            }
+        }
+    }
+}
+int RGB555toRGB888(int rgb555val)
+{
+    // Extract 5-bit channels
+    int r5 = (rgb555val >> 10) & 0x1F;
+    int g5 = (rgb555val >> 5) & 0x1F;
+    int b5 = rgb555val & 0x1F;
+
+    // Expand to 8-bit channels
+    int r8 = (r5 << 3) | (r5 >> 2);
+    int g8 = (g5 << 3) | (g5 >> 2);
+    int b8 = (b5 << 3) | (b5 >> 2);
+
+    // Pack into 0xRRGGBB
+    return (r8 << 16) | (g8 << 8) | b8;
+}
+
+void ReadBuffer2(int x1, int y1, int x2, int y2, unsigned char *c)
+{
+    int x, y, t, loc;
+    //    uint8_t *pp;
+    unsigned char mask;
+#if PICOMITERP2350
+    if ((Option.DISPLAY_TYPE >= VIRTUAL && Option.DISPLAY_TYPE < VGA222) && WriteBuf == NULL)
+        WriteBuf = FRAMEBUFFER;
+#else
+    if ((Option.DISPLAY_TYPE >= VIRTUAL) && WriteBuf == NULL)
+        WriteBuf = FRAMEBUFFER;
+#endif
+    if (x2 <= x1)
+    {
+        t = x1;
+        x1 = x2;
+        x2 = t;
+    }
+    if (y2 <= y1)
+    {
+        t = y1;
+        y1 = y2;
+        y2 = t;
+    }
+    int xx1 = x1, yy1 = y1, xx2 = x2, yy2 = y2;
+    if (x1 < 0)
+        xx1 = 0;
+    if (x1 >= HRes)
+        xx1 = HRes - 1;
+    if (x2 < 0)
+        xx2 = 0;
+    if (x2 >= HRes)
+        xx2 = HRes - 1;
+    if (y1 < 0)
+        yy1 = 0;
+    if (y1 >= VRes)
+        yy1 = VRes - 1;
+    if (y2 < 0)
+        yy2 = 0;
+    if (y2 >= VRes)
+        yy2 = VRes - 1;
+    for (y = yy1; y <= yy2; y++)
+    {
+        for (x = xx1; x <= xx2; x++)
+        {
+#ifdef PICOMITEVGA
+            int tile = x / 8 + (y / ytileheight) * X_TILE, back, front;
+#ifdef HDMI
+            if (FullColour)
+            {
+#endif
+                back = RGB121map[tilebcols[tile] & 0xF];
+                front = RGB121map[tilefcols[tile] & 0xF];
+#ifdef HDMI
+            }
+            else
+            {
+                back = RGB555toRGB888(map256[tilebcols_w[tile] & 0xFF]);
+                front = RGB555toRGB888(map256[tilefcols_w[tile] & 0xF]);
+            }
+#endif
+#else
+            int front = 0xFFFFFF;
+            int back = 0;
+#endif
+            loc = (y * (HRes >> 3)) + (x >> 3);
+            mask = 1 << (x % 8); // get the bit position for this bit
+            if (WriteBuf[loc] & mask)
+            {
+                *c++ = (front & 0xFF);
+                *c++ = (front >> 8) & 0xFF;
+                *c++ = front >> 16;
+            }
+            else
+            {
+                *c++ = (back & 0xFF);
+                *c++ = (back >> 8) & 0xFF;
+                *c++ = back >> 16;
+            }
+        }
+    }
+}
+
+void ReadBuffer2Fast(int x1, int y1, int x2, int y2, unsigned char *c)
+{
+    int x, y, t, loc, toggle = 0;
+    ;
+    //    uint8_t *pp;
+    unsigned char mask;
+#if PICOMITERP2350
+    if ((Option.DISPLAY_TYPE >= VIRTUAL && Option.DISPLAY_TYPE < VGA222) && WriteBuf == NULL)
+        WriteBuf = FRAMEBUFFER;
+#else
+    if ((Option.DISPLAY_TYPE >= VIRTUAL) && WriteBuf == NULL)
+        WriteBuf = FRAMEBUFFER;
+#endif
+    if (x2 <= x1)
+    {
+        t = x1;
+        x1 = x2;
+        x2 = t;
+    }
+    if (y2 <= y1)
+    {
+        t = y1;
+        y1 = y2;
+        y2 = t;
+    }
+    for (y = y1; y <= y2; y++)
+    {
+        for (x = x1; x <= x2; x++)
+        {
+            if (x >= 0 && x < HRes && y >= 0 && y < VRes)
+            {
+                loc = (y * (HRes >> 3)) + (x >> 3);
+                mask = 1 << (x % 8); // get the bit position for this bit
+                if (toggle)
+                {
+                    if (WriteBuf[loc] & mask)
+                    {
+                        *c++ |= 0xF0;
+                    }
+                    else
+                    {
+                        *c++ &= 0x0F;
+                    }
+                }
+                else
+                {
+                    if (WriteBuf[loc] & mask)
+                    {
+                        *c = 0xF;
+                    }
+                    else
+                    {
+                        *c = 0x0;
+                    }
+                }
+                toggle = !toggle;
+            }
+            else
+            {
+                if (toggle)
+                    *c++ &= 0xF;
+                else
+                    *c = 0;
+                toggle = !toggle;
+            }
+        }
+    }
+}
+
+void MIPS16 ConfigDisplayVirtual(unsigned char *p)
+{
+    getcsargs(&p, 13);
+    if (checkstring(argv[0], (unsigned char *)"VIRTUAL_M"))
+    {
+        DISPLAY_TYPE = VIRTUAL_M;
+    }
+    else if (checkstring(argv[0], (unsigned char *)"VIRTUAL_C"))
+    {
+        DISPLAY_TYPE = VIRTUAL_C;
+    }
+    else
+        return;
+    Option.DISPLAY_TYPE = DISPLAY_TYPE;
+    Option.DISPLAY_ORIENTATION = LANDSCAPE;
+}
+void MIPS16 InitDisplayVirtual(void)
+{
+#if PICOMITERP2350
+    if (Option.DISPLAY_TYPE == 0 || Option.DISPLAY_TYPE < VIRTUAL || Option.DISPLAY_TYPE >= VGA222)
+        return;
+#else
+    if (Option.DISPLAY_TYPE == 0 || Option.DISPLAY_TYPE < VIRTUAL)
+        return;
+#endif
+    DisplayHRes = HRes = display_details[Option.DISPLAY_TYPE].horizontal;
+    DisplayVRes = VRes = display_details[Option.DISPLAY_TYPE].vertical;
+    if (Option.DISPLAY_TYPE == VIRTUAL_M)
+    {
+        DrawRectangle = DrawRectangle2;
+        DrawBitmap = DrawBitmap2;
+        ScrollLCD = ScrollLCD2;
+        DrawBuffer = DrawBuffer2;
+        ReadBuffer = ReadBuffer2;
+        DrawBufferFast = DrawBuffer2Fast;
+        ReadBufferFast = ReadBuffer2Fast;
+        DrawPixel = DrawPixel2;
+    }
+    else
+    {
+        DrawRectangle = DrawRectangle16;
+        DrawBitmap = DrawBitmap16;
+        ScrollLCD = ScrollLCD16;
+        DrawBuffer = DrawBuffer16;
+        ReadBuffer = ReadBuffer16;
+        DrawBufferFast = DrawBuffer16Fast;
+        ReadBufferFast = ReadBuffer16Fast;
+        DrawPixel = DrawPixel16;
+    }
+    WriteBuf = FRAMEBUFFER;
+}
+
+/*  @endcond */
+
+#ifdef PICOMITEVGA
+#ifdef HDMI
+void fun_getscanline(void)
+{
+    if (Option.CPU_Speed == Freq720P)
+    {
+        iret = v_scanline - 30;
+        if (iret < 0)
+            iret += 750;
+        targ = T_INT;
+    }
+    else if (Option.CPU_Speed == Freq480P)
+    {
+        iret = v_scanline - 20;
+        if (iret < 0)
+            iret += 500;
+        targ = T_INT;
+    }
+    else if (Option.CPU_Speed == FreqXGA)
+    {
+        iret = v_scanline - 38;
+        if (iret < 0)
+            iret += 806;
+        targ = T_INT;
+    }
+    else if (Option.CPU_Speed == FreqSVGA)
+    {
+        iret = v_scanline - 25;
+        if (iret < 0)
+            iret += 625;
+        targ = T_INT;
+    }
+    else if (Option.CPU_Speed == Freq252P || Option.CPU_Speed == Freq378P)
+    {
+        iret = v_scanline - 45;
+        if (iret < 0)
+            iret += 525;
+        targ = T_INT;
+    }
+    else if (Option.CPU_Speed == Freq848)
+    {
+        iret = v_scanline - 37;
+        if (iret < 0)
+            iret += 517;
+        targ = T_INT;
+    }
+}
+#else
+void fun_getscanline(void)
+{
+    iret = QVgaScanLine;
+    targ = T_INT;
+}
+#endif
+#else
+/*
+ * @cond
+ * The following section will be excluded from the documentation.
+ */
+// Draw a filled rectangle
+// this is the basic drawing primitive used by most drawing routines
+//    x1, y1, x2, y2 - the coordinates
+//    c - the colour
+void MIPS16 DrawRectangleUser(int x1, int y1, int x2, int y2, int c)
+{
+    // Clamp coordinates (branchless where beneficial)
+    x1 = (x1 < 0) ? 0 : (x1 >= HRes) ? HRes - 1
+                                     : x1;
+    x2 = (x2 < 0) ? 0 : (x2 >= HRes) ? HRes - 1
+                                     : x2;
+    y1 = (y1 < 0) ? 0 : (y1 >= VRes) ? VRes - 1
+                                     : y1;
+    y2 = (y2 < 0) ? 0 : (y2 >= VRes) ? VRes - 1
+                                     : y2;
+
+    // Swap if needed
+    if (x2 < x1)
+    {
+        int t = x1;
+        x1 = x2;
+        x2 = t;
+    }
+    if (y2 < y1)
+    {
+        int t = y1;
+        y1 = y2;
+        y2 = t;
+    }
+    char callstr[256];
+    unsigned char *nextstmtSaved = nextstmt;
+    if (FindSubFun((unsigned char *)"MM.USER_RECTANGLE", 0) >= 0)
+    {
+        strcpy(callstr, "MM.USER_RECTANGLE");
+        strcat(callstr, " ");
+        IntToStr(callstr + strlen(callstr), x1, 10);
+        strcat(callstr, ",");
+        IntToStr(callstr + strlen(callstr), y1, 10);
+        strcat(callstr, ",");
+        IntToStr(callstr + strlen(callstr), x2, 10);
+        strcat(callstr, ",");
+        IntToStr(callstr + strlen(callstr), y2, 10);
+        strcat(callstr, ",");
+        IntToStr(callstr + strlen(callstr), c, 10);
+        callstr[strlen(callstr) + 1] = 0; // two NULL chars required to terminate the call
+        g_LocalIndex++;
+        ExecuteProgram((unsigned char *)callstr);
+        nextstmt = nextstmtSaved;
+        g_LocalIndex--;
+        g_TempMemoryIsChanged = true; // signal that temporary memory should be checked
+    }
+    else
+        error("MM.USER_RECTANGLE not defined");
+}
+
+// Print the bitmap of a char on the video output
+//     x, y - the top left of the char
+//     width, height - size of the char's bitmap
+//     scale - how much to scale the bitmap
+//       fc, bc - foreground and background colour
+//     bitmap - pointer to the bitmap
+void MIPS16 DrawBitmapUser(int x1, int y1, int width, int height, int scale, int fc, int bc, unsigned char *bitmap)
+{
+    char callstr[256];
+    unsigned char *nextstmtSaved = nextstmt;
+    if (FindSubFun((unsigned char *)"MM.USER_BITMAP", 0) >= 0)
+    {
+        strcpy(callstr, "MM.USER_BITMAP");
+        strcat(callstr, " ");
+        IntToStr(callstr + strlen(callstr), x1, 10);
+        strcat(callstr, ",");
+        IntToStr(callstr + strlen(callstr), y1, 10);
+        strcat(callstr, ",");
+        IntToStr(callstr + strlen(callstr), width, 10);
+        strcat(callstr, ",");
+        IntToStr(callstr + strlen(callstr), height, 10);
+        strcat(callstr, ",");
+        IntToStr(callstr + strlen(callstr), scale, 10);
+        strcat(callstr, ",");
+        IntToStr(callstr + strlen(callstr), fc, 10);
+        strcat(callstr, ",");
+        IntToStr(callstr + strlen(callstr), bc, 10);
+        strcat(callstr, ",&H");
+        IntToStr(callstr + strlen(callstr), (unsigned int)bitmap, 16);
+        callstr[strlen(callstr) + 1] = 0; // two NULL chars required to terminate the call
+        g_LocalIndex++;
+        ExecuteProgram((unsigned char *)callstr);
+        g_LocalIndex--;
+        g_TempMemoryIsChanged = true; // signal that temporary memory should be checked
+        nextstmt = nextstmtSaved;
+    }
+    else
+        error("MM.USER_BITMAP not defined");
+}
+#endif
+
+/****************************************************************************************************
+
+ General purpose routines
+
+****************************************************************************************************/
+
+int GetFontWidth(int fnt)
+{
+    return FontTable[fnt >> 4][0] * (fnt & 0b1111);
+}
+
+int GetFontHeight(int fnt)
+{
+    return FontTable[fnt >> 4][1] * (fnt & 0b1111);
+}
+
+void SetFont(int fnt)
+{
+    if (FontTable[fnt >> 4] == NULL)
+        error("Invalid font number #%", (fnt >> 4) + 1);
+    gui_font_width = FontTable[fnt >> 4][0] * (fnt & 0b1111);
+    gui_font_height = FontTable[fnt >> 4][1] * (fnt & 0b1111);
+    if (Option.DISPLAY_CONSOLE)
+    {
+        Option.Height = VRes / gui_font_height;
+        Option.Width = HRes / gui_font_width;
+    }
+    gui_font = fnt;
+}
+
+void MIPS16 ResetDisplay(void)
+{
+    SetFont(Option.DefaultFont);
+    gui_fcolour = Option.DefaultFC;
+    gui_bcolour = Option.DefaultBC;
+    PromptFont = Option.DefaultFont;
+    PromptFC = Option.DefaultFC;
+    PromptBC = Option.DefaultBC;
+#ifdef PICOMITEVGA
+#ifdef rp2350
+    if (Option.CPU_Speed == Freq848)
+        HRes = ((DISPLAY_TYPE == SCREENMODE1 || DISPLAY_TYPE == SCREENMODE3) ? 848 : 424);
+    else if (Option.CPU_Speed == Freq400)
+        HRes = ((DISPLAY_TYPE == SCREENMODE1 || DISPLAY_TYPE == SCREENMODE3) ? 720 : 360);
+    else if (Option.CPU_Speed == FreqSVGA || Option.CPU_Speed == FreqY)
+        HRes = ((DISPLAY_TYPE == SCREENMODE1 || DISPLAY_TYPE == SCREENMODE3) ? 800 : 400);
+    else
+        HRes = ((DISPLAY_TYPE == SCREENMODE1 || DISPLAY_TYPE == SCREENMODE3) ? 640 : 320);
+#else
+    if (Option.CPU_Speed == Freq400)
+        HRes = ((DISPLAY_TYPE == SCREENMODE1 || DISPLAY_TYPE == SCREENMODE3) ? 720 : 360);
+    else
+        HRes = ((DISPLAY_TYPE == SCREENMODE1 || DISPLAY_TYPE == SCREENMODE3) ? 640 : 320);
+#endif
+    if (Option.CPU_Speed == Freq400)
+        VRes = ((DISPLAY_TYPE == SCREENMODE1 || DISPLAY_TYPE == SCREENMODE3) ? 400 : 200);
+#ifdef rp2350
+    else if (Option.CPU_Speed == FreqSVGA)
+        VRes = ((DISPLAY_TYPE == SCREENMODE1 || DISPLAY_TYPE == SCREENMODE3) ? 600 : 300);
+#endif
+    else
+        VRes = ((DISPLAY_TYPE == SCREENMODE1 || DISPLAY_TYPE == SCREENMODE3) ? 480 : 240);
+#ifdef HDMI
+    if (Option.CPU_Speed == Freq720P)
+    {
+        HRes = (DISPLAY_TYPE == SCREENMODE1 ? 1280 : ((DISPLAY_TYPE == SCREENMODE2 || DISPLAY_TYPE == SCREENMODE5) ? 320 : 640));
+        VRes = (DISPLAY_TYPE == SCREENMODE1 ? 720 : ((DISPLAY_TYPE == SCREENMODE2 || DISPLAY_TYPE == SCREENMODE5) ? 180 : 360));
+    }
+    else if (Option.CPU_Speed == FreqXGA)
+    {
+        HRes = (DISPLAY_TYPE == SCREENMODE1 ? 1024 : ((DISPLAY_TYPE == SCREENMODE2 || DISPLAY_TYPE == SCREENMODE5) ? 256 : 512));
+        VRes = (DISPLAY_TYPE == SCREENMODE1 ? 768 : ((DISPLAY_TYPE == SCREENMODE2 || DISPLAY_TYPE == SCREENMODE5) ? 192 : 384));
+    }
+    else if (Option.CPU_Speed == FreqSVGA)
+    {
+        HRes = ((DISPLAY_TYPE == SCREENMODE1 || DISPLAY_TYPE == SCREENMODE3) ? 800 : 400);
+        VRes = ((DISPLAY_TYPE == SCREENMODE1 || DISPLAY_TYPE == SCREENMODE3) ? 600 : 300);
+    }
+    else if (Option.CPU_Speed == FreqX)
+    {
+        HRes = (DISPLAY_TYPE == SCREENMODE1 ? 1024 : ((DISPLAY_TYPE == SCREENMODE2 || DISPLAY_TYPE == SCREENMODE5) ? 256 : 512));
+        VRes = (DISPLAY_TYPE == SCREENMODE1 ? 600 : ((DISPLAY_TYPE == SCREENMODE2 || DISPLAY_TYPE == SCREENMODE5) ? 150 : 300));
+    }
+#endif
+
+    switch (DISPLAY_TYPE)
+    {
+    case SCREENMODE1:
+        ScreenSize = MODE1SIZE;
+        break;
+    case SCREENMODE2:
+        ScreenSize = MODE2SIZE;
+        break;
+    case SCREENMODE3:
+        ScreenSize = MODE3SIZE;
+        break;
+    case SCREENMODE4:
+        ScreenSize = MODE4SIZE;
+        break;
+    case SCREENMODE5:
+        ScreenSize = MODE5SIZE;
+        break;
+    }
+    if (DISPLAY_TYPE == SCREENMODE2 || DISPLAY_TYPE == SCREENMODE3)
+    {
+        DrawRectangle = DrawRectangle16;
+        DrawBitmap = DrawBitmap16;
+        ScrollLCD = ScrollLCD16;
+        DrawBuffer = DrawBuffer16;
+        ReadBuffer = ReadBuffer16;
+        DrawBufferFast = DrawBuffer16Fast;
+        ReadBufferFast = ReadBuffer16Fast;
+        DrawPixel = DrawPixel16;
+#ifdef HDMI
+    }
+    else if (DISPLAY_TYPE == SCREENMODE4)
+    {
+        DrawRectangle = DrawRectangle555;
+        DrawBitmap = DrawBitmap555;
+        ScrollLCD = ScrollLCD555;
+        DrawBuffer = DrawBuffer555;
+        ReadBuffer = ReadBuffer555;
+        DrawBufferFast = DrawBuffer555Fast;
+        ReadBufferFast = ReadBuffer555Fast;
+        DrawPixel = DrawPixel555;
+    }
+    else if (DISPLAY_TYPE == SCREENMODE5)
+    {
+        DrawRectangle = DrawRectangle256;
+        DrawBitmap = DrawBitmap256;
+        ScrollLCD = ScrollLCD256;
+        DrawBuffer = DrawBuffer256;
+        ReadBuffer = ReadBuffer256;
+        DrawBufferFast = DrawBuffer256Fast;
+        ReadBufferFast = ReadBuffer256Fast;
+        DrawPixel = DrawPixel256;
+#endif
+    }
+    else
+    {
+        DrawRectangle = DrawRectangle2;
+        DrawBitmap = DrawBitmap2;
+        ScrollLCD = ScrollLCD2;
+        DrawBuffer = DrawBuffer2;
+        ReadBuffer = ReadBuffer2;
+        DrawBufferFast = DrawBuffer2Fast;
+        ReadBufferFast = ReadBuffer2Fast;
+        DrawPixel = DrawPixel2;
+        PromptFC = gui_fcolour = Option.DefaultFC;
+        PromptBC = gui_bcolour = Option.DefaultBC;
+    }
+#ifdef HDMI
+    settiles();
+#else
+#ifdef rp2350
+    if (DISPLAY_TYPE == SCREENMODE1)
+    {
+        tilefcols = (uint16_t *)((uint32_t)FRAMEBUFFER + (MODE1SIZE * 3));
+        tilebcols = (uint16_t *)((uint32_t)FRAMEBUFFER + (MODE1SIZE * 3) + (MODE1SIZE >> 1));
+    }
+#endif
+    for (int x = 0; x < X_TILE; x++)
+    {
+        for (int y = 0; y < Y_TILE; y++)
+        {
+            tilefcols[y * X_TILE + x] = RGB121pack(Option.DefaultFC);
+            tilebcols[y * X_TILE + x] = RGB121pack(Option.DefaultBC);
+        }
+    }
+#endif
+#else
+#ifdef GUICONTROLS
+    ResetGUI();
+#endif
+#endif
+}
+// OPTIMIZED: Move lookup tables to file scope in RAM for fast access
+__not_in_flash("data") static const uint32_t hline_mask_a[32] = {
+    0xFFFFFFFF, 0x7FFFFFFF, 0x3FFFFFFF, 0x1FFFFFFF, 0xFFFFFFF, 0x7FFFFFF, 0x3FFFFFF, 0x1FFFFFF,
+    0xFFFFFF, 0x7FFFFF, 0x3FFFFF, 0x1FFFFF, 0xFFFFF, 0x7FFFF, 0x3FFFF, 0x1FFFF,
+    0xFFFF, 0x7FFF, 0x3FFF, 0x1FFF, 0xFFF, 0x7FF, 0x3FF, 0x1FF,
+    0xFF, 0x7F, 0x3F, 0x1F, 0x0F, 0x07, 0x03, 0x01};
+
+__not_in_flash("data") static const uint32_t hline_mask_b[32] = {
+    0x80000000, 0xC0000000, 0xe0000000, 0xf0000000, 0xf8000000, 0xfc000000, 0xfe000000, 0xff000000,
+    0xff800000, 0xffC00000, 0xffe00000, 0xfff00000, 0xfff80000, 0xfffc0000, 0xfffe0000, 0xffff0000,
+    0xffff8000, 0xffffC000, 0xffffe000, 0xfffff000, 0xfffff800, 0xfffffc00, 0xfffffe00, 0xffffff00,
+    0xffffff80, 0xffffffC0, 0xffffffe0, 0xfffffff0, 0xfffffff8, 0xfffffffc, 0xfffffffe, 0xffffffff};
+// Helper function to apply hline mask to a single line buffer
+// Helper function to apply hline mask to a single line buffer
+void hline_to_buffer(int x0, int x1, int fill, int ints_per_line, uint32_t *restrict line_buf)
+{
+    if (x1 < x0)
+        return;
+    if (x0 < 0)
+        x0 = 0;
+    if (x1 < 0)
+        return;
+
+    int max_x = (ints_per_line << 5) - 1;
+    if (x0 > max_x)
+        return;
+    if (x1 > max_x)
+        x1 = max_x;
+
+    uint32_t w0 = (x0 >> 5); // Divide by 32
+    uint32_t w1 = (x1 >> 5);
+    uint32_t xx0 = x0 & 0x1F; // Modulo 32
+    uint32_t xx1 = x1 & 0x1F;
+
+    if (likely(w1 == w0))
+    {
+        // Special case - both endpoints in same word
+        uint32_t mask = hline_mask_a[xx0] & hline_mask_b[xx1];
+
+        if (fill)
+            line_buf[w0] |= mask;
+        else
+            line_buf[w0] &= ~mask;
+    }
+    else
+    {
+        // Multiple words
+        uint32_t word_count = w1 - w0;
+
+        if (likely(word_count > 1))
+        {
+            // Fill full words in between
+            uint32_t fill_val = fill ? 0xFFFFFFFF : 0;
+            uint32_t *p = &line_buf[w0 + 1];
+            uint32_t count = word_count - 1;
+
+            // Unroll by 4 for better performance
+            while (count >= 4)
+            {
+                p[0] = fill_val;
+                p[1] = fill_val;
+                p[2] = fill_val;
+                p[3] = fill_val;
+                p += 4;
+                count -= 4;
+            }
+
+            // Handle remainder
+            while (count--)
+                *p++ = fill_val;
+        }
+
+        // Handle partial words at edges
+        uint32_t mask0 = hline_mask_a[xx0];
+        uint32_t mask1 = hline_mask_b[xx1];
+
+        if (fill)
+        {
+            line_buf[w0] |= mask0;
+            line_buf[w1] |= mask1;
+        }
+        else
+        {
+            line_buf[w0] &= ~mask0;
+            line_buf[w1] &= ~mask1;
+        }
+    }
+}
+
+// Draw a horizontal line segment from the line buffer
+void draw_line_from_buffer(uint32_t *line_buf, int ints_per_line, int x_base, int y_coord, int c)
+{
+    int xs = -1;
+    int xi = 0;
+
+    for (int i = 0; i < ints_per_line; i++)
+    {
+        uint32_t k = line_buf[i];
+        int x_start = x_base + (i << 5);
+
+        for (int m = 0; m < 32; m++)
+        {
+            if (xs == -1 && (k & 0x80000000))
+            {
+                xs = m;
+                xi = i;
+            }
+            if (xs != -1 && !(k & 0x80000000))
+            {
+                DrawRectangle(x_base + xs + (xi << 5), y_coord,
+                              x_start + m - 1, y_coord, c);
+                xs = -1;
+            }
+            k <<= 1;
+        }
+    }
+
+    if (xs != -1)
+    {
+        DrawRectangle(x_base + xs + (xi << 5), y_coord,
+                      x_base - 1 + (ints_per_line << 5), y_coord, c);
+    }
+}
+
+// Generate filled circle contributions for a specific scanline
+// center_x is the x-coordinate of the circle center in buffer space
+// center_y is the y-coordinate of the circle center in buffer space
+void generate_circle_scanline(int radius, int center_x, int center_y, int scan_y,
+                              int fill, int ints_per_line, uint32_t *line_buf, int asp)
+{
+    int a = 0;
+    int b = radius;
+    int P = 1 - radius;
+
+    do
+    {
+        int A = (a * asp) >> 10;
+        int B = (b * asp) >> 10;
+
+        // Each Bresenham step generates 4 horizontal lines due to symmetry
+        // Check which ones match our current scanline
+
+        // Lines at y = center_y + b and y = center_y - b
+        if (center_y + b == scan_y)
+        {
+            hline_to_buffer(center_x - A, center_x + A, fill, ints_per_line, line_buf);
+        }
+        if (center_y - b == scan_y)
+        {
+            hline_to_buffer(center_x - A, center_x + A, fill, ints_per_line, line_buf);
+        }
+
+        // Lines at y = center_y + a and y = center_y - a
+        if (center_y + a == scan_y)
+        {
+            hline_to_buffer(center_x - B, center_x + B, fill, ints_per_line, line_buf);
+        }
+        if (center_y - a == scan_y)
+        {
+            hline_to_buffer(center_x - B, center_x + B, fill, ints_per_line, line_buf);
+        }
+
+        if (P < 0)
+            P += 3 + 2 * a++;
+        else
+            P += 5 + 2 * (a++ - b--);
+
+    } while (a <= b);
+}
+
+// OPTIMIZED: Process circles line-by-line with minimal memory
+void DrawCircleRingLineByLine(int x, int y, int r1, int r2, int c, MMFLOAT aspect, MMFLOAT aspect2)
+{
+    // Calculate the actual width needed for the outer circle
+    int ll = r2;
+    if (aspect > 1.0f)
+        ll = (int)((MMFLOAT)r2 * aspect);
+
+    int ints_per_line = RoundUptoInt((ll << 1) + 1) / 32;
+
+    // Allocate only ONE line buffer
+    uint32_t *line_buf = (uint32_t *)GetTempMainMemory((ints_per_line + 1) << 2);
+
+    // The outer circle center in buffer coordinates
+    // x: stretched by aspect, so center is at (r2 * aspect)
+    // y: not stretched, so center is at r2
+    int center_x_outer = (int)((MMFLOAT)r2 * aspect);
+    int center_y = r2;
+
+    // The inner circle center in buffer coordinates
+    // The inner circle has a different aspect ratio (aspect2)
+    // but it's still centered at the same physical location
+    int center_x_inner = (int)((MMFLOAT)r2 * aspect);
+
+    // Base coordinates for final drawing (top-left of buffer maps to these screen coords)
+    int x_base = x - center_x_outer;
+    int y_base = y - r2;
+
+    int asp_outer = aspect * (MMFLOAT)(1 << 10);
+    int asp_inner = aspect2 * (MMFLOAT)(1 << 10);
+
+    // Process each horizontal line
+    for (int scan_y = 0; scan_y <= (r2 << 1); scan_y++)
+    {
+        int y_coord = y_base + scan_y;
+
+        // Clear line buffer
+        for (int i = 0; i <= ints_per_line; i++)
+            line_buf[i] = 0;
+
+        // Generate outer circle contributions for this scanline
+        generate_circle_scanline(r2, center_x_outer, center_y, scan_y, 1, ints_per_line, line_buf, asp_outer);
+
+        // Generate inner circle contributions (to subtract)
+        generate_circle_scanline(r1, center_x_inner, center_y, scan_y, 0, ints_per_line, line_buf, asp_inner);
+
+        // Draw this line
+        draw_line_from_buffer(line_buf, ints_per_line, x_base, y_coord, c);
+    }
+}
+
+/******************************************************************************************
+ Print a char on the LCD display (SSD1963 and in landscape only).  It handles control chars
+ such as newline and will wrap at the end of the line and scroll the display if necessary.
+
+ The char is printed at the current location defined by CurrentX and CurrentY
+ *****************************************************************************************/
+void DisplayPutC(char c)
+{
+
+    if (!Option.DISPLAY_CONSOLE)
+        return;
+    // if it is printable and it is going to take us off the right hand end of the screen do a CRLF
+    if (c >= FontTable[gui_font >> 4][2] && c < FontTable[gui_font >> 4][2] + FontTable[gui_font >> 4][3])
+    {
+        if (CurrentX + gui_font_width > HRes)
+        {
+            DisplayPutC('\r');
+            DisplayPutC('\n');
+        }
+    }
+
+    // handle the standard control chars
+    switch (c)
+    {
+    case '\b':
+        CurrentX -= gui_font_width;
+        //            if (CurrentX < 0) CurrentX = 0;
+        if (CurrentX < 0)
+        {                                // Go to end of previous line
+            CurrentY -= gui_font_height; // Go up one line
+            if (CurrentY < 0)
+                CurrentY = 0;
+            CurrentX = (Option.Width - 1) * gui_font_width; // go to last character
+        }
+        return;
+    case '\r':
+        CurrentX = 0;
+        return;
+    case '\n':
+        if (CurrentY + 2 * gui_font_height > VRes)
+        {
+            if (Option.NoScroll && Option.DISPLAY_CONSOLE)
+            {
+                ClearScreen(gui_bcolour);
+                CurrentX = 0;
+                CurrentY = 0;
+            }
+            else
+            {
+                ScrollLCD(gui_font_height);
+            }
+        }
+        else
+        {
+            CurrentY += gui_font_height;
+        }
+        return;
+    case '\t':
+        do
+        {
+            DisplayPutC(' ');
+        } while ((CurrentX / gui_font_width) % Option.Tab);
+        return;
+    }
+    GUIPrintChar(gui_font, gui_fcolour, gui_bcolour, c, ORIENT_NORMAL); // print it
+    routinechecks();
+}
+void ShowCursor(int show)
+{
+    static int visible = false;
+    int newstate;
+    if (!Option.DISPLAY_CONSOLE)
+        return;
+    newstate = ((CursorTimer <= CURSOR_ON) && show); // what should be the state of the cursor?
+    if (visible == newstate)
+        return;         // we can skip the rest if the cursor is already in the correct state
+    visible = newstate; // draw the cursor BELOW the font
+    int y1 = CurrentY + gui_font_height - (gui_font_height <= 12 ? 1 : 2);
+    int y2 = y1 + (gui_font_height <= 12 ? 0 : 1);
+    int x1 = CurrentX;
+    int x2 = CurrentX + gui_font_width - 1;
+    DrawLine(x1, y1, x2, y1, (gui_font_height <= 12 ? 1 : 2), visible ? gui_fcolour : (DISPLAY_TYPE == SCREENMODE1 ? 0 : gui_bcolour));
+    if (y1 < low_y)
+        low_y = y1;
+    if (y2 > high_y)
+        high_y = y2;
+    if (x1 < low_x)
+        low_x = x1;
+    if (x2 > high_x)
+        high_x = x2;
+    routinechecks();
+}
+#ifndef PICOMITEWEB
+
+void DrawPolygon(int n, short *xcoord, short *ycoord, int face)
+{
+    int i, facecount = struct3d[n]->facecount[face];
+    int c = struct3d[n]->line[face];
+    int f = struct3d[n]->fill[face];
+    // first deal with outline only
+    if (struct3d[n]->fill[face] == 0xFFFFFFFF)
+    {
+        for (i = 0; i < facecount; i++)
+        {
+            if (i < facecount - 1)
+            {
+                DrawLine(xcoord[i], ycoord[i], xcoord[i + 1], ycoord[i + 1], 1, c);
+            }
+            else
+            {
+                DrawLine(xcoord[i], ycoord[i], xcoord[0], ycoord[0], 1, c);
+            }
+        }
+    }
+    else
+    {
+        if (facecount == 3)
+        {
+            DrawTriangle(xcoord[0], ycoord[0], xcoord[1], ycoord[1], xcoord[2], ycoord[2], c, f);
+        }
+        else if (facecount == 4)
+        {
+            DrawTriangle(xcoord[0], ycoord[0], xcoord[1], ycoord[1], xcoord[2], ycoord[2], f, f);
+            DrawTriangle(xcoord[0], ycoord[0], xcoord[2], ycoord[2], xcoord[3], ycoord[3], f, f);
+            if (f != c)
+            {
+                DrawLine(xcoord[0], ycoord[0], xcoord[1], ycoord[1], 1, c);
+                DrawLine(xcoord[1], ycoord[1], xcoord[2], ycoord[2], 1, c);
+                DrawLine(xcoord[2], ycoord[2], xcoord[3], ycoord[3], 1, c);
+                DrawLine(xcoord[0], ycoord[0], xcoord[3], ycoord[3], 1, c);
+            }
+        }
+        else
+        {
+            int ymax = -1000000, ymin = 1000000;
+            fill_set_pen_color((c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF);
+            fill_set_fill_color((f >> 16) & 0xFF, (f >> 8) & 0xFF, f & 0xFF);
+            fill_begin_fill();
+            main_fill_poly_vertex_count = 0;
+            for (i = 0; i < facecount; i++)
+            {
+                main_fill_polyX[main_fill_poly_vertex_count] = (TFLOAT)xcoord[i];
+                main_fill_polyY[main_fill_poly_vertex_count] = (TFLOAT)ycoord[i];
+                if (main_fill_polyY[main_fill_poly_vertex_count] > ymax)
+                    ymax = main_fill_polyY[main_fill_poly_vertex_count];
+                if (main_fill_polyY[main_fill_poly_vertex_count] < ymin)
+                    ymin = main_fill_polyY[main_fill_poly_vertex_count];
+                main_fill_polyX[main_fill_poly_vertex_count] = (TFLOAT)xcoord[i];
+                main_fill_poly_vertex_count++;
+            }
+            if (main_fill_polyY[main_fill_poly_vertex_count] != main_fill_polyY[0] || main_fill_polyX[main_fill_poly_vertex_count] != main_fill_polyX[0])
+            {
+                main_fill_polyX[main_fill_poly_vertex_count] = main_fill_polyX[0];
+                main_fill_polyY[main_fill_poly_vertex_count] = main_fill_polyY[0];
+                main_fill_poly_vertex_count++;
+            }
+            fill_end_fill(main_fill_poly_vertex_count - 1, ymin, ymax);
+        }
+    }
+}
+
+void MIPS16 Free3DMemory(int i)
+{
+    FreeMemorySafe((void *)&struct3d[i]->q_vertices);  // array of original vertices
+    FreeMemorySafe((void *)&struct3d[i]->r_vertices);  // array of rotated vertices
+    FreeMemorySafe((void *)&struct3d[i]->q_centroids); // array of original vertices
+    FreeMemorySafe((void *)&struct3d[i]->r_centroids); // array of rotated vertices
+    FreeMemorySafe((void *)&struct3d[i]->facecount);   // number of vertices for each face
+    FreeMemorySafe((void *)&struct3d[i]->facestart);   // index into the face_x_vert table of the start of a given face
+    FreeMemorySafe((void *)&struct3d[i]->fill);        // fill colours
+    FreeMemorySafe((void *)&struct3d[i]->line);        // line colours
+    FreeMemorySafe((void *)&struct3d[i]->colours);
+    FreeMemorySafe((void *)&struct3d[i]->face_x_vert); // list of vertices for each face
+    FreeMemorySafe((void *)&struct3d[i]->dots);
+    FreeMemorySafe((void *)&struct3d[i]->depth);
+    FreeMemorySafe((void *)&struct3d[i]->depthindex);
+    FreeMemorySafe((void *)&struct3d[i]->normals);
+    FreeMemorySafe((void *)&struct3d[i]->flags);
+    FreeMemorySafe((void *)&struct3d[i]);
+}
+void MIPS16 closeall3d(void)
+{
+    int i;
+    for (i = 0; i < MAX3D; i++)
+    {
+        if (struct3d[i] != NULL)
+        {
+            Free3DMemory(i);
+        }
+    }
+    for (i = 1; i < 4; i++)
+    {
+        camera[i].viewplane = -32767;
+    }
+}
+void T_Mult(FLOAT3D *q1, FLOAT3D *q2, FLOAT3D *n)
+{
+    FLOAT3D a1 = q1[0], a2 = q2[0], b1 = q1[1], b2 = q2[1], c1 = q1[2], c2 = q2[2], d1 = q1[3], d2 = q2[3];
+    n[0] = a1 * a2 - b1 * b2 - c1 * c2 - d1 * d2;
+    n[1] = a1 * b2 + b1 * a2 + c1 * d2 - d1 * c2;
+    n[2] = a1 * c2 - b1 * d2 + c1 * a2 + d1 * b2;
+    n[3] = a1 * d2 + b1 * c2 - c1 * b2 + d1 * a2;
+    n[4] = q1[4] * q2[4];
+}
+
+void T_Invert(FLOAT3D *q, FLOAT3D *n)
+{
+    n[0] = q[0];
+    n[1] = -q[1];
+    n[2] = -q[2];
+    n[3] = -q[3];
+    n[4] = q[4];
+}
+
+void depthsort(FLOAT3D *farray, int n, int *index)
+{
+    int i, j = n, s = 1;
+    int t;
+    FLOAT3D f;
+    while (s)
+    {
+        s = 0;
+        for (i = 1; i < j; i++)
+        {
+            if (farray[i] > farray[i - 1])
+            {
+                f = farray[i];
+                farray[i] = farray[i - 1];
+                farray[i - 1] = f;
+                s = 1;
+                if (index != NULL)
+                {
+                    t = index[i - 1];
+                    index[i - 1] = index[i];
+                    index[i] = t;
+                }
+            }
+        }
+        j--;
+    }
+}
+void q_rotate(s_quaternion *in, s_quaternion rotate, s_quaternion *out)
+{
+    //	PFlt(in->x);PFltComma(in->y);PFltComma(in->z);PFltComma(in->m);PRet();
+    s_quaternion temp, qtemp;
+    T_Mult((FLOAT3D *)&rotate, (FLOAT3D *)in, (FLOAT3D *)&temp);
+    T_Invert((FLOAT3D *)&rotate, (FLOAT3D *)&qtemp);
+    T_Mult((FLOAT3D *)&temp, (FLOAT3D *)&qtemp, (FLOAT3D *)out);
+    //	PFlt(out->x);PFltComma(out->y);PFltComma(out->z);PFltComma(out->m);PRet();
+}
+void normalise(s_vector *v)
+{
+    FLOAT3D n = sqrt3d((v->x) * (v->x) + (v->y) * (v->y) + (v->z) * (v->z));
+    v->x /= n;
+    v->y /= n;
+    v->z /= n;
+}
+void display3d(int n, FLOAT3D x, FLOAT3D y, FLOAT3D z, int clear, int nonormals, int depthmode)
+{
+    s_vector ray, lighting = {0};
+    s_vector p1, p2, p3, U, V;
+    FLOAT3D x1, y1, z1, tmp;
+    FLOAT3D at, bt, ct, t, /*A=0, B=0, */ C = 1, D = -camera[struct3d[n]->camera].viewplane;
+    int maxH = VRes;
+    int maxW = HRes;
+    int vp, v, f, sortindex, csave = 0, fsave = 0;
+    if (struct3d[n]->vmax > 4)
+    { // needed for polygon fill
+        main_fill_polyX = (TFLOAT *)GetMemory(struct3d[n]->tot_face_x_vert * sizeof(TFLOAT));
+        main_fill_polyY = (TFLOAT *)GetMemory(struct3d[n]->tot_face_x_vert * sizeof(TFLOAT));
+    }
+    if (struct3d[n]->xmin != 32767 && clear)
+        DrawRectangle(struct3d[n]->xmin, struct3d[n]->ymin, struct3d[n]->xmax, struct3d[n]->ymax, 0);
+    struct3d[n]->xmin = 32767;
+    struct3d[n]->ymin = 32767;
+    struct3d[n]->xmax = -32767;
+    struct3d[n]->ymax = -32767;
+    short xcoord[MAX_3D_POLYGON_VERTICES], ycoord[MAX_3D_POLYGON_VERTICES];
+    struct3d[n]->distance = 0.0;
+    for (f = 0; f < struct3d[n]->nf; f++)
+    {
+        // calculate the surface normals for each face
+        vp = struct3d[n]->facestart[f];
+        p1.x = struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp + 1]].x * struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp + 1]].m + x;
+        p1.y = struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp + 1]].y * struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp + 1]].m + y;
+        p1.z = struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp + 1]].z * struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp + 1]].m + z;
+        p2.x = struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp + 2]].x * struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp + 2]].m + x;
+        p2.y = struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp + 2]].y * struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp + 2]].m + y;
+        p2.z = struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp + 2]].z * struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp + 2]].m + z;
+        p3.x = struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp]].x * struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp]].m + x;
+        p3.y = struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp]].y * struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp]].m + y;
+        p3.z = struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp]].z * struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp]].m + z;
+        U.x = p2.x - p1.x;
+        U.y = p2.y - p1.y;
+        U.z = p2.z - p1.z;
+        V.x = p3.x - p1.x;
+        V.y = p3.y - p1.y;
+        V.z = p3.z - p1.z;
+        struct3d[n]->normals[f].x = U.y * V.z - U.z * V.y;
+        struct3d[n]->normals[f].y = U.z * V.x - U.x * V.z;
+        struct3d[n]->normals[f].z = U.x * V.y - U.y * V.x;
+        normalise(&struct3d[n]->normals[f]);
+        ray.x = p1.x - camera[struct3d[n]->camera].x;
+        ray.y = p1.y - camera[struct3d[n]->camera].y;
+        ray.z = p1.z - camera[struct3d[n]->camera].z;
+        normalise(&ray);
+        lighting.x = p1.x - struct3d[n]->light.x;
+        lighting.y = p1.y - struct3d[n]->light.y;
+        lighting.z = p1.z - struct3d[n]->light.z;
+        normalise(&lighting);
+        struct3d[n]->dots[f] = ray.x * struct3d[n]->normals[f].x + ray.y * struct3d[n]->normals[f].y + ray.z * struct3d[n]->normals[f].z;
+        if (depthmode == 0)
+        {
+            tmp = struct3d[n]->r_centroids[f].m;
+            struct3d[n]->depth[f] = sqrt3d(
+                (struct3d[n]->r_centroids[f].z * tmp + z - camera[struct3d[n]->camera].z) *
+                    (struct3d[n]->r_centroids[f].z * tmp + z - camera[struct3d[n]->camera].z) +
+                (struct3d[n]->r_centroids[f].y * tmp + y - camera[struct3d[n]->camera].y) *
+                    (struct3d[n]->r_centroids[f].y * tmp + y - camera[struct3d[n]->camera].y) +
+                (struct3d[n]->r_centroids[f].x * tmp + x - camera[struct3d[n]->camera].x) *
+                    (struct3d[n]->r_centroids[f].x * tmp + x - camera[struct3d[n]->camera].x));
+            struct3d[n]->depthindex[f] = f;
+            struct3d[n]->distance += struct3d[n]->depth[f];
+        }
+        else
+        {
+            FLOAT3D max_depth = -32767.0;
+            for (v = 0; v < struct3d[n]->facecount[f]; v++)
+            {
+                tmp = struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp + v]].m;
+                FLOAT3D vertex_depth = sqrt3d(
+                    (struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp + v]].z * tmp + z - camera[struct3d[n]->camera].z) *
+                        (struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp + v]].z * tmp + z - camera[struct3d[n]->camera].z) +
+                    (struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp + v]].y * tmp + y - camera[struct3d[n]->camera].y) *
+                        (struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp + v]].y * tmp + y - camera[struct3d[n]->camera].y) +
+                    (struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp + v]].x * tmp + x - camera[struct3d[n]->camera].x) *
+                        (struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp + v]].x * tmp + x - camera[struct3d[n]->camera].x));
+                if (vertex_depth > max_depth)
+                {
+                    max_depth = vertex_depth;
+                }
+            }
+            struct3d[n]->depth[f] = max_depth;
+            struct3d[n]->depthindex[f] = f;
+            struct3d[n]->distance += struct3d[n]->depth[f];
+        }
+    }
+    struct3d[n]->distance /= f;
+    // sort the distances from the faces to the camera
+    depthsort(struct3d[n]->depth, struct3d[n]->nf, struct3d[n]->depthindex);
+    // display the forward facing faces in the order of the furthest away first
+    for (f = 0; f < struct3d[n]->nf; f++)
+    {
+        sortindex = struct3d[n]->depthindex[f];
+        vp = struct3d[n]->facestart[sortindex];
+        if (struct3d[n]->flags[sortindex] & 4)
+            struct3d[n]->dots[sortindex] = -struct3d[n]->dots[sortindex];
+        if (nonormals || struct3d[n]->dots[sortindex] < 0)
+        {
+            for (v = 0; v < struct3d[n]->facecount[sortindex]; v++)
+            {
+                x1 = struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp + v]].x * struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp + v]].m + x;
+                y1 = struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp + v]].y * struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp + v]].m + y;
+                z1 = struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp + v]].z * struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp + v]].m + z;
+                // We now have the coordinates in real space so project them
+                at = x1 - camera[struct3d[n]->camera].x;
+                bt = y1 - camera[struct3d[n]->camera].y;
+                ct = z1 - camera[struct3d[n]->camera].z;
+                t = -(/*A * x1 + B * y1*/ +C * z1 + D) / (/*A * at + B * bt + */ C * ct);
+                xcoord[v] = x1 + round3d(at * t) + (maxW >> 1) - camera[struct3d[n]->camera].x - camera[struct3d[n]->camera].panx;
+                ycoord[v] = maxH - round3d(y1 + bt * t) - 1;
+                ycoord[v] -= (maxH >> 1) - camera[struct3d[n]->camera].y - camera[struct3d[n]->camera].pany;
+                if (clear)
+                {
+                    if (xcoord[v] > struct3d[n]->xmax)
+                        struct3d[n]->xmax = xcoord[v];
+                    if (xcoord[v] < struct3d[n]->xmin)
+                        struct3d[n]->xmin = xcoord[v];
+                    if (ycoord[v] > struct3d[n]->ymax)
+                        struct3d[n]->ymax = ycoord[v];
+                    if (ycoord[v] < struct3d[n]->ymin)
+                        struct3d[n]->ymin = ycoord[v];
+                }
+            }
+            if ((struct3d[n]->flags[sortindex] & 1) == 0)
+            {
+                if (struct3d[n]->flags[sortindex] & 10)
+                {
+                    fsave = struct3d[n]->fill[sortindex];
+                    csave = struct3d[n]->line[sortindex];
+                    if (struct3d[n]->flags[sortindex] & 2)
+                        struct3d[n]->fill[sortindex] = 0xFF0000;
+                    if (struct3d[n]->flags[sortindex] & 8)
+                    {
+                        FLOAT3D lightratio = fabs3d(lighting.x * struct3d[n]->normals[sortindex].x + lighting.y * struct3d[n]->normals[sortindex].y + lighting.z * struct3d[n]->normals[sortindex].z);
+                        lightratio = (lightratio * struct3d[n]->ambient) + struct3d[n]->ambient;
+                        int red = (struct3d[n]->fill[sortindex] & 0xFF0000) >> 16;
+                        int green = (struct3d[n]->fill[sortindex] & 0xFF00) >> 8;
+                        int blue = (struct3d[n]->fill[sortindex] & 0xFF);
+                        red = (round3d)((FLOAT3D)red * lightratio);
+                        green = (round3d)((FLOAT3D)green * lightratio);
+                        blue = (round3d)((FLOAT3D)blue * lightratio);
+                        struct3d[n]->fill[sortindex] = (red << 16) | (green << 8) | blue;
+                        red = (struct3d[n]->line[sortindex] & 0xFF0000) >> 16;
+                        green = (struct3d[n]->line[sortindex] & 0xFF00) >> 8;
+                        blue = (struct3d[n]->line[sortindex] & 0xFF);
+                        red = (round3d)((FLOAT3D)red * lightratio);
+                        green = (round3d)((FLOAT3D)green * lightratio);
+                        blue = (round3d)((FLOAT3D)blue * lightratio);
+                        struct3d[n]->line[sortindex] = (red << 16) | (green << 8) | blue;
+                    }
+                }
+                DrawPolygon(n, xcoord, ycoord, sortindex);
+                if (struct3d[n]->flags[sortindex] & 10)
+                {
+                    struct3d[n]->fill[sortindex] = fsave;
+                    struct3d[n]->line[sortindex] = csave;
+                }
+            }
+        }
+    }
+    // Save information about how it was displayed for DRAW3D function and RESTORE command
+    struct3d[n]->current.x = x;
+    struct3d[n]->current.y = y;
+    struct3d[n]->current.z = z;
+    struct3d[n]->nonormals = nonormals;
+    struct3d[n]->depthmode = depthmode;
+    if (struct3d[n]->vmax > 4)
+    { // needed for polygon fill
+        FreeMemory((unsigned char *)main_fill_polyX);
+        FreeMemory((unsigned char *)main_fill_polyY);
+    }
+}
+
+void MIPS16 diagnose3d(int n, FLOAT3D x, FLOAT3D y, FLOAT3D z, int sort)
+{
+    s_vector ray, normals;
+    s_vector p1, p2, p3, U, V;
+    FLOAT3D tmp;
+    int vp, f, sortindex;
+    for (f = 0; f < struct3d[n]->nf; f++)
+    {
+        // calculate the surface normals for each face
+        vp = struct3d[n]->facestart[f];
+        p1.x = struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp + 1]].x * struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp + 1]].m + x;
+        p1.y = struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp + 1]].y * struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp + 1]].m + y;
+        p1.z = struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp + 1]].z * struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp + 1]].m + z;
+        p2.x = struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp + 2]].x * struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp + 2]].m + x;
+        p2.y = struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp + 2]].y * struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp + 2]].m + y;
+        p2.z = struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp + 2]].z * struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp + 2]].m + z;
+        p3.x = struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp]].x * struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp]].m + x;
+        p3.y = struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp]].y * struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp]].m + y;
+        p3.z = struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp]].z * struct3d[n]->r_vertices[struct3d[n]->face_x_vert[vp]].m + z;
+        U.x = p2.x - p1.x;
+        U.y = p2.y - p1.y;
+        U.z = p2.z - p1.z;
+        V.x = p3.x - p1.x;
+        V.y = p3.y - p1.y;
+        V.z = p3.z - p1.z;
+        normals.x = U.y * V.z - U.z * V.y;
+        normals.y = U.z * V.x - U.x * V.z;
+        normals.z = U.x * V.y - U.y * V.x;
+        normalise(&normals);
+        ray.x = p1.x - camera[struct3d[n]->camera].x;
+        ray.y = p1.y - camera[struct3d[n]->camera].y;
+        ray.z = p1.z /*  -camera[struct3d[n]->camera].z*/;
+        normalise(&ray);
+        struct3d[n]->dots[f] = ray.x * normals.x + ray.y * normals.y + ray.z * normals.z;
+        tmp = struct3d[n]->r_centroids[f].m;
+        struct3d[n]->depth[f] = sqrt3d(
+            (struct3d[n]->r_centroids[f].z * tmp + z - camera[struct3d[n]->camera].z) *
+                (struct3d[n]->r_centroids[f].z * tmp + z - camera[struct3d[n]->camera].z) +
+            (struct3d[n]->r_centroids[f].y * tmp + y - camera[struct3d[n]->camera].y) *
+                (struct3d[n]->r_centroids[f].y * tmp + y - camera[struct3d[n]->camera].y) +
+            (struct3d[n]->r_centroids[f].x * tmp + x - camera[struct3d[n]->camera].x) *
+                (struct3d[n]->r_centroids[f].x * tmp + x - camera[struct3d[n]->camera].x));
+        struct3d[n]->depthindex[f] = f;
+    }
+    // sort the dot products
+    depthsort(struct3d[n]->depth, struct3d[n]->nf, struct3d[n]->depthindex);
+    // display the forward facing faces in the order of the furthest away first
+    for (f = 0; f < struct3d[n]->nf; f++)
+    {
+        if (sort)
+            sortindex = struct3d[n]->depthindex[f];
+        else
+            sortindex = f;
+        vp = struct3d[n]->facestart[sortindex];
+        MMPrintString("Face ");
+        PInt(sortindex);
+        MMPrintString(" at distance ");
+        PFlt(struct3d[n]->depth[f]);
+        MMPrintString(" dot product is ");
+        PFlt(struct3d[n]->dots[sortindex]);
+        MMPrintString(" so the face is ");
+        MMPrintString(struct3d[n]->dots[sortindex] > 0 ? "Hidden" : "Showing");
+        PRet();
+    }
+}
+/*  @endcond */
+
+void MIPS16 cmd_3D(void)
+{
+    unsigned char *p;
+    if ((p = checkstring(cmdline, (unsigned char *)"CREATE")))
+    {
+        // parameters are
+        // 3D object number (1 to MAX3D
+        // # of vertices = nv
+        // # of faces = nf
+        // vertex structure (nv)
+        // face array (face number, vertex number)
+        // colours array
+        // edge colour index array [nf]
+        // fill colour index array [nf]
+        // centroid structure [nf]
+        // normals structure [nf]
+        MMFLOAT *vertex;
+        TFLOAT tmp;
+        long long int *faces, *facecount, *facecountindex, *colours, *linecolour = NULL, *fillcolour = NULL;
+        getcsargs(&p, 19);
+        if (argc < 17)
+            StandardError(2);
+        int c, colourcount = 0, vp, v, f, fc = 0, n = getint(argv[0], 1, MAX3D);
+        if (struct3d[n] != NULL)
+            error("Object already exists");
+        int nv = getinteger(argv[2]);
+        if (nv < 3)
+            error("3D object must have a minimum of 3 vertices");
+        int nf = getinteger(argv[4]);
+        if (nf < 1)
+            error("3D object must have a minimum of 1 face");
+        int cam = getint(argv[6], 1, MAXCAM);
+        if (parsefloatarray(argv[8], &vertex, 5, 2, NULL, false, NULL) < nv)
+            error("Vertex array too small");
+        if (parseintegerarray(argv[10], &facecount, 6, 1, NULL, false, NULL) < nf)
+            error("Vertex count array too small");
+        facecountindex = facecount;
+        for (f = 0; f < nf; f++)
+            fc += (*facecountindex++);
+        if (parseintegerarray(argv[12], &faces, 7, 1, NULL, false, NULL) < fc)
+            error("Face/vertex array too small");
+        colourcount = parseintegerarray(argv[14], &colours, 8, 1, NULL, false, NULL);
+        if (argc >= 17 && *argv[16])
+        {
+            if (parseintegerarray(argv[16], &linecolour, 9, 1, NULL, false, NULL) < nf)
+                error("Line colour  array too small");
+        }
+
+        if (argc == 19)
+        {
+            if (parseintegerarray(argv[18], &fillcolour, 10, 1, NULL, false, NULL) < nf)
+                error("Fill colour array too small");
+        }
+        // The data look valid so now create the object in memory
+        struct3d[n] = GetMemory(sizeof(struct D3D));
+        struct3d[n]->nf = nf;
+        struct3d[n]->nv = nv;
+        struct3d[n]->current.x = -32767;
+        struct3d[n]->current.y = -32767;
+        struct3d[n]->current.z = -32767;
+        struct3d[n]->xmin = 32767;
+        struct3d[n]->ymin = 32767;
+        struct3d[n]->xmax = -32767;
+        struct3d[n]->ymax = -32767;
+        struct3d[n]->camera = cam;
+        struct3d[n]->q_vertices = NULL;  // array of original vertices
+        struct3d[n]->r_vertices = NULL;  // array of rotated vertices
+        struct3d[n]->q_centroids = NULL; // array of original vertices
+        struct3d[n]->r_centroids = NULL; // array of rotated vertices
+        struct3d[n]->facecount = NULL;   // number of vertices for each face
+        struct3d[n]->facestart = NULL;   // index into the face_x_vert table of the start of a given face
+        struct3d[n]->fill = NULL;        // fill colours
+        struct3d[n]->line = NULL;        // line colours
+        struct3d[n]->colours = NULL;
+        struct3d[n]->face_x_vert = NULL; // list of vertices for each face
+        struct3d[n]->light.x = 0;
+        struct3d[n]->light.y = 0;
+        struct3d[n]->light.z = 0;
+        struct3d[n]->ambient = 0;
+        struct3d[n]->depthmode = 0;
+        struct3d[n]->nonormals = 0;
+        // load up things that have one entry per vertex
+        struct3d[n]->q_vertices = GetMemory(struct3d[n]->nv * sizeof(struct t_quaternion));
+        struct3d[n]->r_vertices = GetMemory(struct3d[n]->nv * sizeof(struct t_quaternion));
+        for (v = 0; v < struct3d[n]->nv; v++)
+        {
+            FLOAT3D m = 0.0;
+            struct3d[n]->q_vertices[v].x = (FLOAT3D)(*vertex++);
+            m += struct3d[n]->q_vertices[v].x * struct3d[n]->q_vertices[v].x;
+            struct3d[n]->q_vertices[v].y = *vertex++;
+            m += struct3d[n]->q_vertices[v].y * struct3d[n]->q_vertices[v].y;
+            struct3d[n]->q_vertices[v].z = *vertex++;
+            m += struct3d[n]->q_vertices[v].z * struct3d[n]->q_vertices[v].z;
+            if (m)
+            {
+                m = sqrt(m);
+                struct3d[n]->q_vertices[v].x = struct3d[n]->q_vertices[v].x / m;
+                struct3d[n]->q_vertices[v].y = struct3d[n]->q_vertices[v].y / m;
+                struct3d[n]->q_vertices[v].z = struct3d[n]->q_vertices[v].z / m;
+                struct3d[n]->q_vertices[v].w = 0.0;
+                struct3d[n]->q_vertices[v].m = m;
+            }
+            else
+            {
+                struct3d[n]->q_vertices[v].x = 0;
+                struct3d[n]->q_vertices[v].y = 0;
+                struct3d[n]->q_vertices[v].z = 0;
+                struct3d[n]->q_vertices[v].w = 0.0;
+                struct3d[n]->q_vertices[v].m = 1.0;
+            }
+            memcpy(&struct3d[n]->r_vertices[v], &struct3d[n]->q_vertices[v], sizeof(s_quaternion));
+        }
+        struct3d[n]->tot_face_x_vert = 0;
+        // load up things that have one entry per face
+        struct3d[n]->vmax = 0;
+        struct3d[n]->facecount = GetMemory(struct3d[n]->nf * sizeof(uint16_t));
+        struct3d[n]->facestart = GetMemory(struct3d[n]->nf * sizeof(uint16_t));
+        struct3d[n]->fill = GetMemory(struct3d[n]->nf * sizeof(uint32_t));
+        struct3d[n]->line = GetMemory(struct3d[n]->nf * sizeof(uint32_t));
+        struct3d[n]->r_centroids = GetMemory(struct3d[n]->nf * sizeof(struct t_quaternion));
+        struct3d[n]->q_centroids = GetMemory(struct3d[n]->nf * sizeof(struct t_quaternion));
+        struct3d[n]->dots = GetMemory(struct3d[n]->nf * sizeof(MMFLOAT));
+        struct3d[n]->depth = GetMemory(struct3d[n]->nf * sizeof(MMFLOAT));
+        struct3d[n]->flags = GetMemory(struct3d[n]->nf * sizeof(uint8_t));
+        struct3d[n]->depthindex = GetMemory(struct3d[n]->nf * sizeof(int));
+        struct3d[n]->normals = GetMemory(struct3d[n]->nf * sizeof(struct SVD));
+        for (f = 0; f < struct3d[n]->nf; f++)
+        {
+            struct3d[n]->facecount[f] = *facecount++;
+            if (struct3d[n]->facecount[f] < 3)
+            {
+                Free3DMemory(n);
+                error("Vertex count less than 3 for face %", f + g_OptionBase);
+            }
+            if (struct3d[n]->facecount[f] > struct3d[n]->vmax)
+                struct3d[n]->vmax = struct3d[n]->facecount[f];
+            struct3d[n]->facestart[f] = struct3d[n]->tot_face_x_vert;
+            struct3d[n]->tot_face_x_vert += struct3d[n]->facecount[f];
+        }
+        // load up the array that holds all the face vertex information
+        struct3d[n]->face_x_vert = GetMemory(struct3d[n]->tot_face_x_vert * sizeof(uint16_t)); // allocate memory for the list of vertices per face
+        struct3d[n]->colours = GetMemory(colourcount * sizeof(uint32_t));
+        for (c = 0; c < colourcount; c++)
+        {
+            struct3d[n]->colours[c] = (uint32_t)*colours++;
+        }
+        for (f = 0; f < struct3d[n]->tot_face_x_vert; f++)
+        {
+            struct3d[n]->face_x_vert[f] = *faces++;
+        }
+        for (f = 0; f < struct3d[n]->nf; f++)
+        {
+            if (linecolour != NULL)
+            {
+                int index = (*linecolour++) - g_OptionBase;
+                if (index >= colourcount || index < 0)
+                {
+                    Free3DMemory(n);
+                    error("Edge colour Index %", index);
+                }
+                struct3d[n]->line[f] = struct3d[n]->colours[index];
+            }
+            else
+                struct3d[n]->line[f] = gui_fcolour;
+            if (fillcolour != NULL)
+            {
+                int index = (*fillcolour++) - g_OptionBase;
+                if (index >= colourcount || index < 0)
+                {
+                    Free3DMemory(n);
+                    error("Fill colour Index %", index);
+                }
+                struct3d[n]->fill[f] = struct3d[n]->colours[index];
+            }
+            else
+                struct3d[n]->fill[f] = 0xFFFFFFFF;
+            FLOAT3D x = 0, y = 0, z = 0, scale;
+            vp = struct3d[n]->facestart[f];
+            // calculate the centroids of each face
+
+            for (v = 0; v < struct3d[n]->facecount[f]; v++)
+            {
+                tmp = struct3d[n]->q_vertices[struct3d[n]->face_x_vert[vp + v]].m;
+                x += struct3d[n]->q_vertices[struct3d[n]->face_x_vert[vp + v]].x * tmp;
+                y += struct3d[n]->q_vertices[struct3d[n]->face_x_vert[vp + v]].y * tmp;
+                z += struct3d[n]->q_vertices[struct3d[n]->face_x_vert[vp + v]].z * tmp;
+            }
+            x /= (FLOAT3D)struct3d[n]->facecount[f];
+            y /= (FLOAT3D)struct3d[n]->facecount[f];
+            z /= (FLOAT3D)struct3d[n]->facecount[f];
+            struct3d[n]->q_centroids[f].x = x;
+            struct3d[n]->q_centroids[f].y = y;
+            struct3d[n]->q_centroids[f].z = z;
+            scale = sqrt(struct3d[n]->q_centroids[f].x * struct3d[n]->q_centroids[f].x +
+                         struct3d[n]->q_centroids[f].y * struct3d[n]->q_centroids[f].y +
+                         struct3d[n]->q_centroids[f].z * struct3d[n]->q_centroids[f].z);
+            struct3d[n]->q_centroids[f].x /= scale;
+            struct3d[n]->q_centroids[f].y /= scale;
+            struct3d[n]->q_centroids[f].z /= scale;
+            struct3d[n]->q_centroids[f].m = scale;
+            struct3d[n]->q_centroids[f].w = 0;
+            memcpy(&struct3d[n]->r_centroids[f], &struct3d[n]->q_centroids[f], sizeof(s_quaternion));
+        }
+        return;
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"DIAGNOSE")))
+    {
+        getcsargs(&p, 9);
+        if (argc < 7)
+            StandardError(2);
+        int n = getint(argv[0], 1, MAX3D);
+        int x = getint(argv[2], -32766, 32766);
+        int y = getint(argv[4], -32766, 32766);
+        int z = getinteger(argv[6]);
+        int sort = 1;
+        if (argc == 9)
+            sort = getint(argv[8], 0, 1);
+        if (struct3d[n] == NULL)
+            StandardErrorParam(7, n);
+        if (camera[struct3d[n]->camera].viewplane == -32767)
+            error("Camera position not defined");
+        diagnose3d(n, x, y, z, sort);
+        return;
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"LIGHT")))
+    {
+        getcsargs(&p, 9);
+        if (argc != 9)
+            StandardError(2);
+        int n = getint(argv[0], 1, MAX3D);
+        struct3d[n]->light.x = getint(argv[2], -32766, 32766);
+        struct3d[n]->light.y = getint(argv[4], -32766, 32766);
+        struct3d[n]->light.z = getint(argv[6], -32766, 32766);
+        struct3d[n]->ambient = (FLOAT3D)(getint(argv[8], 0, 100)) / 100.0;
+        return;
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"SHOW")))
+    {
+        getcsargs(&p, 11);
+        if (argc < 7)
+            StandardError(2);
+        int n = getint(argv[0], 1, MAX3D);
+        int x = getint(argv[2], -32766, 32766);
+        int y = getint(argv[4], -32766, 32766);
+        int z = getinteger(argv[6]);
+        int nonormals = 0;
+        int depthmode = 0;
+        if (argc >= 9 && *argv[8])
+            nonormals = getint(argv[8], 0, 1);
+        if (argc == 11)
+            depthmode = getint(argv[10], 0, 1);
+        if (struct3d[n] == NULL)
+            StandardErrorParam(7, n);
+        if (camera[struct3d[n]->camera].viewplane == -32767)
+            error("Camera position not defined");
+        display3d(n, x, y, z, 1, nonormals, depthmode);
+        return;
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"SET FLAGS")))
+    {
+        int i, face, nbr;
+        getcsargs(&p, ((MAX_ARG_COUNT - 1) * 2) - 1);
+        if ((argc & 0b11) != 0b11)
+            SyntaxError();
+        int n = getint(argv[0], 1, MAX3D);
+        int flag = getint(argv[2], 0, 255);
+        // step over the equals sign and get the value for the assignment
+        for (i = 4; i < argc; i += 4)
+        {
+            face = getinteger(argv[i]);
+            nbr = getinteger(argv[i + 2]);
+
+            if (nbr <= 0 || nbr > struct3d[n]->nf - face)
+                SyntaxError();
+
+            while (--nbr >= 0)
+            {
+                struct3d[n]->flags[face + nbr] = flag;
+            }
+        }
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"ROTATE")))
+    {
+        int i, n, v, f;
+        s_quaternion q1;
+        MMFLOAT *q = NULL;
+        getcsargs(&p, (MAX_ARG_COUNT * 2) - 1); // macro must be the first executable stmt in a block
+        if ((argc & 0x01 || argc < 3) == 0)
+            StandardError(2);
+        if (parsefloatarray(argv[0], &q, 1, 1, NULL, true, NULL) != 5)
+            StandardErrorParam(41, 1);
+        q1.w = (FLOAT3D)(*q++);
+        q1.x = (FLOAT3D)(*q++);
+        q1.y = (FLOAT3D)(*q++);
+        q1.z = (FLOAT3D)(*q++);
+        q1.m = (FLOAT3D)(*q);
+        for (i = 2; i < argc; i += 2)
+        {
+            n = getint(argv[i], 1, MAX3D);
+            if (struct3d[n] == NULL)
+                StandardErrorParam(7, n);
+            for (v = 0; v < struct3d[n]->nv; v++)
+            {
+                q_rotate(&struct3d[n]->q_vertices[v], q1, &struct3d[n]->r_vertices[v]);
+            }
+            for (f = 0; f < struct3d[n]->nf; f++)
+            {
+                q_rotate(&struct3d[n]->q_centroids[f], q1, &struct3d[n]->r_centroids[f]);
+            }
+        }
+        return;
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"HIDE ALL")))
+    {
+        for (int i = 1; i <= MAX3D; i++)
+        {
+            if (struct3d[i] != NULL && struct3d[i]->xmin != 32767)
+            {
+                DrawRectangle(struct3d[i]->xmin, struct3d[i]->ymin, struct3d[i]->xmax, struct3d[i]->ymax, 0);
+                struct3d[i]->xmin = 32767;
+                struct3d[i]->ymin = 32767;
+                struct3d[i]->xmax = -32767;
+                struct3d[i]->ymax = -32767;
+            }
+        }
+        return;
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"RESET")))
+    {
+        int i, n;
+        int v, f;
+        getcsargs(&p, (MAX_ARG_COUNT * 2) - 1); // macro must be the first executable stmt in a block
+        if ((argc & 0x01 || argc < 3) == 0)
+            StandardError(2);
+        for (i = 0; i < argc; i += 2)
+        {
+            n = getint(argv[i], 1, MAX3D);
+            for (v = 0; v < struct3d[n]->nv; v++)
+            {
+                memcpy(&struct3d[n]->q_vertices[v], &struct3d[n]->r_vertices[v], sizeof(s_quaternion));
+            }
+            for (f = 0; f < struct3d[n]->nf; f++)
+            {
+                memcpy(&struct3d[n]->q_centroids[f], &struct3d[n]->r_centroids[f], sizeof(s_quaternion));
+            }
+        }
+        return;
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"HIDE")))
+    {
+        int i, n;
+        getcsargs(&p, (MAX_ARG_COUNT * 2) - 1); // macro must be the first executable stmt in a block
+        if ((argc & 0x01 || argc < 3) == 0)
+            StandardError(2);
+        for (i = 0; i < argc; i += 2)
+        {
+            n = getint(argv[i], 1, MAX3D);
+            if (struct3d[n] == NULL)
+                StandardErrorParam(7, n);
+            if (struct3d[n]->xmin == 32767)
+                return;
+            DrawRectangle(struct3d[n]->xmin, struct3d[n]->ymin, struct3d[n]->xmax, struct3d[n]->ymax, 0);
+            struct3d[n]->xmin = 32767;
+            struct3d[n]->ymin = 32767;
+            struct3d[n]->xmax = -32767;
+            struct3d[n]->ymax = -32767;
+        }
+        return;
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"RESTORE")))
+    {
+        int i, n;
+        getcsargs(&p, (MAX_ARG_COUNT * 2) - 1); // macro must be the first executable stmt in a block
+        if ((argc & 0x01 || argc < 3) == 0)
+            StandardError(2);
+        for (i = 0; i < argc; i += 2)
+        {
+            n = getint(argv[i], 1, MAX3D);
+            if (struct3d[n] == NULL)
+                StandardErrorParam(7, n);
+            if (struct3d[n]->xmin != 32767)
+                error("Object % is not hidden", n);
+            display3d(n, struct3d[n]->current.x, struct3d[n]->current.y, struct3d[n]->current.z, 1, struct3d[n]->nonormals, struct3d[n]->depthmode);
+        }
+        return;
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"WRITE")))
+    {
+        getcsargs(&p, 11);
+        if (argc < 7)
+            StandardError(2);
+        int n = getint(argv[0], 1, MAX3D);
+        int x = getint(argv[2], -32766, 32766);
+        int y = getint(argv[4], -32766, 32766);
+        int z = getinteger(argv[6]);
+        int nonormals = 0;
+        int depthmode = 0;
+        if (argc >= 9 && *argv[8])
+            nonormals = getint(argv[8], 0, 1);
+        if (argc == 11)
+            depthmode = getint(argv[10], 0, 1);
+        if (struct3d[n] == NULL)
+            StandardErrorParam(7, n);
+        if (camera[struct3d[n]->camera].viewplane == -32767)
+            error("Camera position not defined");
+        display3d(n, x, y, z, 0, nonormals, depthmode);
+        return;
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"CLOSE ALL")))
+    {
+        closeall3d();
+        return;
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"CLOSE")))
+    {
+        int i, n;
+        getcsargs(&p, (MAX_ARG_COUNT * 2) - 1); // macro must be the first executable stmt in a block
+        if ((argc & 0x01 || argc < 3) == 0)
+            StandardError(2);
+        for (i = 0; i < argc; i += 2)
+        {
+            n = getint(argv[i], 1, MAX3D);
+            if (struct3d[n] == NULL)
+                StandardErrorParam(7, n);
+            if (struct3d[n]->xmin != 32767)
+                DrawRectangle(struct3d[n]->xmin, struct3d[n]->ymin, struct3d[n]->xmax, struct3d[n]->ymax, 0);
+            Free3DMemory(n);
+        }
+        return;
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"CAMERA")))
+    {
+        getcsargs(&p, 11);
+        if (argc < 3)
+            StandardError(2);
+        int n = getint(argv[0], 1, MAXCAM);
+        camera[n].viewplane = getnumber(argv[2]);
+        camera[n].x = (FLOAT3D)0;
+        camera[n].y = (FLOAT3D)0;
+        camera[n].panx = (FLOAT3D)0;
+        camera[n].pany = (FLOAT3D)0;
+        camera[n].z = 0.0;
+        if (argc >= 5 && *argv[4])
+            camera[n].x = getnumber(argv[4]);
+        if (camera[n].x > 32766 || camera[n].x < -32766)
+            error("Valid is -32766 to 32766");
+        if (argc >= 7 && *argv[6])
+            camera[n].y = getnumber(argv[6]);
+        if (camera[n].y > 32766 || camera[n].x < -32766)
+            error("Valid is -32766 to 32766");
+        if (argc >= 9 && *argv[8])
+            camera[n].panx = getint(argv[8], -32766 - camera[n].x, 32766 - camera[n].x);
+        if (argc == 11)
+            camera[n].pany = getint(argv[10], -32766 - camera[n].y, 32766 - camera[n].y);
+        return;
+    }
+    else
+    {
+        SyntaxError();
+        ;
+    }
+}
+void MIPS16 fun_3D(void)
+{
+    unsigned char *p;
+    if ((p = checkstring(ep, (unsigned char *)"XMIN")))
+    {
+        getcsargs(&p, 1);
+        int n = getint(argv[0], 1, MAX3D);
+        if (struct3d[n] == NULL)
+            StandardErrorParam(7, n);
+        fret = struct3d[n]->xmin;
+    }
+    else if ((p = checkstring(ep, (unsigned char *)"XMAX")))
+    {
+        getcsargs(&p, 1);
+        int n = getint(argv[0], 1, MAX3D);
+        if (struct3d[n] == NULL)
+            StandardErrorParam(7, n);
+        fret = struct3d[n]->xmax;
+    }
+    else if ((p = checkstring(ep, (unsigned char *)"YMIN")))
+    {
+        getcsargs(&p, 1);
+        int n = getint(argv[0], 1, MAX3D);
+        if (struct3d[n] == NULL)
+            StandardErrorParam(7, n);
+        fret = struct3d[n]->ymin;
+    }
+    else if ((p = checkstring(ep, (unsigned char *)"YMAX")))
+    {
+        getcsargs(&p, 1);
+        int n = getint(argv[0], 1, MAX3D);
+        if (struct3d[n] == NULL)
+            StandardErrorParam(7, n);
+        fret = struct3d[n]->ymax;
+    }
+    else if ((p = checkstring(ep, (unsigned char *)"X")))
+    {
+        getcsargs(&p, 1);
+        int n = getint(argv[0], 1, MAX3D);
+        if (struct3d[n] == NULL)
+            StandardErrorParam(7, n);
+        fret = struct3d[n]->current.x;
+    }
+    else if ((p = checkstring(ep, (unsigned char *)"Y")))
+    {
+        getcsargs(&p, 1);
+        int n = getint(argv[0], 1, MAX3D);
+        if (struct3d[n] == NULL)
+            StandardErrorParam(7, n);
+        fret = struct3d[n]->current.y;
+    }
+    else if ((p = checkstring(ep, (unsigned char *)"DISTANCE")))
+    {
+        getcsargs(&p, 1);
+        int n = getint(argv[0], 1, MAX3D);
+        if (struct3d[n] == NULL)
+            StandardErrorParam(7, n);
+        fret = struct3d[n]->distance;
+    }
+    else if ((p = checkstring(ep, (unsigned char *)"Z")))
+    {
+        getcsargs(&p, 1);
+        int n = getint(argv[0], 1, MAX3D);
+        if (struct3d[n] == NULL)
+            StandardErrorParam(7, n);
+        fret = struct3d[n]->current.z;
+    }
+    else
+        SyntaxError();
+    ;
+    targ = T_NBR;
+}
+/*
+ * @cond
+ * The following section will be excluded from the documentation.
+ */
+
+#endif
+#ifdef PICOMITEVGA
+void closeframebuffer(char layer)
+{
+    if (layer == 'A')
+        WriteBuf = DisplayBuf;
+    if (FrameBuf != DisplayBuf && (layer == 'A' || layer == 'F'))
+    {
+        if (WriteBuf == FrameBuf)
+            WriteBuf = DisplayBuf;
+        switch (DISPLAY_TYPE)
+        {
+        case SCREENMODE1:
+        case SCREENMODE2:
+#ifdef rp2350
+            if (ScreenSize < framebuffersize / 3)
+                FrameBuf = DisplayBuf;
+            else
+                FreeMemory((void *)FrameBuf);
+#else
+            FreeMemory((void *)FrameBuf);
+#endif
+            break;
+#ifdef rp2350
+        case SCREENMODE3:
+            FreeMemory((void *)FrameBuf);
+            break;
+#ifdef HDMI
+        case SCREENMODE4:
+        case SCREENMODE5:
+            FreeMemory((void *)FrameBuf);
+            break;
+#endif
+#endif
+        }
+    }
+    if (LayerBuf != DisplayBuf && (layer == 'A' || layer == 'L'))
+    {
+        if (WriteBuf == LayerBuf)
+            WriteBuf = DisplayBuf;
+        volatile unsigned char *temp = LayerBuf;
+        switch (DISPLAY_TYPE)
+        {
+        case SCREENMODE2:
+            transparent = 0;
+        case SCREENMODE1:
+#ifdef rp2350
+            if (ScreenSize < framebuffersize / 2)
+                LayerBuf = DisplayBuf;
+            else
+            {
+                LayerBuf = DisplayBuf;
+                FreeMemory((void *)temp);
+            }
+#else
+            LayerBuf = DisplayBuf;
+            FreeMemory((void *)temp);
+#endif
+            break;
+#ifdef rp2350
+        case SCREENMODE3:
+            LayerBuf = DisplayBuf;
+            FreeMemory((void *)temp);
+            break;
+#ifdef HDMI
+        case SCREENMODE4:
+            LayerBuf = DisplayBuf;
+            FreeMemory((void *)temp);
+            break;
+        case SCREENMODE5:
+            LayerBuf = DisplayBuf;
+            transparent = 0;
+            break;
+#endif
+#endif
+        }
+    }
+    if (SecondFrame != DisplayBuf && (layer == 'A' || layer == '2'))
+    {
+        FreeMemory((void *)SecondFrame);
+    }
+    if (SecondLayer != DisplayBuf && (layer == 'A' || layer == 'T'))
+    {
+        if (WriteBuf == LayerBuf)
+            WriteBuf = DisplayBuf;
+        volatile unsigned char *temp = SecondLayer;
+        switch (DISPLAY_TYPE)
+        {
+        case SCREENMODE2:
+            transparents = 0;
+            SecondLayer = DisplayBuf;
+            break;
+        case SCREENMODE1:
+            SecondLayer = DisplayBuf;
+            FreeMemory((void *)temp);
+            break;
+#ifdef rp2350
+        case SCREENMODE3:
+            SecondLayer = DisplayBuf;
+            FreeMemory((void *)temp);
+            break;
+#ifdef HDMI
+        case SCREENMODE4:
+            SecondLayer = DisplayBuf;
+            FreeMemory((void *)temp);
+            break;
+        case SCREENMODE5:
+            SecondLayer = DisplayBuf;
+            transparents = 0;
+            break;
+#endif
+#endif
+        }
+    }
+    WriteBuf = (unsigned char *)FRAMEBUFFER;
+    DisplayBuf = (unsigned char *)FRAMEBUFFER;
+    LayerBuf = (unsigned char *)FRAMEBUFFER;
+    FrameBuf = (unsigned char *)FRAMEBUFFER;
+    SecondLayer = (unsigned char *)FRAMEBUFFER;
+    SecondFrame = (unsigned char *)FRAMEBUFFER;
+    transparent = 0;
+}
+/*  @endcond */
+
+void cmd_framebuffer(void)
+{
+    /*
+    RP2040 version support just modes 1 and 2
+    RP2350 vversions support modes 1 to 5
+    All modes can have a framebuffer and a layer buffer but only modes 2 and 5 automatically display the layer buffer over the top of the main display
+    In all other cases it is just another framebuffer that can be used to build up images to be copied to the main display
+    For VGA/HDMI Layer buffers and framebuffers have exactly the same resolution as the main display (unlike TFT displays)
+    For RP2350 Modes 1 and 2 both buffers are in the allocated Video Memory (640x240 bytes == 320x240x2)
+    For RP2350 Mode 5 the layer buffer is in the allocated video memory
+    All other buffers are allocated out of variable space using GetMemory
+    NB: for RP2350 with PSRAM buffers may be allocated in the slower external memory
+    Buffer sizes are:
+    Normal:
+        #define MODE1SIZE_S  VMaxH*VMaxV/8
+        #define MODE2SIZE_S  320*240/2
+        #define MODE3SIZE_S  VMaxH*VMaxV/2
+        #define MODE4SIZE_S  320*240*2
+        #define MODE5SIZE_S  320*240
+
+    Widescreen:
+        #define MODE1SIZE_W  1280 *720 /8
+        #define MODE2SIZE_W  (1280/4) * (720/4)/2
+        #define MODE3SIZE_W  (1280/2) * (720/2)/2
+        #define MODE5SIZE_W  (1280/4) * (720/4)
+
+    XGA:
+        #define MODE1SIZE_W  `1024 *768 /8
+        #define MODE2SIZE_W  (1024/4) * (768/4)/2
+        #define MODE3SIZE_W  (1024/2) * (768/2)/2
+        #define MODE5SIZE_W  (1024/4) * (768/4)
+
+    */
+    unsigned char *p;
+#ifdef rp2350
+    if ((p = checkstring(cmdline, (unsigned char *)"CREATE 2")))
+    {
+        int colour = 0;
+        if (SecondFrame == DisplayBuf)
+        {
+            getcsargs(&p, 1);
+            switch (DISPLAY_TYPE)
+            {
+            case SCREENMODE2:
+            case SCREENMODE1:
+                SecondFrame = GetMemory(ScreenSize);
+                break;
+#ifdef rp2350
+            case SCREENMODE3:
+                SecondFrame = GetMemory(ScreenSize);
+                break;
+#ifdef HDMI
+            case SCREENMODE4:
+                SecondFrame = GetMemory(ScreenSize);
+                break;
+            case SCREENMODE5:
+                SecondFrame = GetMemory(ScreenSize);
+                break;
+#endif
+#endif
+            }
+        }
+        else
+            error("Framebuffer 2 already exists");
+        memset((void *)SecondFrame, colour, ScreenSize);
+    }
+    else
+#endif
+        if ((p = checkstring(cmdline, (unsigned char *)"CREATE")))
+    {
+        if (FrameBuf == DisplayBuf)
+        {
+            switch (DISPLAY_TYPE)
+            {
+            case SCREENMODE1:
+            case SCREENMODE2:
+#ifdef rp2350
+                if (ScreenSize < framebuffersize / 3)
+                    FrameBuf = DisplayBuf + 2 * ScreenSize;
+                else
+                    FrameBuf = GetMemory(ScreenSize);
+#else
+                FrameBuf = GetMemory(ScreenSize);
+#endif
+                break;
+#ifdef rp2350
+            case SCREENMODE3:
+                FrameBuf = GetMemory(ScreenSize);
+                break;
+#ifdef HDMI
+            case SCREENMODE4:
+            case SCREENMODE5:
+                FrameBuf = GetMemory(ScreenSize);
+                break;
+#endif
+#endif
+            }
+        }
+        else
+            error("Framebuffer already exists");
+        memset((void *)FrameBuf, 0, ScreenSize);
+
+#ifdef rp2350
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"LAYER TOP")))
+    {
+        int colour = 0;
+        if (SecondLayer == DisplayBuf)
+        {
+            getcsargs(&p, 1);
+            switch (DISPLAY_TYPE)
+            {
+            case SCREENMODE2:
+                if (argc == 1)
+                    transparents = getint(argv[0], 0, 15);
+                colour = transparents | (transparents << 4);
+                if (ScreenSize < framebuffersize / 4)
+                    SecondLayer = DisplayBuf + 3 * ScreenSize;
+                else
+                    SecondLayer = GetMemory(ScreenSize);
+                break;
+            case SCREENMODE1:
+                SecondLayer = GetMemory(ScreenSize);
+                break;
+            case SCREENMODE3:
+                if (argc == 1)
+                    transparents = getint(argv[0], 0, 15);
+                SecondLayer = GetMemory(ScreenSize);
+                if (SecondLayer >= (uint8_t *)PSRAMbase && SecondLayer < (uint8_t *)(PSRAMbase + 1024 * 1024 * 16))
+                {
+                    FreeMemory((void *)SecondLayer);
+                    error("Second Layer must be in tightly coupled RAM, declare before other variables");
+                }
+                colour = transparents | (transparents << 4);
+                break;
+#ifdef HDMI
+            case SCREENMODE4:
+                SecondLayer = GetMemory(ScreenSize);
+                break;
+            case SCREENMODE5:
+                SecondLayer = GetMemory(ScreenSize);
+                if (SecondLayer >= (uint8_t *)PSRAMbase && SecondLayer < (uint8_t *)(PSRAMbase + 1024 * 1024 * 16))
+                {
+                    FreeMemory((void *)SecondLayer);
+                    error("Second Layer must be in tightly coupled RAM, declare before other variables");
+                }
+                if (argc == 1)
+                    transparents = getint(argv[0], 0, 255);
+                colour = transparents;
+                break;
+#endif
+            }
+        }
+        else
+            error("Framebuffer already exists");
+        memset((void *)SecondLayer, colour, ScreenSize);
+#endif
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"LAYER")))
+    {
+        int colour = 0;
+        if (LayerBuf == DisplayBuf)
+        {
+            getcsargs(&p, 1);
+            switch (DISPLAY_TYPE)
+            {
+            case SCREENMODE2:
+                if (argc == 1)
+                    transparent = getint(argv[0], 0, 15);
+                colour = transparent | (transparent << 4);
+            case SCREENMODE1:
+#ifdef rp2350
+                if (ScreenSize < framebuffersize / 2)
+                    LayerBuf = DisplayBuf + ScreenSize;
+                else
+                    LayerBuf = GetMemory(ScreenSize);
+#else
+                LayerBuf = GetMemory(ScreenSize);
+#endif
+                break;
+#ifdef rp2350
+            case SCREENMODE3:
+                if (argc == 1)
+                    transparent = getint(argv[0], 0, 15);
+                LayerBuf = GetMemory(ScreenSize);
+                colour = transparent | (transparent << 4);
+                break;
+#ifdef HDMI
+            case SCREENMODE4:
+                LayerBuf = GetMemory(ScreenSize);
+                if (argc == 1)
+                    RGBtransparent = RGB555(getColour((char *)argv[0], 0));
+                else
+                    RGBtransparent = 0;
+                break;
+            case SCREENMODE5:
+                if (ScreenSize < framebuffersize / 2)
+                    LayerBuf = DisplayBuf + ScreenSize;
+                else
+                    LayerBuf = GetMemory(ScreenSize);
+                if (argc == 1)
+                    transparent = getint(argv[0], 0, 255);
+                colour = transparent;
+                break;
+#endif
+#endif
+            }
+#ifdef rp2350
+            if (LayerBuf > (uint8_t *)PSRAMbase && LayerBuf < (uint8_t *)(PSRAMbase + 1024 * 1024 * 16))
+            {
+                FreeMemory((void *)LayerBuf);
+                error("Layer Buffer must be in tightly coupled RAM, declare before other variables");
+            }
+#endif
+        }
+        else
+            error("Framebuffer already exists");
+        if (DISPLAY_TYPE != SCREENMODE4)
+            memset((void *)LayerBuf, colour, ScreenSize);
+        else
+        {
+            uint16_t *p = (uint16_t *)LayerBuf;
+            for (int i = 0; i < HRes * VRes; i++)
+                *p++ = RGBtransparent;
+        }
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"CLOSE")))
+    {
+        if (checkstring(p, (unsigned char *)"F"))
+        {
+            closeframebuffer('F');
+        }
+        else if (checkstring(p, (unsigned char *)"L"))
+        {
+            closeframebuffer('T');
+#ifdef rp2350
+        }
+        else if (checkstring(p, (unsigned char *)"T"))
+        {
+            closeframebuffer('L');
+        }
+        else if (checkstring(p, (unsigned char *)"2"))
+        {
+            closeframebuffer('2');
+#endif
+        }
+        else
+            closeframebuffer('A');
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"WRITE")))
+    {
+        if (checkstring(p, (unsigned char *)"N"))
+            WriteBuf = DisplayBuf;
+        else if (checkstring(p, (unsigned char *)"L"))
+        {
+            if (LayerBuf == DisplayBuf)
+                error("Layer not created");
+            WriteBuf = LayerBuf;
+        }
+#ifdef rp2350
+        else if (checkstring(p, (unsigned char *)"T"))
+        {
+            if (SecondLayer == DisplayBuf)
+                error("Layer 2 not created");
+            WriteBuf = SecondLayer;
+        }
+        else if (checkstring(p, (unsigned char *)"2"))
+        {
+            if (SecondFrame == DisplayBuf)
+                error("Frame 2 not created");
+            WriteBuf = SecondFrame;
+        }
+#endif
+        else if (checkstring(p, (unsigned char *)"F"))
+        {
+            if (FrameBuf == DisplayBuf)
+                StandardError(38);
+            WriteBuf = FrameBuf;
+        }
+        else
+        {
+            getcsargs(&p, 1);
+            char *q = (char *)getCstring(argv[0]);
+            if (strcasecmp(q, "N") == 0)
+                WriteBuf = DisplayBuf;
+            else if (strcasecmp(q, "L") == 0)
+            {
+                if (LayerBuf == DisplayBuf)
+                    error("Layer not created");
+                WriteBuf = LayerBuf;
+            }
+            else if (strcasecmp(q, "F") == 0)
+            {
+                if (FrameBuf == DisplayBuf)
+                    StandardError(38);
+                WriteBuf = FrameBuf;
+            }
+            else if (strcasecmp(q, "2") == 0)
+            {
+                if (SecondFrame == DisplayBuf)
+                    error("Frame buffer 2 not created");
+                WriteBuf = SecondFrame;
+            }
+            else if (strcasecmp(q, "T") == 0)
+            {
+                if (SecondLayer == DisplayBuf)
+                    error("Layer Top not created");
+                WriteBuf = SecondLayer;
+            }
+            else
+                SyntaxError();
+            ;
+        }
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"WAIT")))
+    {
+#ifdef HDMI
+        while (v_scanline != 0)
+        {
+        }
+#else
+        while (QVgaScanLine != 0)
+        {
+        }
+#endif
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"COPY")))
+    {
+        getcsargs(&p, 5);
+        if (!(argc == 3 || argc == 5))
+            SyntaxError();
+        ;
+        volatile uint8_t *s = NULL, *d = NULL;
+        if (checkstring(argv[0], (unsigned char *)"N"))
+            s = DisplayBuf;
+        else if (checkstring(argv[0], (unsigned char *)"L"))
+            s = LayerBuf;
+        else if (checkstring(argv[0], (unsigned char *)"F"))
+            s = FrameBuf;
+        else if (checkstring(argv[0], (unsigned char *)"2"))
+            s = SecondFrame;
+        else if (checkstring(argv[0], (unsigned char *)"T"))
+            s = SecondLayer;
+        else
+            SyntaxError();
+        ;
+        if (checkstring(argv[2], (unsigned char *)"N"))
+            d = DisplayBuf;
+        else if (checkstring(argv[2], (unsigned char *)"L"))
+            d = LayerBuf;
+        else if (checkstring(argv[2], (unsigned char *)"F"))
+            d = FrameBuf;
+        else if (checkstring(argv[2], (unsigned char *)"2"))
+            d = SecondFrame;
+        else if (checkstring(argv[2], (unsigned char *)"T"))
+            d = SecondLayer;
+        else
+            SyntaxError();
+        ;
+        if (argc == 5)
+        {
+            if (checkstring(argv[4], (unsigned char *)"B"))
+            {
+#ifdef HDMI
+                while (v_scanline != 0)
+                {
+                }
+#else
+                while (QVgaScanLine != 0)
+                {
+                }
+#endif
+            }
+            else
+                SyntaxError();
+            ;
+        }
+        if (d != s)
+            //            #ifdef rp2350
+            //                _Z10copy_wordsPKmPmm((uint32_t *)s, (uint32_t *)d, ScreenSize>>2);
+            //            #else
+            memcpy((void *)d, (void *)s, ScreenSize);
+        //            #endif
+        else
+            error("Buffer not created");
+    }
+    else
+        SyntaxError();
+    ;
+}
+#endif
+
+// Define your screen bounds here
+#define SCREEN_WIDTH HRes
+#define SCREEN_HEIGHT VRes
+
+// Stack structure for flood fill with dynamic block allocation
+#define BLOCK_SIZE_ENTRIES 256
+
+#define STACK_BLOCK_SIZE 256 // Entries per block
+
+typedef struct
+{
+    int x;
+    int y;
+} Point;
+
+typedef struct StackBlock
+{
+    Point data[STACK_BLOCK_SIZE];
+    struct StackBlock *next;
+    struct StackBlock *prev;
+} StackBlock;
+
+typedef struct
+{
+    StackBlock *first_block;
+    StackBlock *current_block;
+    int current_ptr;   // Index within current block (0 to STACK_BLOCK_SIZE-1)
+    int total_entries; // Total number of entries across all blocks
+} FloodStack;
+
+// Stack operations with dynamic block allocation
+static bool init_stack(FloodStack *s)
+{
+    s->first_block = (StackBlock *)GetMemory(sizeof(StackBlock));
+    if (s->first_block == NULL)
+    {
+        return false;
+    }
+    s->first_block->next = NULL;
+    s->first_block->prev = NULL;
+    s->current_block = s->first_block;
+    s->current_ptr = 0;
+    s->total_entries = 0;
+    return true;
+}
+
+static void free_stack(FloodStack *s)
+{
+    if (s->first_block == NULL)
+    {
+        return;
+    }
+    StackBlock *block = s->first_block;
+    while (block != NULL)
+    {
+        StackBlock *next = block->next;
+        void *ptr = (void *)block;
+        FreeMemorySafe(&ptr);
+        block = next;
+    }
+    s->first_block = NULL;
+    s->current_block = NULL;
+}
+
+static bool push(FloodStack *s, int x, int y)
+{
+    // Check if current block is full
+    if (s->current_ptr >= STACK_BLOCK_SIZE)
+    {
+        // Allocate a new block
+        StackBlock *new_block = (StackBlock *)GetMemory(sizeof(StackBlock));
+        if (new_block == NULL)
+        {
+            return false; // Out of memory
+        }
+
+        // Link the new block
+        new_block->next = NULL;
+        new_block->prev = s->current_block;
+        s->current_block->next = new_block;
+
+        // Move to the new block
+        s->current_block = new_block;
+        s->current_ptr = 0;
+    }
+
+    // Add entry to current block
+    s->current_block->data[s->current_ptr].x = x;
+    s->current_block->data[s->current_ptr].y = y;
+    s->current_ptr++;
+    s->total_entries++;
+    return true;
+}
+
+static bool pop(FloodStack *s, int *x, int *y)
+{
+    // Check if stack is empty
+    if (s->total_entries == 0)
+    {
+        return false;
+    }
+
+    // If current block is empty, move to previous block
+    if (s->current_ptr == 0)
+    {
+        // Must have a previous block if total_entries > 0
+        if (s->current_block->prev == NULL)
+        {
+            // This should never happen if total_entries is correct
+            return false;
+        }
+
+        // Move to previous block
+        s->current_block = s->current_block->prev;
+        s->current_ptr = STACK_BLOCK_SIZE;
+    }
+
+    // Pop from current block
+    s->current_ptr--;
+    *x = s->current_block->data[s->current_ptr].x;
+    *y = s->current_block->data[s->current_ptr].y;
+    s->total_entries--;
+    return true;
+}
+
+// Read a scanline segment efficiently
+static void read_scanline(int x_start, int x_end, int y, unsigned char *buffer)
+{
+    ReadBuffer(x_start, y, x_end, y, buffer);
+}
+
+// Get color from buffer
+// ReadBuffer returns pixels in B,G,R order (little endian RGB888)
+static inline uint32_t get_color_from_buffer(unsigned char *buffer, int index)
+{
+    int idx = index * 3;
+    uint32_t b = buffer[idx];
+    uint32_t g = buffer[idx + 1];
+    uint32_t r = buffer[idx + 2];
+    return (r << 16) | (g << 8) | b;
+}
+
+// Set color in buffer
+// DrawBuffer expects pixels in B,G,R order (little endian RGB888)
+static inline void set_color_in_buffer(unsigned char *buffer, int index, uint32_t color)
+{
+    int idx = index * 3;
+    buffer[idx] = color & 0xFF;             // B
+    buffer[idx + 1] = (color >> 8) & 0xFF;  // G
+    buffer[idx + 2] = (color >> 16) & 0xFF; // R
+}
+
+// Scanline flood fill algorithm with block reading
+// Supports two modes:
+// 1. Replace mode: if boundary_colour == -1, replace all pixels matching color at (x,y) with internal_colour
+// 2. Boundary mode: if boundary_colour != -1, fill with internal_colour up to boundary_colour
+void floodfill(int x, int y, int internal_colour, int boundary_colour)
+{
+    // Determine which mode we're in
+    bool boundary_mode = (boundary_colour != -1);
+
+    // internal_colour must always be valid (not -1)
+    if (internal_colour == -1)
+    {
+        return; // Invalid: must specify fill color
+    }
+
+    uint32_t c_new = (uint32_t)internal_colour;
+
+    // Bounds check
+    if (x < 0 || x >= SCREEN_WIDTH || y < 0 || y >= SCREEN_HEIGHT)
+    {
+        return;
+    }
+
+    // Initialize dynamic stack
+    FloodStack stack;
+    if (!init_stack(&stack))
+    {
+        return; // Memory allocation failed
+    }
+
+    // Allocate buffer for scanline reads (one full row)
+    unsigned char *line_buffer = (unsigned char *)GetMemory(SCREEN_WIDTH * 3);
+    if (line_buffer == NULL)
+    {
+        free_stack(&stack);
+        return; // Memory allocation failed
+    }
+
+    // Allocate persistent buffers for checking adjacent lines
+    unsigned char *above_buffer = (unsigned char *)GetMemory(SCREEN_WIDTH * 3);
+    unsigned char *below_buffer = (unsigned char *)GetMemory(SCREEN_WIDTH * 3);
+    if (above_buffer == NULL || below_buffer == NULL)
+    {
+        FreeMemorySafe((void **)&above_buffer);
+        FreeMemorySafe((void **)&below_buffer);
+        FreeMemorySafe((void **)&line_buffer);
+        free_stack(&stack);
+        return; // Memory allocation failed
+    }
+
+    // Allocate a "filled" bitmap to track which pixels we've already processed
+    int bitmap_size = (SCREEN_WIDTH * SCREEN_HEIGHT + 7) / 8;
+    unsigned char *filled_bitmap = (unsigned char *)GetMemory(bitmap_size);
+    if (filled_bitmap == NULL)
+    {
+        FreeMemorySafe((void **)&below_buffer);
+        FreeMemorySafe((void **)&above_buffer);
+        FreeMemorySafe((void **)&line_buffer);
+        free_stack(&stack);
+        return; // Memory allocation failed
+    }
+
+    // Read the initial scanline to get origin color
+    read_scanline(0, SCREEN_WIDTH - 1, y, line_buffer);
+    uint32_t c_origin = get_color_from_buffer(line_buffer, x);
+
+    // Mode-specific validation
+    if (boundary_mode)
+    {
+        // In boundary mode, if starting pixel is the boundary color, nothing to do
+        uint32_t c_boundary = (uint32_t)boundary_colour;
+        if (c_origin == c_boundary)
+        {
+            FreeMemorySafe((void **)&filled_bitmap);
+            FreeMemorySafe((void **)&below_buffer);
+            FreeMemorySafe((void **)&above_buffer);
+            FreeMemorySafe((void **)&line_buffer);
+            free_stack(&stack);
+            return;
+        }
+    }
+    else
+    {
+        // In replace mode, if starting pixel is already the target color, nothing to do
+        if (c_origin == c_new)
+        {
+            FreeMemorySafe((void **)&filled_bitmap);
+            FreeMemorySafe((void **)&below_buffer);
+            FreeMemorySafe((void **)&above_buffer);
+            FreeMemorySafe((void **)&line_buffer);
+            free_stack(&stack);
+            return;
+        }
+    }
+
+    // Push initial point
+    if (!push(&stack, x, y))
+    {
+        FreeMemorySafe((void **)&filled_bitmap);
+        FreeMemorySafe((void **)&below_buffer);
+        FreeMemorySafe((void **)&above_buffer);
+        FreeMemorySafe((void **)&line_buffer);
+        free_stack(&stack);
+        return;
+    }
+
+    int current_y = -1; // Track which line is currently buffered
+
+    while (pop(&stack, &x, &y))
+    {
+        // Read the scanline if we don't have it buffered
+        if (y != current_y)
+        {
+            read_scanline(0, SCREEN_WIDTH - 1, y, line_buffer);
+            current_y = y;
+        }
+
+        // Calculate bitmap position
+        int bit_pos = y * SCREEN_WIDTH + x;
+        int byte_idx = bit_pos / 8;
+        int bit_idx = bit_pos % 8;
+
+        // Check if we've already processed this pixel
+        if (filled_bitmap[byte_idx] & (1 << bit_idx))
+        {
+            continue;
+        }
+
+        // Check if this pixel should be filled based on mode
+        uint32_t pixel_color = get_color_from_buffer(line_buffer, x);
+        bool should_fill;
+
+        if (boundary_mode)
+        {
+            // Boundary mode: fill if pixel is NOT the boundary color
+            uint32_t c_boundary = (uint32_t)boundary_colour;
+            should_fill = (pixel_color != c_boundary);
+        }
+        else
+        {
+            // Replace mode: only fill if pixel matches origin color
+            should_fill = (pixel_color == c_origin);
+        }
+
+        if (!should_fill)
+        {
+            continue;
+        }
+
+        // Find leftmost pixel in this row
+        int x1 = x;
+        while (x1 > 0)
+        {
+            uint32_t left_color = get_color_from_buffer(line_buffer, x1 - 1);
+            bool can_extend;
+
+            if (boundary_mode)
+            {
+                uint32_t c_boundary = (uint32_t)boundary_colour;
+                can_extend = (left_color != c_boundary);
+            }
+            else
+            {
+                can_extend = (left_color == c_origin);
+            }
+
+            if (!can_extend)
+                break;
+            x1--;
+        }
+
+        // Find rightmost pixel in this row
+        int x2 = x;
+        while (x2 < SCREEN_WIDTH - 1)
+        {
+            uint32_t right_color = get_color_from_buffer(line_buffer, x2 + 1);
+            bool can_extend;
+
+            if (boundary_mode)
+            {
+                uint32_t c_boundary = (uint32_t)boundary_colour;
+                can_extend = (right_color != c_boundary);
+            }
+            else
+            {
+                can_extend = (right_color == c_origin);
+            }
+
+            if (!can_extend)
+                break;
+            x2++;
+        }
+
+        // Fill the scanline
+        int span_width = x2 - x1 + 1;
+        unsigned char *draw_buffer = (unsigned char *)GetMemory(span_width * 3);
+        if (draw_buffer != NULL)
+        {
+            // Prepare the buffer with new color in B,G,R order
+            for (int i = 0; i < span_width; i++)
+            {
+                draw_buffer[i * 3] = c_new & 0xFF;
+                draw_buffer[i * 3 + 1] = (c_new >> 8) & 0xFF;
+                draw_buffer[i * 3 + 2] = (c_new >> 16) & 0xFF;
+            }
+
+            // Write the entire span at once
+            DrawBuffer(x1, y, x2, y, draw_buffer);
+            FreeMemorySafe((void **)&draw_buffer);
+
+            // Mark all pixels in the span as filled in the bitmap
+            for (int i = x1; i <= x2; i++)
+            {
+                int pos = y * SCREEN_WIDTH + i;
+                int b_idx = pos / 8;
+                int bit = pos % 8;
+                filled_bitmap[b_idx] |= (1 << bit);
+
+                // Also update line buffer
+                set_color_in_buffer(line_buffer, i, c_new);
+            }
+        }
+
+        // Check pixels above and below, adding spans to stack
+        bool span_above = false;
+        bool span_below = false;
+
+        // Read line above if needed
+        if (y > 0)
+        {
+            read_scanline(0, SCREEN_WIDTH - 1, y - 1, above_buffer);
+
+            for (int i = x1; i <= x2; i++)
+            {
+                // Check bitmap first
+                int pos = (y - 1) * SCREEN_WIDTH + i;
+                int b_idx = pos / 8;
+                int bit = pos % 8;
+
+                if (!(filled_bitmap[b_idx] & (1 << bit)))
+                {
+                    uint32_t c = get_color_from_buffer(above_buffer, i);
+                    bool can_fill;
+
+                    if (boundary_mode)
+                    {
+                        uint32_t c_boundary = (uint32_t)boundary_colour;
+                        can_fill = (c != c_boundary);
+                    }
+                    else
+                    {
+                        can_fill = (c == c_origin);
+                    }
+
+                    if (can_fill)
+                    {
+                        if (!span_above)
+                        {
+                            if (!push(&stack, i, y - 1))
+                            {
+                                FreeMemorySafe((void **)&filled_bitmap);
+                                FreeMemorySafe((void **)&below_buffer);
+                                FreeMemorySafe((void **)&above_buffer);
+                                FreeMemorySafe((void **)&line_buffer);
+                                free_stack(&stack);
+                                return;
+                            }
+                            span_above = true;
+                        }
+                    }
+                    else
+                    {
+                        span_above = false;
+                    }
+                }
+                else
+                {
+                    span_above = false;
+                }
+            }
+        }
+
+        // Read line below if needed
+        if (y < SCREEN_HEIGHT - 1)
+        {
+            read_scanline(0, SCREEN_WIDTH - 1, y + 1, below_buffer);
+
+            for (int i = x1; i <= x2; i++)
+            {
+                // Check bitmap first
+                int pos = (y + 1) * SCREEN_WIDTH + i;
+                int b_idx = pos / 8;
+                int bit = pos % 8;
+
+                if (!(filled_bitmap[b_idx] & (1 << bit)))
+                {
+                    uint32_t c = get_color_from_buffer(below_buffer, i);
+                    bool can_fill;
+
+                    if (boundary_mode)
+                    {
+                        uint32_t c_boundary = (uint32_t)boundary_colour;
+                        can_fill = (c != c_boundary);
+                    }
+                    else
+                    {
+                        can_fill = (c == c_origin);
+                    }
+
+                    if (can_fill)
+                    {
+                        if (!span_below)
+                        {
+                            if (!push(&stack, i, y + 1))
+                            {
+                                FreeMemorySafe((void **)&filled_bitmap);
+                                FreeMemorySafe((void **)&below_buffer);
+                                FreeMemorySafe((void **)&above_buffer);
+                                FreeMemorySafe((void **)&line_buffer);
+                                free_stack(&stack);
+                                return;
+                            }
+                            span_below = true;
+                        }
+                    }
+                    else
+                    {
+                        span_below = false;
+                    }
+                }
+                else
+                {
+                    span_below = false;
+                }
+            }
+        }
+    }
+
+    // Clean up heap memory
+    FreeMemorySafe((void **)&filled_bitmap);
+    FreeMemorySafe((void **)&below_buffer);
+    FreeMemorySafe((void **)&above_buffer);
+    FreeMemorySafe((void **)&line_buffer);
+    free_stack(&stack);
+}
+
+void cmd_fill(void)
+{
+    uint32_t c = -1, b = -1;
+    getcsargs(&cmdline, 7);
+    if ((void *)ReadBuffer == (void *)DisplayNotSet)
+        StandardError(11);
+    if (!(Option.DISPLAY_TYPE))
+        error("No display");
+    if (!(argc == 5 || argc == 7))
+        SyntaxError();
+
+    int x = getint(argv[0], 0, HRes - 1);
+    int y = getint(argv[2], 0, VRes - 1);
+    c = (uint32_t)getColour((char *)argv[4], 0);
+    if (argc == 7)
+        b = (uint32_t)getColour((char *)argv[6], 0);
+    // Call with replace mode (boundary_colour = -1)
+    floodfill(x, y, c, b);
+}

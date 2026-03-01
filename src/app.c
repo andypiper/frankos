@@ -338,6 +338,43 @@ static void __in_hfa() resolve_thm_jump24(uint16_t* addr, uint16_t* addr_ref, ui
     addr[1] = (uint16_t)(0x9000 | (J1 << 13) | (J2 << 11) | imm11);
 }
 
+// Разрешение ссылки типа R_ARM_THM_JUMP19 (B<cond>.W в Thumb-2)
+// Conditional branch with 21-bit signed offset (±1 MB range).
+// Encoding differs from B.W: J1/J2 are NOT XOR-inverted with S;
+// upper = 11110 S cond imm6, lower = 10 J1 0 J2 imm11.
+static void __in_hfa() resolve_thm_jump19(uint16_t* addr, uint16_t* addr_ref, uint32_t sym_val) {
+    uint16_t instr0 = addr[0];
+    uint16_t instr1 = addr[1];
+
+    // Decode current offset from B<cond>.W
+    uint32_t S     = (instr0 >> 10) & 1;
+    uint32_t cond4 = (instr0 >> 6) & 0xF;  // condition code (preserved)
+    uint32_t imm6  = instr0 & 0x3F;
+    uint32_t J1    = (instr1 >> 13) & 1;
+    uint32_t J2    = (instr1 >> 11) & 1;
+    uint32_t imm11 = instr1 & 0x7FF;
+
+    // offset = SignExtend(S:J2:J1:imm6:imm11:0, 21)
+    uint32_t offset = (S << 20) | (J2 << 19) | (J1 << 18) | (imm6 << 12) | (imm11 << 1);
+    if (S) {
+        offset |= 0xFFE00000; // sign extend from bit 20
+    }
+
+    // Calculate new offset
+    uint32_t new_offset = (uint32_t)((int32_t)offset + (int32_t)sym_val - (int32_t)addr_ref);
+
+    // Re-encode
+    S     = (new_offset >> 20) & 1;
+    J2    = (new_offset >> 19) & 1;
+    J1    = (new_offset >> 18) & 1;
+    imm6  = (new_offset >> 12) & 0x3F;
+    imm11 = (new_offset >> 1)  & 0x7FF;
+
+    // B<cond>.W: upper = 11110 S cond imm6, lower = 10 J1 0 J2 imm11
+    addr[0] = (uint16_t)(0xF000 | (S << 10) | (cond4 << 6) | imm6);
+    addr[1] = (uint16_t)(0x8000 | (J1 << 13) | (J2 << 11) | imm11);
+}
+
 // вставить где-то рядом с resolve_thm_pc22/resolve_thm_jump24
 // value -- (A + S) — итоговое 32-битное значение, которое нужно вставить (MOVW/MOVT берут 16 бит)
 static void __in_hfa() resolve_thm_alu_abs_g0_nc(uint16_t* addr, uint32_t base_value)
@@ -413,9 +450,8 @@ typedef struct {
     elf32_sym* psym;
     char* pstrtab;
     list_t* /*sect_entry_t*/ sections_lst;
-//    uint32_t total_sections_read;
-//    uint32_t total_sections_loaded;
-//    uint32_t total_memory_allocated;
+    elf32_sym* symtab_arr;  /* entire .symtab cached in RAM (PSRAM) */
+    uint32_t   symtab_cnt;  /* number of entries in symtab_arr       */
 } load_sec_ctx;
 
 static char* __in_hfa() sec_prg_addr(const load_sec_ctx* ctx, int sec_num) {
@@ -683,28 +719,54 @@ static uint8_t* __in_hfa() load_sec2mem(load_sec_ctx * c, uint16_t sec_num, bool
             // goutf("Section info: %d type: %d\n", psh->sh_info, psh->sh_type);
             if (psh->sh_type == REL_SEC && psh->sh_info == sec_num) {
                 uint32_t r2 = f_tell(c->f2);
-                elf32_rel rel;
-                for (uint32_t j = 0; j < psh->sh_size / sizeof(rel); ++j) {
-                    if (f_lseek(c->f2, psh->sh_offset + j * sizeof(rel)) != FR_OK ||
-                        f_read(c->f2, &rel, sizeof(rel), &rb) != FR_OK || rb != sizeof(rel)
-                    ) {
-                        goutf("Unable to read REL record #%d in section #%d\n", j, psh->sh_info);
-                        goto e1;
+                uint32_t rel_cnt = psh->sh_size / sizeof(elf32_rel);
+
+                /* Batch-read entire relocation section into RAM to avoid
+                 * per-entry SD card seeks (major speed-up for large apps). */
+                elf32_rel* rel_buf = (elf32_rel*)pvPortMalloc(psh->sh_size);
+                if (rel_buf) {
+                    if (f_lseek(c->f2, psh->sh_offset) != FR_OK ||
+                        f_read(c->f2, rel_buf, psh->sh_size, &rb) != FR_OK ||
+                        rb != psh->sh_size) {
+                        vPortFree(rel_buf);
+                        rel_buf = NULL; /* fall back to one-at-a-time */
+                    }
+                }
+
+                for (uint32_t j = 0; j < rel_cnt; ++j) {
+                    elf32_rel rel;
+                    if (rel_buf) {
+                        rel = rel_buf[j];
+                    } else {
+                        if (f_lseek(c->f2, psh->sh_offset + j * sizeof(rel)) != FR_OK ||
+                            f_read(c->f2, &rel, sizeof(rel), &rb) != FR_OK || rb != sizeof(rel)
+                        ) {
+                            goutf("Unable to read REL record #%d in section #%d\n", j, psh->sh_info);
+                            goto e1;
+                        }
                     }
                     uint32_t rel_sym = rel.rel_info >> 8;
                     uint8_t rel_type = rel.rel_info & 0xFF;
-                    // goutf("rel_offset: %p; rel_sym: %d; rel_type: %d\n", rel.rel_offset, rel_sym, rel_type);
-                    if (f_lseek(c->f2, c->symtab_off + rel_sym * sizeof(elf32_sym)) != FR_OK ||
-                        f_read(c->f2, c->psym, sizeof(elf32_sym), &rb) != FR_OK || rb != sizeof(elf32_sym)
-                    ) {
-                        goutf("Unable to read .symtab section #%d\n", rel_sym);
-                        goto e1;
+
+                    /* Look up symbol — use cached array when available,
+                     * fall back to per-entry file read otherwise. */
+                    if (c->symtab_arr && rel_sym < c->symtab_cnt) {
+                        *c->psym = c->symtab_arr[rel_sym];
+                    } else {
+                        if (f_lseek(c->f2, c->symtab_off + rel_sym * sizeof(elf32_sym)) != FR_OK ||
+                            f_read(c->f2, c->psym, sizeof(elf32_sym), &rb) != FR_OK || rb != sizeof(elf32_sym)
+                        ) {
+                            goutf("Unable to read .symtab section #%d\n", rel_sym);
+                            if (rel_buf) vPortFree(rel_buf);
+                            goto e1;
+                        }
                     }
                     char* rel_str_sym = st_spec_sec(c->psym->st_shndx);
                     if (rel_str_sym != 0) {
                         char* fn_name = c->pstrtab + c->psym->st_name;
                         goutf("Unsupported link from STRTAB record #%d to section #%d (%s): %s\n",
                                 rel_sym, c->psym->st_shndx, rel_str_sym, fn_name);
+                        if (rel_buf) vPortFree(rel_buf);
                         goto e1;
                     }
                     uint32_t* rel_addr_real = (uint32_t*)(real_ram_addr + rel.rel_offset /*10*/); /*f7ff fffe 	bl	0*/
@@ -718,18 +780,19 @@ static uint8_t* __in_hfa() load_sec2mem(load_sec_ctx * c, uint16_t sec_num, bool
                         printf("[sec2mem] sec#%d rel->sec#%d\n", sec_num, c->psym->st_shndx);
                         sec_addr_ref = load_sec2mem(c, c->psym->st_shndx, try_to_use_flash);
                         if (sec_addr_ref == 0) {
+                            if (rel_buf) vPortFree(rel_buf);
                             goto e1;
                         }
                     }
                     uint32_t A = sec_addr_ref;
                     // Разрешение ссылки
                     switch (rel_type) {
-                        case 2: // R_ARM_ABS32:
+                        case 2: // R_ARM_ABS32
+                        case 38: // R_ARM_TARGET1 (resolved as ABS32)
                             // goutf("rel_type: %d; *rel_addr += A: %ph + S: %ph\n", rel_type, A, S);
                             *rel_addr_real += S + A;
                             break;
                         case 3: {// R_ARM_REL32:
-                            gouta("WARN: Untested REL type: R_ARM_REL32\n");
                             uint32_t S_addr = A + S;
                             int32_t addend = (int32_t)(*rel_addr_real);
                             uint32_t P_addr = (uint32_t)rel_addr_ref;
@@ -741,11 +804,12 @@ static uint8_t* __in_hfa() load_sec2mem(load_sec_ctx * c, uint16_t sec_num, bool
                             resolve_thm_pc22(rel_addr_real, rel_addr_ref, A + S);
                             break;
                         case 30: // R_ARM_THM_JUMP24
-                            gouta("WARN: Untested REL type: R_ARM_THM_JUMP24\n");
                             resolve_thm_jump24(rel_addr_real, rel_addr_ref, A + S);
                             break;
+                        case 51: // R_ARM_THM_JUMP19 (B<cond>.W)
+                            resolve_thm_jump19((uint16_t*)rel_addr_real, (uint16_t*)rel_addr_ref, A + S);
+                            break;
                         case 102: // R_ARM_THM_ALU_ABS_G0_NC
-                            gouta("WARN: Untested REL type: R_ARM_THM_ALU_ABS_G0_NC\n");
                             if (((uintptr_t)rel_addr_real & 0x1) || ((uintptr_t)rel_addr_real & 0x2)) {
                                 goutf("WARN: REL type 102 misaligned addr: %p\n", rel_addr_real);
                                 goutf("REL type %d -> symbol: %s\n", rel_type, c->pstrtab + c->psym->st_name);
@@ -755,10 +819,12 @@ static uint8_t* __in_hfa() load_sec2mem(load_sec_ctx * c, uint16_t sec_num, bool
                             break;
                         default:
                             goutf("WARN: Unsupported REL type %d -> symbol: %s\n", rel_type, c->pstrtab + c->psym->st_name);
+                            if (rel_buf) vPortFree(rel_buf);
                             goto e1;
                     }
                     //goutf("= %ph\n", *rel_addr);
                 }
+                if (rel_buf) vPortFree(rel_buf);
                 f_lseek(c->f2, r2);
             }
         }
@@ -825,25 +891,33 @@ static uint32_t __in_hfa() load_sec2mem_wrapper(load_sec_ctx* pctx, uint32_t req
         #if DEBUG_APP_LOAD
         goutf("Loading .symtab section #%d\n", req_idx);
         #endif
-        UINT rb;
-        elf32_sym* psym = pvPortMalloc(sizeof(elf32_sym));
-        if (!psym) {
-            gouta("Not enough RAM\n");
-            goto e3;
-        }
-        if (f_lseek(pctx->f2, pctx->symtab_off + req_idx * sizeof(elf32_sym)) != FR_OK ||
-            f_read(pctx->f2, psym, sizeof(elf32_sym), &rb) != FR_OK || rb != sizeof(elf32_sym)
-        ) {
-            goutf("Unable to read .symtab section #%d\n", req_idx);
+        uint16_t st_shndx;
+        uint32_t st_value;
+
+        /* Use cached symtab when available, avoiding file seek. */
+        if (pctx->symtab_arr && req_idx < pctx->symtab_cnt) {
+            st_shndx = pctx->symtab_arr[req_idx].st_shndx;
+            st_value = pctx->symtab_arr[req_idx].st_value;
+        } else {
+            UINT rb;
+            elf32_sym* psym = pvPortMalloc(sizeof(elf32_sym));
+            if (!psym) {
+                gouta("Not enough RAM\n");
+                goto e3;
+            }
+            if (f_lseek(pctx->f2, pctx->symtab_off + req_idx * sizeof(elf32_sym)) != FR_OK ||
+                f_read(pctx->f2, psym, sizeof(elf32_sym), &rb) != FR_OK || rb != sizeof(elf32_sym)
+            ) {
+                goutf("Unable to read .symtab section #%d\n", req_idx);
+                vPortFree(psym);
+                goto e3;
+            }
+            st_shndx = psym->st_shndx;
+            st_value = psym->st_value;
             vPortFree(psym);
-            goto e3;
         }
-        uint16_t st_shndx = psym->st_shndx;
-        uint32_t st_value = psym->st_value;
-        vPortFree(psym);
         uint8_t* t = load_sec2mem(pctx, st_shndx, try_to_use_flash);
         if (!t) return 0;
-        // debug_sections(pctx->psections_list);
         return (uint32_t)(t + st_value);
     }
 e3:
@@ -953,9 +1027,36 @@ a4:
         goto e3;
     }
     f_lseek(f, symtab_off);
+
+    /* Cache entire .symtab in RAM (PSRAM preferred) to eliminate
+     * per-relocation SD card seeks during section loading.
+     * Fall through gracefully if allocation fails. */
+    uint32_t symtab_cnt = symtab_len / sizeof(elf32_sym);
+    elf32_sym* symtab_cache = NULL;
+    if (psram_is_available()) {
+        symtab_cache = (elf32_sym*)psram_alloc(symtab_len);
+        if (symtab_cache) memset(symtab_cache, 0, symtab_len);
+    }
+    if (!symtab_cache)
+        symtab_cache = (elf32_sym*)pvPortCalloc(1, symtab_len);
+    if (symtab_cache) {
+        if (f_read(f, symtab_cache, symtab_len, &rb) != FR_OK || rb != symtab_len) {
+            /* Read failed — fall back to one-at-a-time */
+            if (psram_is_available()) psram_free(symtab_cache);
+            else vPortFree(symtab_cache);
+            symtab_cache = NULL;
+        }
+        printf("[load_app] symtab cached: %u entries (%u bytes)\n",
+               (unsigned)symtab_cnt, (unsigned)symtab_len);
+    }
+
     elf32_sym* psym = pvPortMalloc(sizeof(elf32_sym));;
     if (!psym) {
 a5:
+        if (symtab_cache) {
+            if (psram_is_available()) psram_free(symtab_cache);
+            else vPortFree(symtab_cache);
+        }
         vPortFree(strtab);
         goto a4;
     }
@@ -979,14 +1080,25 @@ a6:
     pctx->symtab_off = symtab_off;
     pctx->psym = psym;
     pctx->pstrtab = strtab;
+    pctx->symtab_arr = symtab_cache;
+    pctx->symtab_cnt = symtab_cnt;
     pctx->sections_lst = new_list_v(0, sect_entry_deallocator, 0);
-    for (uint32_t i = 0; i < symtab_len / sizeof(elf32_sym); ++i) {
-        if (f_read(f, psym, sizeof(elf32_sym), &rb) != FR_OK || rb != sizeof(elf32_sym)) {
-            goutf("Unable to read .symtab section #%d\n", i);
-            break;
+
+    /* Scan symtab for well-known entry points.  Use cached array when
+     * available, otherwise fall back to per-entry file reads. */
+    for (uint32_t i = 0; i < symtab_cnt; ++i) {
+        elf32_sym* ps;
+        if (symtab_cache) {
+            ps = &symtab_cache[i];
+        } else {
+            if (f_read(f, psym, sizeof(elf32_sym), &rb) != FR_OK || rb != sizeof(elf32_sym)) {
+                goutf("Unable to read .symtab section #%d\n", i);
+                break;
+            }
+            ps = psym;
         }
-        if (psym->st_info == STR_TAB_GLOBAL_FUNC) {
-            char* gfn = strtab + psym->st_name;
+        if (ps->st_info == STR_TAB_GLOBAL_FUNC) {
+            char* gfn = strtab + ps->st_name;
             if (0 == strcmp("_init", gfn)) {
                 _init_idx = i;
             } else if (0 == strcmp("__required_m_api_verion", gfn)) {
@@ -1001,8 +1113,8 @@ a6:
                 flags_idx = i;
             }
         }
-        if (psym->st_info == STR_TAB_WEAK_FUNC) {
-            char* gfn = strtab + psym->st_name;
+        if (ps->st_info == STR_TAB_WEAK_FUNC) {
+            char* gfn = strtab + ps->st_name;
             if (0 == strcmp("_init", gfn)) {
                 w_init_idx = i;
             } else if (0 == strcmp("_fini", gfn)) {
@@ -1119,6 +1231,12 @@ a6:
         vPortFree(alloc);
     }
 e8:
+    /* Free cached symtab — no longer needed after all sections are loaded */
+    if (symtab_cache) {
+        if (psram_is_available()) psram_free(symtab_cache);
+        else vPortFree(symtab_cache);
+        symtab_cache = NULL;
+    }
     vPortFree(psym);
 e3:
     vPortFree(strtab);

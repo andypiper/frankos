@@ -338,8 +338,12 @@ void wm_move_window(hwnd_t hwnd, int16_t x, int16_t y) {
     /* Clamp position: x >= 0 to prevent wd_fb_ptr wrap-around (apps
      * using direct buffer writes don't handle negative origins).
      * Right edge allows dragging partially off-screen but keeps 60px
-     * visible.  Title bar stays reachable vertically. */
+     * visible.  Title bar stays reachable vertically.
+     * Force even x: 4bpp nibble-packed FB means 2 pixels per byte;
+     * apps using wd_fb_ptr() write whole bytes, so an odd x would
+     * misalign the high/low nibble and bleed into adjacent pixels. */
     if (x < 0) x = 0;
+    x &= ~1;
     if (x > DISPLAY_WIDTH - 60)   x = DISPLAY_WIDTH - 60;
     if (y < 0) y = 0;
     int16_t max_y = taskbar_work_area_height() - THEME_TITLE_HEIGHT;
@@ -367,8 +371,10 @@ void wm_set_window_rect(hwnd_t hwnd, int16_t x, int16_t y,
 
     /* Clamp position: x >= 0 to prevent wd_fb_ptr wrap-around.
      * Keep at least 60px visible on right edge, title bar reachable.
-     * Borderless windows (fullscreen) are allowed y=0 with full height. */
+     * Borderless windows (fullscreen) are allowed y=0 with full height.
+     * Force even x: 4bpp nibble-packed FB, see wm_move_window(). */
     if (x < 0) x = 0;
+    x &= ~1;
     if (x > DISPLAY_WIDTH - 60)   x = DISPLAY_WIDTH - 60;
     if (y < 0) y = 0;
     if (windows[hwnd - 1].flags & WF_BORDER) {
@@ -985,17 +991,13 @@ void wm_composite(void) {
                 draw_window_decorations(hwnd, win);
 
             if (win->paint_handler) {
-                /* Skip paint if client area extends past framebuffer
-                 * bounds — apps using wd_fb_ptr() write directly
-                 * with stride and may overflow into the next row. */
-                point_t co = theme_client_origin(&win->frame, win->flags);
-                rect_t  cr = theme_client_rect(&win->frame, win->flags);
-                if (co.y + cr.h <= FB_HEIGHT && co.x >= 0 &&
-                    co.x + cr.w <= DISPLAY_WIDTH) {
-                    wd_begin(hwnd);
-                    win->paint_handler(hwnd);
-                    wd_end();
-                }
+                /* wd_begin() clips draw_ctx.cw/ch to the visible
+                 * portion of the framebuffer and sets active=false
+                 * when the client is fully off-screen.  No guard
+                 * needed — partial off-screen windows paint fine. */
+                wd_begin(hwnd);
+                win->paint_handler(hwnd);
+                wd_end();
             }
 
             win->flags &= ~(WF_DIRTY | WF_FRAME_DIRTY);
@@ -1023,14 +1025,9 @@ void wm_composite(void) {
         if (mwin && (mwin->flags & WF_VISIBLE)) {
             draw_window_decorations(mhwnd, mwin);
             if (mwin->paint_handler) {
-                point_t co = theme_client_origin(&mwin->frame, mwin->flags);
-                rect_t  cr = theme_client_rect(&mwin->frame, mwin->flags);
-                if (co.y + cr.h <= FB_HEIGHT && co.x >= 0 &&
-                    co.x + cr.w <= DISPLAY_WIDTH) {
-                    wd_begin(mhwnd);
-                    mwin->paint_handler(mhwnd);
-                    wd_end();
-                }
+                wd_begin(mhwnd);
+                mwin->paint_handler(mhwnd);
+                wd_end();
             }
         }
     }
