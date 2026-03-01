@@ -16,6 +16,8 @@
 #include "font.h"
 #include "display.h"
 
+#include "desktop.h"
+
 #include <string.h>
 
 /* ── Layout constants ─────────────────────────────────────────── */
@@ -28,7 +30,7 @@
 #define AT_PAD_BOTTOM     4        /* padding below title text */
 #define AT_TITLE_H        (FONT_UI_HEIGHT + 4) /* title text area height */
 #define AT_SEL_PAD        3        /* padding around selected icon highlight */
-#define AT_MAX_ENTRIES    WM_MAX_WINDOWS
+#define AT_MAX_ENTRIES    (WM_MAX_WINDOWS + 1)  /* +1 for Desktop entry */
 
 /* ── State ────────────────────────────────────────────────────── */
 
@@ -91,6 +93,16 @@ static void build_list(void) {
         e->title[sizeof(e->title) - 1] = '\0';
         at_count++;
     }
+
+    /* Append a "Desktop" entry when shortcuts exist */
+    if (desktop_has_shortcuts() && at_count < AT_MAX_ENTRIES) {
+        at_entry_t *e = &at_entries[at_count];
+        e->hwnd = HWND_NULL;  /* sentinel: means "desktop" */
+        e->icon = desktop_get_icon();
+        strncpy(e->title, "Desktop", sizeof(e->title) - 1);
+        e->title[sizeof(e->title) - 1] = '\0';
+        at_count++;
+    }
 }
 
 /* Compute overlay position (centered on screen) */
@@ -132,6 +144,25 @@ void alttab_commit(void) {
     at_active = false;
 
     hwnd_t target = at_entries[at_sel].hwnd;
+
+    /* "Desktop" entry — minimize all windows and give desktop focus */
+    if (target == HWND_NULL) {
+        /* Minimize every visible window */
+        for (hwnd_t h = 1; h <= WM_MAX_WINDOWS; h++) {
+            window_t *w = wm_get_window(h);
+            if (!w) continue;
+            if (!(w->flags & WF_ALIVE)) continue;
+            if (w->state == WS_MINIMIZED) continue;
+            if (!(w->flags & WF_VISIBLE)) continue;
+            wm_minimize_window(h);
+        }
+        wm_set_focus(HWND_NULL);
+        swap_switch_to(HWND_NULL);
+        desktop_focus();
+        wm_force_full_repaint();
+        return;
+    }
+
     window_t *w = wm_get_window(target);
     if (!w) {
         wm_force_full_repaint();

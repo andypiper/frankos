@@ -60,6 +60,7 @@ static desktop_shortcut_t dt_shortcuts[DESKTOP_MAX_SHORTCUTS];
 static int dt_count = 0;
 static bool dt_dirty = true;
 static int dt_selected = -1;  /* index of selected icon, -1 = none */
+static bool dt_kb_focus = false;  /* true when desktop has keyboard focus */
 
 /* For context menu */
 static int dt_ctx_index = -1; /* which shortcut the context menu is for */
@@ -439,6 +440,9 @@ void desktop_sort(void) {
  *=========================================================================*/
 
 bool desktop_mouse(uint8_t type, int16_t x, int16_t y) {
+    /* Mouse interaction clears keyboard focus on the desktop */
+    dt_kb_focus = false;
+
     /* Only handle events on the desktop area (above the taskbar) */
     if (y >= taskbar_work_area_height()) return false;
 
@@ -588,4 +592,120 @@ bool desktop_is_dirty(void) {
 
 void desktop_mark_dirty(void) {
     dt_dirty = true;
+}
+
+bool desktop_has_shortcuts(void) {
+    return dt_count > 0;
+}
+
+const uint8_t *desktop_get_icon(void) {
+    extern const uint8_t desktop_icon_16x16[256];
+    return desktop_icon_16x16;
+}
+
+/* ---------- Desktop keyboard focus ---------- */
+
+void desktop_focus(void) {
+    dt_kb_focus = true;
+    /* Select first shortcut */
+    if (dt_count > 0 && dt_selected < 0)
+        dt_selected = 0;
+    dt_dirty = true;
+    wm_force_full_repaint();
+}
+
+bool desktop_has_focus(void) {
+    return dt_kb_focus;
+}
+
+/* Arrow key navigation: column-first layout (same as dt_get_cell_rect).
+ * idx → (col, row) where col = idx / rows, row = idx % rows. */
+bool desktop_key(uint8_t scancode, uint8_t modifiers) {
+    (void)modifiers;
+    if (!dt_kb_focus || dt_count == 0) return false;
+
+    int rows = dt_rows();
+    if (rows <= 0) rows = 1;
+
+    /* HID scancodes: Right=0x4F Left=0x50 Down=0x51 Up=0x52 Enter=0x28 */
+    switch (scancode) {
+    case 0x52: /* Up */
+        if (dt_selected <= 0)
+            dt_selected = dt_count - 1;
+        else
+            dt_selected--;
+        dt_dirty = true;
+        wm_force_full_repaint();
+        return true;
+
+    case 0x51: /* Down */
+        if (dt_selected >= dt_count - 1)
+            dt_selected = 0;
+        else
+            dt_selected++;
+        dt_dirty = true;
+        wm_force_full_repaint();
+        return true;
+
+    case 0x4F: /* Right */ {
+        int col = dt_selected / rows;
+        int row = dt_selected % rows;
+        col++;
+        int new_idx = col * rows + row;
+        if (new_idx >= dt_count) {
+            /* Wrap to first column, same row */
+            new_idx = row;
+            if (new_idx >= dt_count) new_idx = 0;
+        }
+        dt_selected = new_idx;
+        dt_dirty = true;
+        wm_force_full_repaint();
+        return true;
+    }
+
+    case 0x50: /* Left */ {
+        int col = dt_selected / rows;
+        int row = dt_selected % rows;
+        col--;
+        if (col < 0) {
+            /* Wrap to last column that has this row */
+            int max_col = (dt_count - 1) / rows;
+            int new_idx = max_col * rows + row;
+            if (new_idx >= dt_count) new_idx = (max_col - 1) * rows + row;
+            if (new_idx < 0) new_idx = dt_count - 1;
+            dt_selected = new_idx;
+        } else {
+            dt_selected = col * rows + row;
+        }
+        dt_dirty = true;
+        wm_force_full_repaint();
+        return true;
+    }
+
+    case 0x28: /* Enter */
+    case 0x58: /* KP Enter */
+        if (dt_selected >= 0 && dt_selected < dt_count) {
+            desktop_shortcut_t *sc = &dt_shortcuts[dt_selected];
+            if (sc->is_app) {
+                if (strcmp(sc->path, DESKTOP_BUILTIN_NAVIGATOR) == 0) {
+                    spawn_filemanager_window();
+                } else if (strcmp(sc->path, DESKTOP_BUILTIN_TERMINAL) == 0) {
+                    extern void spawn_terminal_window(void);
+                    spawn_terminal_window();
+                } else {
+                    if (sc->has_icon)
+                        wm_set_pending_icon(sc->icon);
+                    launch_elf_app(sc->path);
+                }
+            } else {
+                file_assoc_open(sc->path);
+            }
+            dt_kb_focus = false;
+        }
+        return true;
+
+    default:
+        break;
+    }
+    return false;
 }

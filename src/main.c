@@ -564,7 +564,13 @@ static void input_task(void *params) {
                 if (kev.modifiers & KBD_MOD_SHIFT) we.key.modifiers |= KMOD_SHIFT;
                 if (kev.modifiers & KBD_MOD_CTRL)  we.key.modifiers |= KMOD_CTRL;
                 if (kev.modifiers & KBD_MOD_ALT)   we.key.modifiers |= KMOD_ALT;
-                wm_post_event_focused(&we);
+
+                /* Route to desktop keyboard handler when no window has focus */
+                if (wm_get_focus() == HWND_NULL && desktop_has_focus()) {
+                    desktop_key(we.key.scancode, we.key.modifiers);
+                } else {
+                    wm_post_event_focused(&we);
+                }
 
                 /* Also send WM_CHAR for printable ASCII */
                 if (kev.ascii >= 0x20 && kev.ascii <= 0x7E) {

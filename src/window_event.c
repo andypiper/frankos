@@ -643,6 +643,14 @@ void wm_handle_mouse_input(uint8_t type, int16_t x, int16_t y, uint8_t buttons) 
         if (sysmenu_is_open() && sysmenu_mouse(type, x, y)) return;
         if (menu_is_open() && menu_dropdown_mouse(type, x, y)) return;
 
+        /* If the button-up lands on the desktop (no window under cursor),
+         * route to desktop_mouse() for double-click icon handling —
+         * even when another window has focus. */
+        if (wm_window_at_point(x, y) == HWND_NULL) {
+            desktop_mouse(type, x, y);
+            return;
+        }
+
         hwnd_t focus = wm_get_focus();
         if (focus != HWND_NULL)
             forward_mouse_event(WM_LBUTTONUP, x, y, buttons, focus);

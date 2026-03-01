@@ -73,4 +73,22 @@ bool desktop_is_dirty(void);
 /* Mark the desktop for repainting */
 void desktop_mark_dirty(void);
 
+/* True if there are desktop shortcuts */
+bool desktop_has_shortcuts(void);
+
+/* Get the 16x16 icon of the first shortcut (for Alt+Tab display).
+ * Returns default_icon_16x16 if no shortcuts or no icon. */
+const uint8_t *desktop_get_icon(void);
+
+/* Give keyboard focus to the desktop (selects first shortcut).
+ * Called when "Desktop" is chosen from Alt+Tab. */
+void desktop_focus(void);
+
+/* Returns true if the desktop currently has keyboard focus. */
+bool desktop_has_focus(void);
+
+/* Handle a keyboard event while the desktop has focus.
+ * Returns true if the event was consumed. */
+bool desktop_key(uint8_t scancode, uint8_t modifiers);
+
 #endif /* DESKTOP_H */

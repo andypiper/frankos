@@ -69,6 +69,7 @@ add_executable(frankos
     src/dialog_icons.c
     src/file_dialog.c
     src/default_icon.c
+    src/desktop_icon.c
     src/filemanager.c
     src/fn_icons.c
     src/clipboard.c
