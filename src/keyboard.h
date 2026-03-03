@@ -39,8 +39,14 @@ typedef struct {
 #define KBD_MOD_CTRL    (KBD_MOD_LCTRL  | KBD_MOD_RCTRL)
 #define KBD_MOD_ALT     (KBD_MOD_LALT   | KBD_MOD_RALT)
 
-// Poll PS/2 keyboard for new scancodes. Call frequently from main loop.
+// Poll keyboard for new input (PS/2 on M2; USB HID on Fruit Jam).
 void keyboard_poll(void);
+
+// Fruit Jam only: inject one USB HID event byte into the keyboard pipeline.
+// byte: bit 7 = release flag, bits 6-0 = HID keycode.
+#ifdef BOARD_FRUIT_JAM
+void keyboard_feed_hid_byte(uint8_t byte);
+#endif
 
 // Get next key event. Returns true if an event was available.
 bool keyboard_get_event(key_event_t *ev);

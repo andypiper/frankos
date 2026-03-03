@@ -14,18 +14,56 @@
 /*
  * Board Configuration for FRANK OS
  *
- * M2-only build (M1 is no longer supported).
+ * Supported boards:
+ *   FRANK M2  (PICO_BOARD=frank_m2)
+ *   Adafruit Fruit Jam (PICO_BOARD=adafruit_fruit_jam)
  *
  * M2 GPIO Layout:
- *   PS/2 Mouse:  CLK=0, DATA=1
- *   PS/2 Kbd:    CLK=2, DATA=3
- *   SD Card:     MISO=4, CSn=5, SCK=6, MOSI=7
- *   PSRAM:       CS=8
- *   I2S Audio:   DATA=9, BCLK=10, LRCLK=11
- *   HDMI (HSTX): CLK-=12, CLK+=13, D0-=14, D0+=15, D1-=16, D1+=17, D2-=18, D2+=19
+ *   PS/2 Mouse:   CLK=0, DATA=1
+ *   PS/2 Kbd:     CLK=2, DATA=3
+ *   SD Card:      MISO=4, CSn=5, SCK=6, MOSI=7
+ *   PSRAM:        CS=47 (RP2350B)
+ *   I2S Audio:    DATA=9, BCLK=10, LRCLK=11
+ *   HDMI (HSTX):  CLK-=12, CLK+=13, D0-=14, D0+=15,
+ *                 D1-=16, D1+=17, D2-=18, D2+=19
+ *
+ * Fruit Jam GPIO Layout:
+ *   USB Host:     D-=1, D+=2 (PIO USB → CH334F hub → keyboard/mouse)
+ *   USB Host 5V:  GPIO 11 (enable)
+ *   BOOT Button:  GPIO 0
+ *   Button 2:     GPIO 4
+ *   Button 3:     GPIO 5
+ *   SD Card:      CLK=34, CMD/MOSI=35, DAT0/MISO=36,
+ *                 DAT1=37, DAT2=38, DAT3/CSn=39, CD=33
+ *   PSRAM:        CS=47 (RP2350B — same as M2)
+ *   I2C (DAC):    SDA=20, SCL=21
+ *   I2S Audio:    DIN=24, MCLK=25, BCLK=26, WS/LRCLK=27
+ *                 (TLV320DAC3100 I2S DAC; MCLK driven by PWM)
+ *   HDMI (HSTX):  same as M2 — CLK-=12, CLK+=13, D0-=14, D0+=15,
+ *                 D1-=16, D1+=17, D2-=18, D2+=19
+ *   NeoPixels:    GPIO 32 (5× WS2812)
+ *   Red LED:      GPIO 29
  */
 
-#define BOARD_M2
+//=============================================================================
+// Board identity
+//=============================================================================
+
+#if defined(PICO_BOARD_adafruit_fruit_jam) || \
+    (defined(PICO_BOARD) && (PICO_BOARD == adafruit_fruit_jam))
+#  define BOARD_FRUIT_JAM
+#else
+#  define BOARD_M2
+#endif
+
+// A cleaner detection: the Pico SDK sets PICO_BOARD as a string via CMake.
+// We expose it via a compile definition FRANK_BOARD_FRUIT_JAM from CMake.
+#ifdef FRANK_BOARD_FRUIT_JAM
+#  ifndef BOARD_FRUIT_JAM
+#    define BOARD_FRUIT_JAM
+#  endif
+#  undef BOARD_M2
+#endif
 
 //=============================================================================
 // CPU Speed Defaults
@@ -39,26 +77,7 @@
 #endif
 
 //=============================================================================
-// M2 Layout Configuration
-//=============================================================================
-#define PS2_PIN_CLK  2
-#define PS2_PIN_DATA 3
-
-#define PS2_MOUSE_CLK  0
-#define PS2_MOUSE_DATA 1
-
-//=============================================================================
-// SD Card (SPI0, GPIO 4-7)
-//=============================================================================
-#define SDCARD_PIN_CLK  6   /* SPI0 SCK */
-#define SDCARD_PIN_CMD  7   /* SPI0 TX / MOSI */
-#define SDCARD_PIN_D0   4   /* SPI0 RX / MISO */
-#define SDCARD_PIN_D3   5   /* SPI0 CSn */
-
-//=============================================================================
-// PSRAM (QSPI CS1 — pin depends on RP2350 package variant)
-//   RP2350A (QFN-60, 30 GPIO): GPIO 8  (M2 board layout)
-//   RP2350B (QFN-80, 48 GPIO): GPIO 47
+// PSRAM — same pin on both boards (RP2350B QFN-80, GPIO 47)
 //=============================================================================
 #define PSRAM_PIN_RP2350A 8
 #define PSRAM_PIN_RP2350B 47
@@ -76,9 +95,79 @@ static inline uint get_psram_pin(void) {
 #endif
 
 //=============================================================================
-// Audio — I2S via PIO1 (GPIO 9/10/11, matching M2 board layout)
+// Board-specific peripheral pins
 //=============================================================================
-#define I2S_DATA_PIN       9    /* I2S serial data */
-#define I2S_CLOCK_PIN_BASE 10   /* BCLK=10, LRCLK=11 */
+
+#ifdef BOARD_FRUIT_JAM
+
+/*---------------------------------------------------------------------------
+ * Adafruit Fruit Jam
+ *-------------------------------------------------------------------------*/
+
+/* USB Host (PIO USB → CH334F 2-port hub → keyboard + mouse) */
+#define USB_HOST_DP_PIN     2   /* USB D+ for PIO USB host */
+#define USB_HOST_DM_PIN     1   /* USB D- for PIO USB host (DP-1) */
+#define USB_HOST_5V_PIN     11  /* GPIO to enable USB host 5V power */
+
+/* Buttons */
+#define BUTTON_BOOT_PIN     0   /* BOOT / Button 1 */
+#define BUTTON2_PIN         4   /* Button 2 */
+#define BUTTON3_PIN         5   /* Button 3 */
+
+/* SD Card (SPI mode via GPIO 34-39) */
+#define SDCARD_PIN_CLK      34  /* SD_CLK  */
+#define SDCARD_PIN_CMD      35  /* SD_CMD  / MOSI */
+#define SDCARD_PIN_D0       36  /* SD_DAT0 / MISO */
+#define SDCARD_PIN_D1       37  /* SD_DAT1 (unused in SPI mode) */
+#define SDCARD_PIN_D2       38  /* SD_DAT2 (unused in SPI mode) */
+#define SDCARD_PIN_D3       39  /* SD_DAT3 / CS in SPI mode */
+#define SDCARD_PIN_CD       33  /* Card detect (active-low) */
+
+/* I2C for TLV320DAC3100 audio DAC */
+#define DAC_I2C             i2c0
+#define DAC_I2C_SDA_PIN     20
+#define DAC_I2C_SCL_PIN     21
+#define DAC_I2C_ADDR        0x18  /* TLV320DAC3100 default I2C address */
+
+/* I2S to TLV320DAC3100 (MCLK generated by PWM on GPIO 25) */
+#define I2S_DATA_PIN        24  /* I2S DIN  */
+#define I2S_MCLK_PIN        25  /* MCLK (256× or 128× Fs, via PWM) */
+#define I2S_CLOCK_PIN_BASE  26  /* BCLK=26, LRCLK/WS=27 */
+
+/* NeoPixels (bonus — not used by base OS, available for apps) */
+#define NEOPIXEL_PIN        32
+#define NEOPIXEL_COUNT      5
+
+/* Red LED */
+#define BOARD_LED_PIN       29
+
+#else /* BOARD_M2 */
+
+/*---------------------------------------------------------------------------
+ * FRANK M2
+ *-------------------------------------------------------------------------*/
+
+/* PS/2 Keyboard (CLK=2, DATA=3) */
+#define PS2_PIN_CLK         2
+#define PS2_PIN_DATA        3
+
+/* PS/2 Mouse (CLK=0, DATA=1) */
+#define PS2_MOUSE_CLK       0
+#define PS2_MOUSE_DATA      1
+
+/* SD Card (SPI0, GPIO 4-7) */
+#define SDCARD_PIN_CLK      6   /* SPI0 SCK */
+#define SDCARD_PIN_CMD      7   /* SPI0 TX / MOSI */
+#define SDCARD_PIN_D0       4   /* SPI0 RX / MISO */
+#define SDCARD_PIN_D3       5   /* SPI0 CSn */
+
+/* Audio — I2S via PIO1 (GPIO 9/10/11) */
+#define I2S_DATA_PIN        9   /* I2S serial data */
+#define I2S_CLOCK_PIN_BASE  10  /* BCLK=10, LRCLK=11 */
+
+/* LED */
+#define BOARD_LED_PIN       25
+
+#endif /* BOARD_FRUIT_JAM / BOARD_M2 */
 
 #endif // BOARD_CONFIG_H

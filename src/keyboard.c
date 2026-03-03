@@ -17,11 +17,17 @@
 
 #include "keyboard.h"
 #include "terminal.h"
-#include "ps2.h"
+#include "board_config.h"
 #include "FreeRTOS.h"
 #include "task.h"
 #include <string.h>
 #include <stdio.h>
+
+#ifdef BOARD_FRUIT_JAM
+#  include "usb_hid.h"
+#else
+#  include "ps2.h"
+#endif
 
 //=============================================================================
 // HID Key Codes (subset used by the scancode tables)
@@ -436,15 +442,141 @@ static void process_scancode(uint8_t byte) {
 
 static void mos2_feed_scancode(uint8_t byte); /* defined below */
 
+#ifdef BOARD_FRUIT_JAM
+/*
+ * keyboard_feed_hid_byte — process one USB HID event byte.
+ *
+ * On the Fruit Jam, TinyUSB delivers native HID keycodes so we skip the
+ * PS/2 Set-2 → HID conversion and call the HID processing layer directly.
+ *
+ * The synthetic byte format from usb_hid.c:
+ *   bit 7 = 1 → release,  bit 7 = 0 → press
+ *   bits 6-0  = HID keycode
+ *
+ * For MOS2 compatibility we synthesise a minimal XT scancode:
+ *   press   → hid_to_xt[hid_code]
+ *   release → hid_to_xt[hid_code] | 0x80
+ */
+
+/* Sparse HID → XT make-code table (covers common keys only) */
+static uint8_t hid_to_xt_make(uint8_t hid) {
+    /* Letters A-Z: HID 0x04-0x1D → XT 0x1E-0x32 (with gaps) */
+    static const uint8_t letter_xt[26] = {
+        0x1E, 0x30, 0x2E, 0x20, 0x12, 0x21, 0x22, 0x23, /* a-h */
+        0x17, 0x24, 0x25, 0x26, 0x32, 0x31, 0x18, 0x19, /* i-p */
+        0x10, 0x13, 0x1F, 0x14, 0x16, 0x2F, 0x11, 0x2D, /* q-x */
+        0x15, 0x2C,                                       /* y-z */
+    };
+    if (hid >= 0x04 && hid <= 0x1D) return letter_xt[hid - 0x04];
+
+    /* Digits 1-9, 0 */
+    if (hid >= 0x1E && hid <= 0x26) return 0x02u + (hid - 0x1E); /* 1-9 */
+    if (hid == 0x27) return 0x0Bu; /* 0 */
+
+    switch (hid) {
+        case 0x28: return 0x1Cu; /* Enter */
+        case 0x29: return 0x01u; /* Escape */
+        case 0x2A: return 0x0Eu; /* Backspace */
+        case 0x2B: return 0x0Fu; /* Tab */
+        case 0x2C: return 0x39u; /* Space */
+        case 0x2D: return 0x0Cu; /* - */
+        case 0x2E: return 0x0Du; /* = */
+        case 0x2F: return 0x1Au; /* [ */
+        case 0x30: return 0x1Bu; /* ] */
+        case 0x31: return 0x2Bu; /* \ */
+        case 0x33: return 0x27u; /* ; */
+        case 0x34: return 0x28u; /* ' */
+        case 0x35: return 0x29u; /* ` */
+        case 0x36: return 0x33u; /* , */
+        case 0x37: return 0x34u; /* . */
+        case 0x38: return 0x35u; /* / */
+        case 0x39: return 0x3Au; /* Caps Lock */
+        case 0x3A: return 0x3Bu; /* F1 */
+        case 0x3B: return 0x3Cu; /* F2 */
+        case 0x3C: return 0x3Du; /* F3 */
+        case 0x3D: return 0x3Eu; /* F4 */
+        case 0x3E: return 0x3Fu; /* F5 */
+        case 0x3F: return 0x40u; /* F6 */
+        case 0x40: return 0x41u; /* F7 */
+        case 0x41: return 0x42u; /* F8 */
+        case 0x42: return 0x43u; /* F9 */
+        case 0x43: return 0x44u; /* F10 */
+        case 0x44: return 0x57u; /* F11 */
+        case 0x45: return 0x58u; /* F12 */
+        case 0x4F: return 0x00u; /* Right (extended — emit 0xE04D) */
+        case 0x50: return 0x00u; /* Left  (extended — emit 0xE04B) */
+        case 0x51: return 0x00u; /* Down  (extended — emit 0xE050) */
+        case 0x52: return 0x00u; /* Up    (extended — emit 0xE048) */
+        case 0xE0: return 0x1Du; /* Left Ctrl */
+        case 0xE1: return 0x2Au; /* Left Shift */
+        case 0xE2: return 0x38u; /* Left Alt */
+        case 0xE4: return 0x1Du; /* Right Ctrl (same XT as Left) */
+        case 0xE5: return 0x36u; /* Right Shift */
+        case 0xE6: return 0x38u; /* Right Alt */
+        default:   return 0x00u;
+    }
+}
+
+void keyboard_feed_hid_byte(uint8_t byte) {
+    bool release = (byte & 0x80u) != 0;
+    uint8_t hid  = byte & 0x7Fu;
+
+    /* MOS2 path — synthesise XT scancode */
+    uint8_t xt = hid_to_xt_make(hid);
+    if (xt != 0) {
+        uint32_t xt_code = xt;
+        if (release) xt_code |= 0x80u;
+        mos2_feed_scancode((uint8_t)xt_code);
+    }
+
+    /* FRANK OS HID path — feed directly into the process_scancode state
+     * machine using a synthesised PS/2-Set-2-like stream.
+     *
+     * We fake a minimal PS/2 stream: the HID keycode happens to match
+     * process_scancode's expected HID codes once the PS/2→HID lookup is
+     * bypassed.  We do this by pre-populating sc_extended and sc_release,
+     * then calling process_scancode with the HID code directly.
+     *
+     * Rather than hacking the state machine, we call enqueue_event() which
+     * is static; instead we replicate what process_scancode would produce:
+     */
+    if (hid == HID_KEY_NONE) return;
+
+    uint8_t mod_bit = hid_to_mod_bit(hid);
+    if (mod_bit) {
+        if (release) modifiers &= ~mod_bit;
+        else         modifiers |= mod_bit;
+    }
+    enqueue_event(hid, !release, modifiers);
+}
+#endif /* BOARD_FRUIT_JAM */
+
 void keyboard_poll(void) {
     int byte;
-    int limit = 32; // don't spin forever
+    int limit = 32; /* don't spin forever */
+
+#ifdef BOARD_FRUIT_JAM
+    /*
+     * Fruit Jam: read USB HID events.
+     * usb_hid_kbd_get_byte() returns a synthetic byte:
+     *   bit 7 = 0 → press,   bits 6-0 = HID keycode
+     *   bit 7 = 1 → release, bits 6-0 = HID keycode
+     *
+     * The HID keycode is fed directly into process_scancode() via
+     * keyboard_feed_hid_byte() which skips the PS/2 Set-2 conversion.
+     */
+    while (limit-- > 0 && (byte = usb_hid_kbd_get_byte()) >= 0) {
+        keyboard_feed_hid_byte((uint8_t)byte);
+    }
+#else
+    /* M2: read PS/2 Set-2 scancodes and run both conversion pipelines */
     while (limit-- > 0 && (byte = ps2_kbd_get_byte()) >= 0) {
         /* Feed to MOS2 scancode handler (PS/2 set 2 → XT conversion) */
         mos2_feed_scancode((uint8_t)byte);
         /* Feed to FRANK OS windowing system (PS/2 set 2 → HID) */
         process_scancode((uint8_t)byte);
     }
+#endif
 }
 
 bool keyboard_get_event(key_event_t *ev) {

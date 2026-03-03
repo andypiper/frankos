@@ -23,7 +23,12 @@
 #include "display.h"
 #include "window.h"
 #include "window_event.h"
-#include "ps2.h"
+#ifdef BOARD_FRUIT_JAM
+#  include "usb_hid.h"
+#  include "tlv320dac3100.h"
+#else
+#  include "ps2.h"
+#endif
 #include "keyboard.h"
 #include "sdcard_init.h"
 #include "terminal.h"
@@ -73,17 +78,21 @@
 /* 4KB erase block placeholder — placed at 0x10EFF000 by linker */
 const uint8_t erase_block[4096] __attribute__((aligned(4096), section(".erase_block"), used)) = {0};
 
-/* PS/2 GPIO registers for bare-metal Space key check */
+/* GPIO register base addresses for bare-metal pin checks in before_main() */
 #define BM_IO_BANK0_BASE   0x40028000u
 #define BM_PADS_BANK0_BASE 0x40038000u
-#define BM_SIO_BASE         0xD0000000u
-#define BM_GPIO_IN_REG      (*(volatile uint32_t *)(BM_SIO_BASE + 0x008))
-#define BM_PS2_CLK_PIN      2
-#define BM_PS2_DATA_PIN     3
+#define BM_SIO_BASE        0xD0000000u
+#define BM_GPIO_IN_REG     (*(volatile uint32_t *)(BM_SIO_BASE + 0x008))
+
+#ifndef BOARD_FRUIT_JAM
+/* PS/2 pins used on M2 for the Space-key firmware-bypass check */
+#define BM_PS2_CLK_PIN     2
+#define BM_PS2_DATA_PIN    3
+#endif
 
 __attribute__((constructor))
 static void before_main(void) {
-    /* Skip if UI-force magic is set (user held Space last time) */
+    /* Skip if UI-force magic is set (user held override key last time) */
     if (*SRAM_UIFORCE_ADDR == SRAM_UIFORCE_MAGIC) {
         *SRAM_UIFORCE_ADDR = 0;
         return;
@@ -95,7 +104,30 @@ static void before_main(void) {
     /* Clear SRAM magic so we don't loop */
     *SRAM_MAGIC_ADDR = 0;
 
-    /* Check if Space key is held — raw PS/2 GPIO polling.
+#ifdef BOARD_FRUIT_JAM
+    /*
+     * Fruit Jam: hold BUTTON2 (GPIO 4) at boot to stay in FRANK OS
+     * instead of jumping to loaded firmware.
+     *
+     * BUTTON2 is active-low (pulled up internally).  If it reads low,
+     * set the UI-force magic and fall through to FRANK OS.
+     */
+    {
+        uint32_t btn_pin = BUTTON2_PIN; /* GPIO 4 */
+        /* Set GPIO function to SIO (5) and enable input + pull-up */
+        *(volatile uint32_t *)(BM_IO_BANK0_BASE + 4 + btn_pin * 8) = 5;
+        uint32_t pad = (1u << 6) | (1u << 3) | (1u << 1); /* IE | PUE | SCHMITT */
+        *(volatile uint32_t *)(BM_PADS_BANK0_BASE + 4 + btn_pin * 4) = pad;
+        for (volatile int d = 0; d < 5000; d++) ; /* settling delay */
+
+        if (!(BM_GPIO_IN_REG & (1u << btn_pin))) {
+            /* Button held — stay in FRANK OS */
+            *SRAM_UIFORCE_ADDR = SRAM_UIFORCE_MAGIC;
+            return;
+        }
+    }
+#else
+    /* M2: check if Space key is held via raw PS/2 GPIO polling.
      * If Space detected, fall through to FRANK OS. */
     {
         /* Configure GPIO 2 (CLK) and GPIO 3 (DATA) as SIO inputs with pull-ups */
@@ -146,6 +178,7 @@ static void before_main(void) {
             }
         }
     }
+#endif /* BOARD_FRUIT_JAM */
 
     /* No Space key — check ZERO_BLOCK magic and jump to firmware */
     if (((volatile uint32_t *)ZERO_BLOCK_ADDRESS)[1023] == FLASH_MAGIC_OVER) {
@@ -344,12 +377,12 @@ void __attribute__((used)) hardfault_c_handler(uint32_t *stack, uint32_t lr_val)
 
     // Reboot via watchdog in ~10 seconds so the user can read the BSOD.
     watchdog_enable(10000, false);
-    // Blink LED until watchdog fires
-    *(volatile unsigned int *)0xd0000038 = (1u << 25);
+    // Blink LED until watchdog fires (use board-specific LED pin)
+    *(volatile unsigned int *)0xd0000038 = (1u << BOARD_LED_PIN);
     for (;;) {
-        *(volatile unsigned int *)0xd0000018 = (1u << 25);
+        *(volatile unsigned int *)0xd0000018 = (1u << BOARD_LED_PIN);
         for (volatile int i = 0; i < 3000000; i++);
-        *(volatile unsigned int *)0xd0000020 = (1u << 25);
+        *(volatile unsigned int *)0xd0000020 = (1u << BOARD_LED_PIN);
         for (volatile int i = 0; i < 3000000; i++);
     }
 }
@@ -358,6 +391,10 @@ static void usb_service_task(void *params) {
     (void)params;
     for (;;) {
         tud_task();
+#ifdef BOARD_FRUIT_JAM
+        /* Also service the TinyUSB host stack for USB HID keyboard/mouse */
+        usb_hid_task();
+#endif
         vTaskDelay(1);
     }
 }
@@ -687,11 +724,16 @@ static void input_task(void *params) {
             g_video_dirty = true;
         }
 
-        /* Poll mouse */
+        /* Poll mouse (PS/2 on M2; USB HID on Fruit Jam) */
         int16_t dx, dy;
         int8_t wheel;
         uint8_t buttons;
-        if (ps2_mouse_get_state(&dx, &dy, &wheel, &buttons)) {
+#ifdef BOARD_FRUIT_JAM
+        bool mouse_has_data = usb_hid_mouse_get_state(&dx, &dy, &wheel, &buttons);
+#else
+        bool mouse_has_data = ps2_mouse_get_state(&dx, &dy, &wheel, &buttons);
+#endif
+        if (mouse_has_data) {
             /* First mouse movement after boot: show the arrow cursor */
             if (boot_cursor_hidden) {
                 boot_cursor_hidden = false;
@@ -852,6 +894,23 @@ int main(void) {
     printf("PSRAM: %u KB\n", psram_detected_bytes() / 1024);
     stdio_flush();
 
+#ifdef BOARD_FRUIT_JAM
+    /* --- Fruit Jam: TLV320DAC3100 audio DAC init (before snd_init) --- */
+    printf("Initializing TLV320DAC3100 audio DAC...\n"); stdio_flush();
+    if (!tlv320_init(44100)) {
+        printf("TLV320DAC3100 init failed — audio may not work\n");
+    }
+    stdio_flush();
+
+    /* --- Fruit Jam: USB HID host (keyboard + mouse via CH334F hub) --- */
+    printf("Initializing USB HID host (PIO USB, GPIO %d/%d)...\n",
+           USB_HOST_DM_PIN, USB_HOST_DP_PIN); stdio_flush();
+    if (!usb_hid_init()) {
+        printf("USB HID host init failed\n");
+    }
+    stdio_flush();
+#else
+    /* --- M2: PS/2 unified driver (keyboard + mouse) --- */
     printf("Initializing PS/2 (unified driver)...\n"); stdio_flush();
     if (ps2_init(pio0, PS2_PIN_CLK, PS2_MOUSE_CLK)) {
         printf("PS/2 PIO initialized (kbd CLK=%d, mouse CLK=%d)\n",
@@ -873,6 +932,7 @@ int main(void) {
         printf("PS/2 PIO init failed\n");
     }
     stdio_flush();
+#endif /* BOARD_FRUIT_JAM */
 
     wm_init();
 
