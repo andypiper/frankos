@@ -21,7 +21,6 @@ REPO_ROOT    = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ICONS_DIR    = os.path.join(REPO_ROOT, "assets", "icons")
 APP_ICONS    = os.path.join(REPO_ROOT, "assets", "apps")
 FOS_DIR      = os.path.join(REPO_ROOT, "sdcard", "fos")
-COMPILED_DIR = os.path.join(REPO_ROOT, "apps", "compiled")
 
 # ─── app definitions ────────────────────────────────────────────────────────
 #   app_id       display name     legacy ico (from assets/icons/)   ext line
@@ -218,10 +217,9 @@ def main():
 
             if has_app_ico:
                 # New path: iconless .inf + deploy .ico file
-                for dest_dir in (FOS_DIR, COMPILED_DIR):
-                    inf_out = os.path.join(dest_dir, f"{app_id}.inf")
-                    write_inf_iconless(inf_out, display_name, ext_line)
-                    deploy_ico(app_id, dest_dir)
+                inf_out = os.path.join(FOS_DIR, f"{app_id}.inf")
+                write_inf_iconless(inf_out, display_name, ext_line)
+                deploy_ico(app_id, FOS_DIR)
             else:
                 # Legacy path: embedded icons in .inf
                 if legacy_ico is not None:
@@ -235,10 +233,9 @@ def main():
                 else:
                     raise ValueError(f"No icon source for '{app_id}'")
 
-                for dest_dir in (FOS_DIR, COMPILED_DIR):
-                    inf_out = os.path.join(dest_dir, f"{app_id}.inf")
-                    write_inf_with_icons(inf_out, display_name,
-                                         pixels16, pixels32, ext_line)
+                inf_out = os.path.join(FOS_DIR, f"{app_id}.inf")
+                write_inf_with_icons(inf_out, display_name,
+                                     pixels16, pixels32, ext_line)
 
         except Exception as e:
             print(f"  ERROR: {e}", file=sys.stderr)
@@ -249,10 +246,9 @@ def main():
     for name in standalone_icos:
         src = os.path.join(APP_ICONS, f"{name}.ico")
         if os.path.isfile(src):
-            for dest_dir in (FOS_DIR, COMPILED_DIR):
-                dst = os.path.join(dest_dir, f"{name}.ico")
-                shutil.copy2(src, dst)
-                print(f"  deployed {dst}")
+            dst = os.path.join(FOS_DIR, f"{name}.ico")
+            shutil.copy2(src, dst)
+            print(f"  deployed {dst}")
 
     print()
     if errors:

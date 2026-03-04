@@ -9,7 +9,7 @@ find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
 set(CMAKE_C_STANDARD 11)
 
-set(COMPILED_DIR "${CMAKE_SOURCE_DIR}/../../compiled")
+set(COMPILED_DIR "${CMAKE_SOURCE_DIR}/../../../sdcard/fos")
 
 add_executable(${PROJECT_NAME}
     main.c

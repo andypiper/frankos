@@ -23,7 +23,7 @@ pico_sdk_init()
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
 set(CMAKE_C_STANDARD 11)
-set(COMPILED_DIR "${CMAKE_SOURCE_DIR}/../../compiled")
+set(COMPILED_DIR "${CMAKE_SOURCE_DIR}/../../../sdcard/fos")
 
 # ── MMBasic sources — core interpreter only, no direct hardware access ───────
 # Excluded (hardware-specific): Custom.c Audio.c I2C.c SPI.c SPI-LCD.c Serial.c

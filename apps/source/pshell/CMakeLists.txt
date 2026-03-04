@@ -8,7 +8,7 @@ pico_sdk_init()
 
 set(CMAKE_C_STANDARD 11)
 
-set(COMPILED_DIR "${CMAKE_SOURCE_DIR}/../../compiled")
+set(COMPILED_DIR "${CMAKE_SOURCE_DIR}/../../../sdcard/fos")
 
 add_executable(${PROJECT_NAME}
     main.c

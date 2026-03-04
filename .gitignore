@@ -1,4 +1,7 @@
 build/
 release/
 .claude/
+apps/compiled/
+
 .DS_Store
+Thumbs.db

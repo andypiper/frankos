@@ -160,7 +160,7 @@ cd apps
 ./build_apps.sh
 ```
 
-Compiled apps are placed in `apps/compiled/` and can be copied to the SD card for execution from the shell.
+Compiled apps are placed directly in `sdcard/fos/` and can be copied to the SD card for execution from the shell.
 
 ## SD Card Setup
 
@@ -182,6 +182,15 @@ FRANK OS is structured around FreeRTOS tasks running on Core 0 of the RP2350:
 | **Shell** (per terminal) | — | Command-line interpreter for each terminal window |
 
 Core 1 is dedicated to the DispHSTX DVI output driver.
+
+## Documentation
+
+Detailed documentation is available in the [`docs/`](docs/) directory:
+
+- [**Architecture**](docs/architecture.md) — system design, memory map, display pipeline, task model
+- [**Building**](docs/building.md) — prerequisites, build steps, flashing, SD card setup
+- [**App Development**](docs/app-development.md) — how to create apps, minimal example, drawing, events, menus, dialogs
+- [**API Reference**](docs/api-reference.md) — complete sys_table index, data types, constants, all function signatures
 
 ## License
 
