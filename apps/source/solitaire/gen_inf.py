@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
-"""Generate solitaire.inf from raw icon data."""
+"""Generate solitaire.inf — text-only (name line, no icon data).
+Icons are loaded from .ico files by file_assoc_scan()."""
 import sys
 
 name = sys.argv[1]
-icon_path = sys.argv[2]
-out_path = sys.argv[3]
-
-with open(icon_path, 'rb') as f:
-    icon = f.read()
+out_path = sys.argv[2]
 
 with open(out_path, 'wb') as f:
     f.write(name.encode('ascii') + b'\n')
-    f.write(icon)

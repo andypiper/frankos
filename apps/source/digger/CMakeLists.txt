@@ -101,16 +101,15 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
 pico_enable_stdio_uart(${PROJECT_NAME} 0)
 pico_enable_stdio_usb(${PROJECT_NAME} 0)
 
-# Generate digger.inf (app name + 256-byte icon placeholder)
+# Generate digger.inf (text-only: app name)
 set(GEN_INF "${CMAKE_CURRENT_SOURCE_DIR}/gen_inf.py")
-set(ICON_RAW "${CMAKE_CURRENT_SOURCE_DIR}/digger_icon.raw")
 
 add_custom_command(
     OUTPUT "${CMAKE_BINARY_DIR}/digger.inf"
-    COMMAND ${Python3_EXECUTABLE} "${GEN_INF}" "Digger" "${ICON_RAW}"
+    COMMAND ${Python3_EXECUTABLE} "${GEN_INF}" "Digger"
         "${CMAKE_BINARY_DIR}/digger.inf"
-    DEPENDS "${GEN_INF}" "${ICON_RAW}"
-    COMMENT "Generating digger.inf with embedded icon"
+    DEPENDS "${GEN_INF}"
+    COMMENT "Generating digger.inf"
 )
 add_custom_target(digger_inf ALL
     DEPENDS "${CMAKE_BINARY_DIR}/digger.inf"

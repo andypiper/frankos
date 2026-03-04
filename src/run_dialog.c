@@ -10,6 +10,7 @@
  */
 
 #include "run_dialog.h"
+#include "controls.h"
 #include "window.h"
 #include "window_event.h"
 #include "window_draw.h"
@@ -105,23 +106,16 @@ static hwnd_t   rd_hwnd         = HWND_NULL;
 static int8_t   rd_focus        = RD_FOCUS_FIELD;
 static int8_t   rd_btn_pressed  = -1;   /* -1=none 0=OK 1=Cancel 2=Browse */
 
-/* Text field */
+/* Combobox (text field + dropdown) */
 static char     rd_buf[RD_CMD_MAX];
-static int8_t   rd_len;
-static int8_t   rd_cursor;
+static combobox_t rd_combo;
 
 /* Cursor blink */
-static bool           rd_cursor_vis  = true;
 static TimerHandle_t  rd_blink_timer = NULL;
 
 /* History */
 static char     rd_history[RD_HISTORY_MAX][RD_CMD_MAX];
 static int8_t   rd_history_count = 0;
-
-/* Dropdown */
-static bool     rd_drop_open    = false;
-static int8_t   rd_drop_hover   = -1;
-static int8_t   rd_drop_scroll  = 0;    /* first visible item index */
 
 /* Pending browse result */
 static bool     rd_waiting_browse = false;
@@ -145,12 +139,11 @@ static char     rd_pending_launch_path[RD_CMD_MAX];
 
 static void rd_blink_cb(TimerHandle_t xTimer) {
     (void)xTimer;
-    rd_cursor_vis = !rd_cursor_vis;
-    if (rd_hwnd != HWND_NULL) wm_invalidate(rd_hwnd);
+    textfield_blink(&rd_combo.field);
 }
 
 static void rd_blink_reset(void) {
-    rd_cursor_vis = true;
+    rd_combo.field.cursor_visible = true;
     if (rd_blink_timer) xTimerReset(rd_blink_timer, 0);
     if (rd_hwnd != HWND_NULL) wm_invalidate(rd_hwnd);
 }
@@ -235,6 +228,7 @@ static void history_push(const char *cmd) {
     rd_history[0][RD_CMD_MAX - 1] = '\0';
 
     if (rd_history_count < RD_HISTORY_MAX) rd_history_count++;
+    rd_combo.item_count = rd_history_count;
     rd_history_save();
 }
 
@@ -251,7 +245,7 @@ static void rd_stop_timer(void) {
 }
 
 static void rd_close(void) {
-    rd_drop_open   = false;
+    rd_combo.drop_open = false;
     rd_err_pending = false;
     wm_clear_modal();
     wm_destroy_window(rd_hwnd);
@@ -292,12 +286,12 @@ static bool rd_resolve_path(const char *cmd, char *out_path) {
  *=========================================================================*/
 
 static void rd_execute(void) {
-    if (rd_len == 0) return;
+    if (rd_combo.field.len == 0) return;
 
     /* Check built-in commands first (case-insensitive) */
     {
         char lc[RD_CMD_MAX];
-        for (int i = 0; i <= rd_len; i++)
+        for (int i = 0; i <= rd_combo.field.len; i++)
             lc[i] = (char)tolower((unsigned char)rd_buf[i]);
 
         if (strcmp(lc, "terminal") == 0) {
@@ -343,7 +337,7 @@ static void rd_execute(void) {
      * run_dialog_check_pending() at the top of the compositor loop,
      * not from inside wm_dispatch_events(), to avoid stack overflow. */
     history_push(rd_buf);
-    rd_drop_open = false;
+    rd_combo.drop_open = false;
     strncpy(rd_pending_launch_path, path, RD_CMD_MAX - 1);
     rd_pending_launch_path[RD_CMD_MAX - 1] = '\0';
     rd_pending_launch = RD_LAUNCH_FILE;
@@ -436,8 +430,8 @@ static void rd_paint(hwnd_t hwnd) {
         gfx_text_ui(ttx, tty, rd_buf, COLOR_BLACK, COLOR_WHITE);
 
         /* Blinking cursor when text field has focus and dropdown is closed */
-        if (rd_focus == RD_FOCUS_FIELD && rd_cursor_vis && !rd_drop_open) {
-            int cx = ttx + rd_cursor * FONT_UI_WIDTH;
+        if (rd_focus == RD_FOCUS_FIELD && rd_combo.field.cursor_visible && !rd_combo.drop_open) {
+            int cx = ttx + rd_combo.field.cursor * FONT_UI_WIDTH;
             int cy = tty;
             for (int row = 0; row < FONT_UI_HEIGHT; row++)
                 if ((unsigned)(cy + row) < (unsigned)FB_HEIGHT)
@@ -467,7 +461,7 @@ static void rd_paint(hwnd_t hwnd) {
     /* When dropdown is open: draw list (covers separator + buttons)       */
     /* When closed: draw separator + buttons                               */
     /* ------------------------------------------------------------------ */
-    if (rd_drop_open && rd_history_count > 0) {
+    if (rd_combo.drop_open && rd_history_count > 0) {
         int vis  = rd_history_count < RD_DROP_MAX_VIS ?
                    rd_history_count : RD_DROP_MAX_VIS;
         int dl_x = RD_FIELD_X;
@@ -487,9 +481,9 @@ static void rd_paint(hwnd_t hwnd) {
 
         /* Items */
         for (int i = 0; i < vis; i++) {
-            int idx    = rd_drop_scroll + i;
+            int idx    = rd_combo.drop_scroll + i;
             if (idx >= rd_history_count) break;
-            bool hov   = (rd_drop_hover == idx);
+            bool hov   = (rd_combo.drop_hover == idx);
             uint8_t bg = hov ? COLOR_BLUE  : COLOR_WHITE;
             uint8_t fg = hov ? COLOR_WHITE : COLOR_BLACK;
             int iy = dl_y + 1 + i * RD_DROP_ITEM_H;
@@ -525,7 +519,7 @@ static void rd_paint(hwnd_t hwnd) {
  *=========================================================================*/
 
 static int rd_drop_hittest(int mx, int my) {
-    if (!rd_drop_open || rd_history_count == 0) return -1;
+    if (!rd_combo.drop_open || rd_history_count == 0) return -1;
 
     int vis  = rd_history_count < RD_DROP_MAX_VIS ?
                rd_history_count : RD_DROP_MAX_VIS;
@@ -539,7 +533,7 @@ static int rd_drop_hittest(int mx, int my) {
 
     int rel  = my - dl_y - 1;
     if (rel < 0) return -1;
-    int idx  = rd_drop_scroll + rel / RD_DROP_ITEM_H;
+    int idx  = rd_combo.drop_scroll + rel / RD_DROP_ITEM_H;
     if (idx >= rd_history_count) return -1;
     return idx;
 }
@@ -552,10 +546,10 @@ static void rd_history_select(int idx) {
     if (idx < 0 || idx >= rd_history_count) return;
     strncpy(rd_buf, rd_history[idx], RD_CMD_MAX - 1);
     rd_buf[RD_CMD_MAX - 1] = '\0';
-    rd_len    = (int8_t)strlen(rd_buf);
-    rd_cursor = rd_len;
-    rd_drop_open  = false;
-    rd_drop_hover = -1;
+    rd_combo.field.len    = (int16_t)strlen(rd_buf);
+    rd_combo.field.cursor = rd_combo.field.len;
+    rd_combo.drop_open  = false;
+    rd_combo.drop_hover = -1;
     rd_focus      = RD_FOCUS_FIELD;
     wm_force_full_repaint();
 }
@@ -583,8 +577,8 @@ static bool rd_event(hwnd_t hwnd, const window_event_t *ev) {
             if (sel && *sel) {
                 strncpy(rd_buf, sel, RD_CMD_MAX - 1);
                 rd_buf[RD_CMD_MAX - 1] = '\0';
-                rd_len    = (int8_t)strlen(rd_buf);
-                rd_cursor = rd_len;
+                rd_combo.field.len    = (int16_t)strlen(rd_buf);
+                rd_combo.field.cursor = rd_combo.field.len;
             }
             /* Re-claim modal + focus */
             wm_set_modal(rd_hwnd);
@@ -597,18 +591,18 @@ static bool rd_event(hwnd_t hwnd, const window_event_t *ev) {
 
     /* ------------------------------------------------------------------ */
     case WM_CHAR: {
-        if (rd_focus != RD_FOCUS_FIELD || rd_drop_open) return true;
+        if (rd_focus != RD_FOCUS_FIELD || rd_combo.drop_open) return true;
         char ch = ev->charev.ch;
-        if (ch >= 0x20 && ch < 0x7F && rd_len < RD_CMD_MAX - 1) {
+        if (ch >= 0x20 && ch < 0x7F && rd_combo.field.len < RD_CMD_MAX - 1) {
             /* Insert at cursor */
-            for (int i = rd_len; i > rd_cursor; i--)
+            for (int i = rd_combo.field.len; i > rd_combo.field.cursor; i--)
                 rd_buf[i] = rd_buf[i - 1];
-            rd_buf[rd_cursor++] = ch;
-            rd_buf[++rd_len]    = '\0';   /* overwritten above then '\0' */
+            rd_buf[rd_combo.field.cursor++] = ch;
+            rd_buf[++rd_combo.field.len]    = '\0';   /* overwritten above then '\0' */
             /* Correct double-increment: undo one */
-            rd_len--;
-            rd_len = (int8_t)strlen(rd_buf); /* recount */
-            rd_cursor = (int8_t)(rd_cursor); /* already incremented */
+            rd_combo.field.len--;
+            rd_combo.field.len = (int16_t)strlen(rd_buf); /* recount */
+            /* cursor already incremented above */
             rd_blink_reset();
         }
         return true;
@@ -620,9 +614,9 @@ static bool rd_event(hwnd_t hwnd, const window_event_t *ev) {
 
         /* Escape: close dropdown if open, otherwise close dialog */
         if (sc == 0x29) {
-            if (rd_drop_open) {
-                rd_drop_open  = false;
-                rd_drop_hover = -1;
+            if (rd_combo.drop_open) {
+                rd_combo.drop_open  = false;
+                rd_combo.drop_hover = -1;
                 wm_force_full_repaint();
             } else {
                 rd_close();
@@ -632,17 +626,17 @@ static bool rd_event(hwnd_t hwnd, const window_event_t *ev) {
 
         /* Enter: accept highlighted dropdown item or activate focused ctrl */
         if (sc == 0x28) {
-            if (rd_drop_open) {
-                if (rd_drop_hover >= 0) {
-                    rd_history_select(rd_drop_hover);
+            if (rd_combo.drop_open) {
+                if (rd_combo.drop_hover >= 0) {
+                    rd_history_select(rd_combo.drop_hover);
                 } else {
                     /* Dropdown open but nothing highlighted — just close it */
-                    rd_drop_open  = false;
-                    rd_drop_hover = -1;
+                    rd_combo.drop_open  = false;
+                    rd_combo.drop_hover = -1;
                     wm_force_full_repaint();
                 }
             } else {
-                rd_drop_open = false;
+                rd_combo.drop_open = false;
                 switch (rd_focus) {
                 case RD_FOCUS_FIELD:
                 case RD_FOCUS_OK:
@@ -660,9 +654,9 @@ static bool rd_event(hwnd_t hwnd, const window_event_t *ev) {
 
         /* Tab: cycle focus (close dropdown first) */
         if (sc == 0x2B) {
-            if (rd_drop_open) {
-                rd_drop_open  = false;
-                rd_drop_hover = -1;
+            if (rd_combo.drop_open) {
+                rd_combo.drop_open  = false;
+                rd_combo.drop_hover = -1;
                 wm_force_full_repaint();
             }
             switch (rd_focus) {
@@ -689,17 +683,17 @@ static bool rd_event(hwnd_t hwnd, const window_event_t *ev) {
          * the dropdown appears/disappears over it.
          */
         if (sc == 0x52) { /* Up */
-            if (rd_drop_open) {
-                if (rd_drop_hover > 0) {
-                    rd_drop_hover--;
-                    if (rd_drop_hover < rd_drop_scroll)
-                        rd_drop_scroll = rd_drop_hover;
-                } else if (rd_drop_hover == 0) {
-                    rd_drop_hover = -1;   /* deselect; next Up closes list */
+            if (rd_combo.drop_open) {
+                if (rd_combo.drop_hover > 0) {
+                    rd_combo.drop_hover--;
+                    if (rd_combo.drop_hover < rd_combo.drop_scroll)
+                        rd_combo.drop_scroll = rd_combo.drop_hover;
+                } else if (rd_combo.drop_hover == 0) {
+                    rd_combo.drop_hover = -1;   /* deselect; next Up closes list */
                 } else {
                     /* hover == -1: close dropdown, keep typed text */
-                    rd_drop_open  = false;
-                    rd_drop_hover = -1;
+                    rd_combo.drop_open  = false;
+                    rd_combo.drop_hover = -1;
                 }
                 wm_force_full_repaint();
             }
@@ -707,57 +701,57 @@ static bool rd_event(hwnd_t hwnd, const window_event_t *ev) {
             return true;
         }
         if (sc == 0x51) { /* Down */
-            if (rd_drop_open) {
+            if (rd_combo.drop_open) {
                 /* Advance highlight, but don't go past last item */
-                if (rd_drop_hover < rd_history_count - 1) {
-                    rd_drop_hover++;
+                if (rd_combo.drop_hover < rd_history_count - 1) {
+                    rd_combo.drop_hover++;
                     int vis = rd_history_count < RD_DROP_MAX_VIS ?
                               rd_history_count : RD_DROP_MAX_VIS;
-                    if (rd_drop_hover >= rd_drop_scroll + vis)
-                        rd_drop_scroll = rd_drop_hover - vis + 1;
+                    if (rd_combo.drop_hover >= rd_combo.drop_scroll + vis)
+                        rd_combo.drop_scroll = rd_combo.drop_hover - vis + 1;
                 }
                 wm_force_full_repaint();
             } else if (rd_focus == RD_FOCUS_FIELD && rd_history_count > 0) {
                 /* Open list with no item pre-selected */
-                rd_drop_open   = true;
-                rd_drop_hover  = -1;
-                rd_drop_scroll = 0;
+                rd_combo.drop_open   = true;
+                rd_combo.drop_hover  = -1;
+                rd_combo.drop_scroll = 0;
                 wm_force_full_repaint();
             }
             return true;
         }
 
         /* Text-field editing keys (only when field focused and drop closed) */
-        if (rd_focus == RD_FOCUS_FIELD && !rd_drop_open) {
+        if (rd_focus == RD_FOCUS_FIELD && !rd_combo.drop_open) {
             switch (sc) {
             case 0x2A: /* Backspace */
-                if (rd_cursor > 0) {
-                    for (int i = rd_cursor - 1; i < rd_len - 1; i++)
+                if (rd_combo.field.cursor > 0) {
+                    for (int i = rd_combo.field.cursor - 1; i < rd_combo.field.len - 1; i++)
                         rd_buf[i] = rd_buf[i + 1];
-                    rd_buf[--rd_len] = '\0';
-                    rd_cursor--;
+                    rd_buf[--rd_combo.field.len] = '\0';
+                    rd_combo.field.cursor--;
                     rd_blink_reset();
                 }
                 return true;
             case 0x4C: /* Delete */
-                if (rd_cursor < rd_len) {
-                    for (int i = rd_cursor; i < rd_len - 1; i++)
+                if (rd_combo.field.cursor < rd_combo.field.len) {
+                    for (int i = rd_combo.field.cursor; i < rd_combo.field.len - 1; i++)
                         rd_buf[i] = rd_buf[i + 1];
-                    rd_buf[--rd_len] = '\0';
+                    rd_buf[--rd_combo.field.len] = '\0';
                     rd_blink_reset();
                 }
                 return true;
             case 0x50: /* Left */
-                if (rd_cursor > 0) { rd_cursor--; rd_blink_reset(); }
+                if (rd_combo.field.cursor > 0) { rd_combo.field.cursor--; rd_blink_reset(); }
                 return true;
             case 0x4F: /* Right */
-                if (rd_cursor < rd_len) { rd_cursor++; rd_blink_reset(); }
+                if (rd_combo.field.cursor < rd_combo.field.len) { rd_combo.field.cursor++; rd_blink_reset(); }
                 return true;
             case 0x4A: /* Home */
-                rd_cursor = 0; rd_blink_reset();
+                rd_combo.field.cursor = 0; rd_blink_reset();
                 return true;
             case 0x4D: /* End */
-                rd_cursor = rd_len; rd_blink_reset();
+                rd_combo.field.cursor = rd_combo.field.len; rd_blink_reset();
                 return true;
             }
         }
@@ -775,7 +769,7 @@ static bool rd_event(hwnd_t hwnd, const window_event_t *ev) {
         {
             int hit = rd_drop_hittest(mx, my);
             if (hit >= 0) {
-                rd_drop_hover = (int8_t)hit;
+                rd_combo.drop_hover = (int8_t)hit;
                 wm_invalidate(rd_hwnd);
                 return true;
             }
@@ -784,9 +778,9 @@ static bool rd_event(hwnd_t hwnd, const window_event_t *ev) {
         /* Dropdown toggle button */
         if (mx >= RD_DROP_BTN_X && mx < RD_DROP_BTN_X + RD_DROP_BTN_W &&
             my >= RD_FIELD_Y    && my < RD_FIELD_Y + RD_FIELD_H) {
-            rd_drop_open  = !rd_drop_open;
-            rd_drop_hover = -1;
-            rd_drop_scroll = 0;
+            rd_combo.drop_open  = !rd_combo.drop_open;
+            rd_combo.drop_hover = -1;
+            rd_combo.drop_scroll = 0;
             wm_force_full_repaint();
             return true;
         }
@@ -797,10 +791,10 @@ static bool rd_event(hwnd_t hwnd, const window_event_t *ev) {
             rd_focus = RD_FOCUS_FIELD;
             int pos  = (mx - RD_FIELD_X - 4) / FONT_UI_WIDTH;
             if (pos < 0)       pos = 0;
-            if (pos > rd_len)  pos = rd_len;
-            rd_cursor = (int8_t)pos;
-            if (rd_drop_open) {
-                rd_drop_open = false;
+            if (pos > rd_combo.field.len)  pos = rd_combo.field.len;
+            rd_combo.field.cursor = (int16_t)pos;
+            if (rd_combo.drop_open) {
+                rd_combo.drop_open = false;
                 wm_force_full_repaint();
             } else {
                 rd_blink_reset();
@@ -809,7 +803,7 @@ static bool rd_event(hwnd_t hwnd, const window_event_t *ev) {
         }
 
         /* Button hit-test (only when dropdown closed) */
-        if (!rd_drop_open &&
+        if (!rd_combo.drop_open &&
             my >= RD_BTN_Y && my < RD_BTN_Y + RD_BTN_H) {
             if (mx >= RD_BTN_OK_X && mx < RD_BTN_OK_X + RD_BTN_W) {
                 rd_btn_pressed = 0; rd_focus = RD_FOCUS_OK;
@@ -826,9 +820,9 @@ static bool rd_event(hwnd_t hwnd, const window_event_t *ev) {
         }
 
         /* Click anywhere else — close dropdown if open */
-        if (rd_drop_open) {
-            rd_drop_open  = false;
-            rd_drop_hover = -1;
+        if (rd_combo.drop_open) {
+            rd_combo.drop_open  = false;
+            rd_combo.drop_hover = -1;
             wm_force_full_repaint();
         }
         return true;
@@ -838,7 +832,7 @@ static bool rd_event(hwnd_t hwnd, const window_event_t *ev) {
     case WM_LBUTTONUP: {
         if (rd_btn_pressed < 0) {
             /* Released without prior press — check dropdown selection */
-            if (rd_drop_open) {
+            if (rd_combo.drop_open) {
                 int hit = rd_drop_hittest(ev->mouse.x, ev->mouse.y);
                 if (hit >= 0) rd_history_select(hit);
             }
@@ -885,10 +879,10 @@ do_browse:
 
     /* ------------------------------------------------------------------ */
     case WM_MOUSEMOVE: {
-        if (!rd_drop_open) return false;
+        if (!rd_combo.drop_open) return false;
         int hit = rd_drop_hittest(ev->mouse.x, ev->mouse.y);
-        if (hit != rd_drop_hover) {
-            rd_drop_hover = (int8_t)hit;
+        if (hit != rd_combo.drop_hover) {
+            rd_combo.drop_hover = (int8_t)hit;
             wm_invalidate(rd_hwnd);
         }
         return false;
@@ -915,16 +909,20 @@ void run_dialog_open(void) {
     /* Reset UI state (preserve history and last typed text) */
     rd_focus        = RD_FOCUS_FIELD;
     rd_btn_pressed  = -1;
-    rd_drop_open    = false;
-    rd_drop_hover   = -1;
-    rd_drop_scroll  = 0;
     rd_waiting_browse = false;
     rd_err_pending  = false;
-    rd_cursor_vis   = true;
 
-    /* Cursor at end of last command */
-    rd_len    = (int8_t)strlen(rd_buf);
-    rd_cursor = rd_len;
+    /* Initialize combobox (preserves rd_buf content) */
+    {
+        int16_t prev_len = (int16_t)strlen(rd_buf);
+        combobox_init(&rd_combo, rd_buf, RD_CMD_MAX, HWND_NULL);
+        rd_combo.field.len = prev_len;
+        rd_combo.field.cursor = prev_len;
+        rd_combo.field.cursor_visible = true;
+        rd_combo.max_visible = RD_DROP_MAX_VIS;
+        rd_combo.drop_item_h = RD_DROP_ITEM_H;
+        combobox_set_items(&rd_combo, rd_history, rd_history_count);
+    }
 
     int outer_w = RD_CLIENT_W + 2 * THEME_BORDER_WIDTH;
     int outer_h = RD_CLIENT_H + THEME_TITLE_HEIGHT + 2 * THEME_BORDER_WIDTH;
@@ -940,6 +938,9 @@ void run_dialog_open(void) {
                                 WSTYLE_DIALOG,
                                 rd_event, rd_paint);
     if (rd_hwnd == HWND_NULL) return;
+
+    rd_combo.hwnd = rd_hwnd;
+    rd_combo.field.hwnd = rd_hwnd;
 
     window_t *win = wm_get_window(rd_hwnd);
     if (win) win->bg_color = THEME_BUTTON_FACE;

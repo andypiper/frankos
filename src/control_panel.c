@@ -7,6 +7,7 @@
  */
 
 #include "control_panel.h"
+#include "controls.h"
 #include "settings.h"
 #include "window.h"
 #include "window_event.h"
@@ -577,8 +578,7 @@ static void cp_open_system(void) {
 
 typedef struct {
     hwnd_t   hwnd;
-    uint16_t dblclick_ms;   /* 200-800 */
-    bool     dragging;
+    slider_t slider;
     /* Test area */
     int8_t   test_clicks;
     uint32_t test_tick;
@@ -598,22 +598,18 @@ static mouse_applet_t mouse_app;
 #define MOUSE_TEST_W   80
 #define MOUSE_TEST_H   50
 
-static int mouse_thumb_x(uint16_t ms) {
-    /* Slow (800ms) on left, Fast (200ms) on right */
-    int rel = (800 - ms) * (MOUSE_TRACK_W - 12) / 600;
-    return MOUSE_TRACK_X + rel;
-}
-
-static uint16_t mouse_ms_from_x(int16_t x) {
-    int rel = x - MOUSE_TRACK_X;
-    if (rel < 0) rel = 0;
-    if (rel > MOUSE_TRACK_W - 12) rel = MOUSE_TRACK_W - 12;
-    /* Snap to 100ms steps — left=800ms (slow), right=200ms (fast) */
-    int ms = 800 - (rel * 600 + (MOUSE_TRACK_W - 12) / 2) / (MOUSE_TRACK_W - 12);
+/* Convert slider value (0-600) to ms (800-200).
+ * Slider value 0 = 800ms (slow, left), 600 = 200ms (fast, right). */
+static uint16_t mouse_slider_to_ms(int32_t val) {
+    int ms = 800 - (int)val;
     ms = ((ms + 50) / 100) * 100;
     if (ms < 200) ms = 200;
     if (ms > 800) ms = 800;
     return (uint16_t)ms;
+}
+
+static int32_t mouse_ms_to_slider(uint16_t ms) {
+    return (int32_t)(800 - ms);
 }
 
 static bool mouse_event(hwnd_t hwnd, const window_event_t *ev) {
@@ -630,27 +626,18 @@ static bool mouse_event(hwnd_t hwnd, const window_event_t *ev) {
         memset(m, 0, sizeof(*m));
         return true;
 
-    case WM_LBUTTONDOWN: {
-        int16_t mx = ev->mouse.x, my = ev->mouse.y;
-        /* Track bar */
-        if (my >= MOUSE_TRACK_Y && my < MOUSE_TRACK_Y + MOUSE_TRACK_H &&
-            mx >= MOUSE_TRACK_X && mx < MOUSE_TRACK_X + MOUSE_TRACK_W) {
-            m->dblclick_ms = mouse_ms_from_x(mx);
-            m->dragging = true;
+    case WM_LBUTTONDOWN:
+    case WM_MOUSEMOVE: {
+        int32_t new_val;
+        if (slider_event(&m->slider, ev, &new_val)) {
             wm_invalidate(hwnd);
         }
+        if (ev->type == WM_LBUTTONDOWN) return true;
         return true;
     }
 
-    case WM_MOUSEMOVE:
-        if (m->dragging) {
-            m->dblclick_ms = mouse_ms_from_x(ev->mouse.x);
-            wm_invalidate(hwnd);
-        }
-        return true;
-
     case WM_LBUTTONUP: {
-        m->dragging = false;
+        slider_event(&m->slider, ev, NULL);
         int16_t mx = ev->mouse.x, my = ev->mouse.y;
 
         /* Test area double-click */
@@ -658,7 +645,7 @@ static bool mouse_event(hwnd_t hwnd, const window_event_t *ev) {
             my >= MOUSE_TEST_Y && my < MOUSE_TEST_Y + MOUSE_TEST_H) {
             uint32_t now = xTaskGetTickCount();
             if (m->test_clicks > 0 &&
-                (now - m->test_tick) < pdMS_TO_TICKS(m->dblclick_ms)) {
+                (now - m->test_tick) < pdMS_TO_TICKS(mouse_slider_to_ms(m->slider.value))) {
                 m->test_clicks = 2;
                 wm_invalidate(hwnd);
             } else {
@@ -671,8 +658,8 @@ static bool mouse_event(hwnd_t hwnd, const window_event_t *ev) {
         /* Buttons */
         if (btn_hit(mx, my, ok_x, btn_y, APPLET_BTN_W, APPLET_BTN_H)) {
             settings_t *set = settings_get();
-            set->dblclick_ms = m->dblclick_ms;
-            wm_set_dblclick_speed(m->dblclick_ms);
+            set->dblclick_ms = mouse_slider_to_ms(m->slider.value);
+            wm_set_dblclick_speed(mouse_slider_to_ms(m->slider.value));
             settings_save();
             wm_destroy_window(hwnd);
             memset(m, 0, sizeof(*m));
@@ -701,8 +688,8 @@ static bool mouse_event(hwnd_t hwnd, const window_event_t *ev) {
                 memset(m, 0, sizeof(*m));
             } else { /* OK */
                 settings_t *set = settings_get();
-                set->dblclick_ms = m->dblclick_ms;
-                wm_set_dblclick_speed(m->dblclick_ms);
+                set->dblclick_ms = mouse_slider_to_ms(m->slider.value);
+                wm_set_dblclick_speed(mouse_slider_to_ms(m->slider.value));
                 settings_save();
                 wm_destroy_window(hwnd);
                 memset(m, 0, sizeof(*m));
@@ -727,7 +714,8 @@ static void mouse_paint(hwnd_t hwnd) {
 
     /* Speed label */
     char buf[32];
-    snprintf(buf, sizeof(buf), "Double-click speed: %u ms", m->dblclick_ms);
+    snprintf(buf, sizeof(buf), "Double-click speed: %u ms",
+             mouse_slider_to_ms(m->slider.value));
     wd_text_ui(20, 10, buf, COLOR_BLACK, THEME_BUTTON_FACE);
 
     /* Labels */
@@ -737,15 +725,8 @@ static void mouse_paint(hwnd_t hwnd) {
                MOUSE_TRACK_Y - 14, "Fast",
                COLOR_BLACK, THEME_BUTTON_FACE);
 
-    /* Sunken track */
-    wd_bevel_rect(MOUSE_TRACK_X, MOUSE_TRACK_Y,
-                  MOUSE_TRACK_W, MOUSE_TRACK_H,
-                  COLOR_DARK_GRAY, COLOR_WHITE, THEME_BUTTON_FACE);
-
-    /* Raised thumb */
-    int tx = mouse_thumb_x(m->dblclick_ms);
-    wd_bevel_rect(tx, MOUSE_TRACK_Y, 12, MOUSE_TRACK_H,
-                  COLOR_WHITE, COLOR_DARK_GRAY, THEME_BUTTON_FACE);
+    /* Slider (track + thumb) */
+    slider_paint(&m->slider);
 
     /* Test area */
     wd_text_ui(MOUSE_TEST_X, MOUSE_TEST_Y - 14, "Test area:",
@@ -783,7 +764,12 @@ static void cp_open_mouse(void) {
         return;
     }
     memset(&mouse_app, 0, sizeof(mouse_app));
-    mouse_app.dblclick_ms = settings_get()->dblclick_ms;
+    /* Initialize slider: 0=slow(800ms) on left, 600=fast(200ms) on right */
+    slider_init(&mouse_app.slider, true);
+    slider_set_range(&mouse_app.slider, 0, 600, 100);
+    slider_set_rect(&mouse_app.slider, MOUSE_TRACK_X, MOUSE_TRACK_Y,
+                    MOUSE_TRACK_W, MOUSE_TRACK_H);
+    mouse_app.slider.value = mouse_ms_to_slider(settings_get()->dblclick_ms);
 
     wm_set_pending_icon(cp_icon16);
     hwnd_t hwnd = wm_create_window(
@@ -803,10 +789,10 @@ static void cp_open_mouse(void) {
  *=========================================================================*/
 
 typedef struct {
-    hwnd_t   hwnd;
-    uint8_t  cpu_sel;    /* 0=252, 1=378, 2=504 */
-    uint8_t  psram_sel;  /* 0=default, 1=133, 2=166 */
-    uint8_t  focus;      /* 0=CPU, 1=PSRAM, 2=OK, 3=Cancel */
+    hwnd_t       hwnd;
+    radiogroup_t cpu_rg;
+    radiogroup_t psram_rg;
+    uint8_t      focus;      /* 0=CPU, 1=PSRAM, 2=OK, 3=Cancel */
 } freq_applet_t;
 
 static freq_applet_t freq_app;
@@ -852,26 +838,14 @@ static bool freq_event(hwnd_t hwnd, const window_event_t *ev) {
         return true;
 
     case WM_LBUTTONDOWN: {
-        int16_t mx = ev->mouse.x, my = ev->mouse.y;
-        /* CPU radio buttons */
-        for (int i = 0; i < 3; i++) {
-            int ry = FREQ_CPU_Y + i * FREQ_RADIO_H;
-            if (mx >= FREQ_RADIO_X && mx < FREQ_RADIO_X + 120 &&
-                my >= ry && my < ry + FREQ_RADIO_H) {
-                f->cpu_sel = i;
-                wm_invalidate(hwnd);
-                return true;
-            }
+        uint8_t new_sel;
+        if (radiogroup_event(&f->cpu_rg, ev, &new_sel)) {
+            wm_invalidate(hwnd);
+            return true;
         }
-        /* PSRAM radio buttons */
-        for (int i = 0; i < 3; i++) {
-            int ry = FREQ_PSRAM_Y + i * FREQ_RADIO_H;
-            if (mx >= FREQ_RADIO_X && mx < FREQ_RADIO_X + 120 &&
-                my >= ry && my < ry + FREQ_RADIO_H) {
-                f->psram_sel = i;
-                wm_invalidate(hwnd);
-                return true;
-            }
+        if (radiogroup_event(&f->psram_rg, ev, &new_sel)) {
+            wm_invalidate(hwnd);
+            return true;
         }
         return true;
     }
@@ -880,8 +854,8 @@ static bool freq_event(hwnd_t hwnd, const window_event_t *ev) {
         int16_t mx = ev->mouse.x, my = ev->mouse.y;
         if (btn_hit(mx, my, ok_x, btn_y, APPLET_BTN_W, APPLET_BTN_H)) {
             settings_t *set = settings_get();
-            set->cpu_freq_mhz = cpu_freqs[f->cpu_sel];
-            set->psram_freq_mhz = psram_freqs[f->psram_sel];
+            set->cpu_freq_mhz = cpu_freqs[f->cpu_rg.selected];
+            set->psram_freq_mhz = psram_freqs[f->psram_rg.selected];
             settings_save();
             /* Show info dialog */
             dialog_show(hwnd, "Frequencies",
@@ -914,8 +888,8 @@ static bool freq_event(hwnd_t hwnd, const window_event_t *ev) {
                 memset(f, 0, sizeof(*f));
             } else { /* OK (focus 0, 1, or 2) */
                 settings_t *set = settings_get();
-                set->cpu_freq_mhz = cpu_freqs[f->cpu_sel];
-                set->psram_freq_mhz = psram_freqs[f->psram_sel];
+                set->cpu_freq_mhz = cpu_freqs[f->cpu_rg.selected];
+                set->psram_freq_mhz = psram_freqs[f->psram_rg.selected];
                 settings_save();
                 dialog_show(HWND_NULL, "Frequencies",
                     "Changes take effect after reboot.",
@@ -928,24 +902,24 @@ static bool freq_event(hwnd_t hwnd, const window_event_t *ev) {
         /* Up/Down arrows — change radio selection when focused on a group */
         if (f->focus == 0) { /* CPU group */
             if (ev->key.scancode == 0x52 /* Up */) {
-                if (f->cpu_sel > 0) f->cpu_sel--;
+                if (f->cpu_rg.selected > 0) f->cpu_rg.selected--;
                 wm_invalidate(hwnd);
                 return true;
             }
             if (ev->key.scancode == 0x51 /* Down */) {
-                if (f->cpu_sel < 2) f->cpu_sel++;
+                if (f->cpu_rg.selected < 2) f->cpu_rg.selected++;
                 wm_invalidate(hwnd);
                 return true;
             }
         }
         if (f->focus == 1) { /* PSRAM group */
             if (ev->key.scancode == 0x52 /* Up */) {
-                if (f->psram_sel > 0) f->psram_sel--;
+                if (f->psram_rg.selected > 0) f->psram_rg.selected--;
                 wm_invalidate(hwnd);
                 return true;
             }
             if (ev->key.scancode == 0x51 /* Down */) {
-                if (f->psram_sel < 2) f->psram_sel++;
+                if (f->psram_rg.selected < 2) f->psram_rg.selected++;
                 wm_invalidate(hwnd);
                 return true;
             }
@@ -958,17 +932,7 @@ static bool freq_event(hwnd_t hwnd, const window_event_t *ev) {
     return false;
 }
 
-/* Draw a radio button circle at (x, y) with given state */
-static void draw_radio(hwnd_t hwnd, int16_t x, int16_t y,
-                       bool selected, const char *label) {
-    /* Outer circle approximation: small sunken square with round corners */
-    wd_bevel_rect(x, y + 2, 12, 12, COLOR_DARK_GRAY, COLOR_WHITE, COLOR_WHITE);
-    if (selected) {
-        /* Inner filled dot */
-        wd_fill_rect(x + 4, y + 6, 4, 4, COLOR_BLACK);
-    }
-    wd_text_ui(x + 16, y + 2, label, COLOR_BLACK, THEME_BUTTON_FACE);
-}
+/* Radio button drawing now uses controls.h radiogroup_t */
 
 static void freq_paint(hwnd_t hwnd) {
     freq_applet_t *f = &freq_app;
@@ -980,12 +944,7 @@ static void freq_paint(hwnd_t hwnd) {
 
     /* CPU frequency group */
     wd_text_ui(16, 14, "CPU Frequency:", COLOR_BLACK, THEME_BUTTON_FACE);
-    for (int i = 0; i < 3; i++) {
-        draw_radio(hwnd, FREQ_RADIO_X,
-                   FREQ_CPU_Y + i * FREQ_RADIO_H,
-                   f->cpu_sel == i, cpu_labels[i]);
-    }
-    /* Focus indicator for CPU group */
+    radiogroup_paint(&f->cpu_rg);
     if (f->focus == 0) {
         wd_rect(FREQ_RADIO_X - 4, FREQ_CPU_Y - 2,
                 130, 3 * FREQ_RADIO_H + 4, COLOR_BLACK);
@@ -994,12 +953,7 @@ static void freq_paint(hwnd_t hwnd) {
     /* PSRAM frequency group */
     wd_text_ui(16, FREQ_PSRAM_Y - 16, "PSRAM Frequency:",
                COLOR_BLACK, THEME_BUTTON_FACE);
-    for (int i = 0; i < 3; i++) {
-        draw_radio(hwnd, FREQ_RADIO_X,
-                   FREQ_PSRAM_Y + i * FREQ_RADIO_H,
-                   f->psram_sel == i, psram_labels[i]);
-    }
-    /* Focus indicator for PSRAM group */
+    radiogroup_paint(&f->psram_rg);
     if (f->focus == 1) {
         wd_rect(FREQ_RADIO_X - 4, FREQ_PSRAM_Y - 2,
                 130, 3 * FREQ_RADIO_H + 4, COLOR_BLACK);
@@ -1028,8 +982,18 @@ static void cp_open_freq(void) {
         return;
     }
     memset(&freq_app, 0, sizeof(freq_app));
-    freq_app.cpu_sel = freq_cpu_idx(settings_get()->cpu_freq_mhz);
-    freq_app.psram_sel = freq_psram_idx(settings_get()->psram_freq_mhz);
+
+    /* CPU radio group */
+    radiogroup_init(&freq_app.cpu_rg, FREQ_RADIO_X, FREQ_CPU_Y,
+                    3, FREQ_RADIO_H);
+    radiogroup_set_labels(&freq_app.cpu_rg, cpu_labels);
+    freq_app.cpu_rg.selected = freq_cpu_idx(settings_get()->cpu_freq_mhz);
+
+    /* PSRAM radio group */
+    radiogroup_init(&freq_app.psram_rg, FREQ_RADIO_X, FREQ_PSRAM_Y,
+                    3, FREQ_RADIO_H);
+    radiogroup_set_labels(&freq_app.psram_rg, psram_labels);
+    freq_app.psram_rg.selected = freq_psram_idx(settings_get()->psram_freq_mhz);
 
     wm_set_pending_icon(cp_icon16);
     hwnd_t hwnd = wm_create_window(

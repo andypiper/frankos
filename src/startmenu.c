@@ -367,6 +367,9 @@ bool startmenu_is_open(void) {
 extern void spawn_terminal_window(void);
 extern void spawn_control_panel(void);
 
+/* Terminal 16x16 icon (fn_icons.c) */
+extern const uint8_t *fn_icon16_terminal_get(void);
+
 static void execute_sub_item(int index) {
     startmenu_close();
     cursor_set_type(CURSOR_WAIT);
@@ -393,7 +396,7 @@ static void execute_sub_item(int index) {
         spawn_filemanager_window();
     } else {
         /* Terminal (last item) */
-        wm_set_pending_icon(default_icon_16x16);
+        wm_set_pending_icon(fn_icon16_terminal_get());
         spawn_terminal_window();
     }
     cursor_set_type(CURSOR_ARROW);
@@ -648,6 +651,7 @@ void startmenu_draw(void) {
                 icon = fn_icon16_open_folder;
                 label = "Navigator";
             } else {
+                icon = fn_icon16_terminal_get();
                 label = "Terminal";
             }
             gfx_draw_icon_16(sub_x + 4, sy + 4, icon);

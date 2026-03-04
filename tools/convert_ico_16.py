@@ -5,11 +5,11 @@ Reads a Windows 95/2000 .ico file, extracts or scales to 16x16 and 32x32,
 applies the AND mask (transparent -> 0xFF), and remaps palette indices
 from Windows ordering to CGA ordering.
 
-INF file format (v2 — two icon sizes):
+INF file format (text-only):
     <display name>\\n
-    <256 bytes: 16x16 paletted icon>
-    <1024 bytes: 32x32 paletted icon>
     [ext:<comma-separated extensions>\\n]
+
+Icons are loaded separately from .ico files by file_assoc_scan().
 
 Modes:
     --inf "Name" input.ico output.inf [--ext ext:txt,log]
@@ -169,13 +169,11 @@ def upscale_nn(pixels_src, src_size, dst_size):
 
 
 def write_inf(name, pixels_16, pixels_32, output_path, ext_line=None):
-    """Write name + newline + 256 raw bytes (16x16) + 1024 raw bytes (32x32)
-    + optional ext line to output .inf file."""
+    """Write text-only .inf: display name + optional ext line.
+    Icons are loaded separately from .ico files by file_assoc_scan()."""
     with open(output_path, "wb") as f:
         f.write(name.encode("ascii"))
         f.write(b"\n")
-        f.write(bytes(pixels_16))   # 256 bytes: 16x16
-        f.write(bytes(pixels_32))   # 1024 bytes: 32x32
         if ext_line:
             f.write(ext_line.encode("ascii"))
             f.write(b"\n")

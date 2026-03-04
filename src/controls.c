@@ -15,6 +15,8 @@
 #include "window_draw.h"
 #include "window_theme.h"
 #include "clipboard.h"
+#include "display.h"
+#include "gfx.h"
 #include "font.h"
 #include <string.h>
 #include <stdio.h>
@@ -1292,4 +1294,728 @@ int textarea_replace_all(textarea_t *ta, const char *needle,
 void textarea_blink(textarea_t *ta) {
     ta->cursor_visible = !ta->cursor_visible;
     wm_invalidate(ta->hwnd);
+}
+
+/*==========================================================================
+ * Checkbox
+ *=========================================================================*/
+
+void checkbox_init(checkbox_t *cb, int16_t x, int16_t y, const char *label) {
+    memset(cb, 0, sizeof(*cb));
+    cb->x = x;
+    cb->y = y;
+    if (label) {
+        strncpy(cb->label, label, sizeof(cb->label) - 1);
+        cb->label[sizeof(cb->label) - 1] = '\0';
+    }
+}
+
+void checkbox_paint(checkbox_t *cb) {
+    int16_t x = cb->x, y = cb->y;
+
+    /* Sunken box */
+    wd_hline(x, y, CHECKBOX_SIZE, COLOR_DARK_GRAY);
+    wd_vline(x, y, CHECKBOX_SIZE, COLOR_DARK_GRAY);
+    wd_hline(x, y + CHECKBOX_SIZE - 1, CHECKBOX_SIZE, COLOR_WHITE);
+    wd_vline(x + CHECKBOX_SIZE - 1, y, CHECKBOX_SIZE, COLOR_WHITE);
+    wd_fill_rect(x + 1, y + 1, CHECKBOX_SIZE - 2, CHECKBOX_SIZE - 2,
+                 COLOR_WHITE);
+
+    if (cb->checked) {
+        /* Draw checkmark */
+        int cx = x + 3, cy = y + 5;
+        wd_pixel(cx, cy, COLOR_BLACK);
+        wd_pixel(cx + 1, cy + 1, COLOR_BLACK);
+        wd_pixel(cx + 2, cy + 2, COLOR_BLACK);
+        wd_pixel(cx + 3, cy + 1, COLOR_BLACK);
+        wd_pixel(cx + 4, cy, COLOR_BLACK);
+        wd_pixel(cx + 5, cy - 1, COLOR_BLACK);
+        wd_pixel(cx + 6, cy - 2, COLOR_BLACK);
+        /* Thicken */
+        wd_pixel(cx, cy - 1, COLOR_BLACK);
+        wd_pixel(cx + 1, cy, COLOR_BLACK);
+        wd_pixel(cx + 2, cy + 1, COLOR_BLACK);
+        wd_pixel(cx + 3, cy, COLOR_BLACK);
+        wd_pixel(cx + 4, cy - 1, COLOR_BLACK);
+        wd_pixel(cx + 5, cy - 2, COLOR_BLACK);
+        wd_pixel(cx + 6, cy - 3, COLOR_BLACK);
+    }
+
+    /* Label */
+    wd_text_ui(x + CHECKBOX_SIZE + 4,
+               y + (CHECKBOX_SIZE - FONT_UI_HEIGHT) / 2,
+               cb->label, COLOR_BLACK, THEME_BUTTON_FACE);
+}
+
+bool checkbox_event(checkbox_t *cb, const window_event_t *event,
+                    bool *changed) {
+    if (event->type != WM_LBUTTONDOWN) return false;
+    int16_t mx = event->mouse.x;
+    int16_t my = event->mouse.y;
+    int16_t label_w = (int16_t)(strlen(cb->label) * FONT_UI_WIDTH);
+    int16_t hit_w = CHECKBOX_SIZE + 4 + label_w;
+    if (mx >= cb->x && mx < cb->x + hit_w &&
+        my >= cb->y && my < cb->y + CHECKBOX_SIZE) {
+        cb->checked = !cb->checked;
+        if (changed) *changed = true;
+        return true;
+    }
+    return false;
+}
+
+/*==========================================================================
+ * Radio Button Group
+ *=========================================================================*/
+
+void radiogroup_init(radiogroup_t *rg, int16_t x, int16_t y,
+                     uint8_t count, int16_t spacing) {
+    memset(rg, 0, sizeof(*rg));
+    rg->x = x;
+    rg->y = y;
+    rg->count = count > RADIO_MAX_OPTIONS ? RADIO_MAX_OPTIONS : count;
+    rg->spacing = spacing;
+}
+
+void radiogroup_set_labels(radiogroup_t *rg, const char **labels) {
+    for (uint8_t i = 0; i < rg->count; i++) {
+        strncpy(rg->labels[i], labels[i], sizeof(rg->labels[0]) - 1);
+        rg->labels[i][sizeof(rg->labels[0]) - 1] = '\0';
+    }
+}
+
+void radiogroup_paint(radiogroup_t *rg) {
+    for (uint8_t i = 0; i < rg->count; i++) {
+        int16_t ry = rg->y + i * rg->spacing;
+        int16_t rx = rg->x;
+        bool sel = (rg->selected == i);
+
+        /* Sunken square approximating a radio circle */
+        wd_bevel_rect(rx, ry + 2, 12, 12,
+                      COLOR_DARK_GRAY, COLOR_WHITE, COLOR_WHITE);
+        if (sel) {
+            /* Inner filled dot */
+            wd_fill_rect(rx + 4, ry + 6, 4, 4, COLOR_BLACK);
+        }
+        wd_text_ui(rx + 16, ry + 2, rg->labels[i],
+                   COLOR_BLACK, THEME_BUTTON_FACE);
+    }
+}
+
+bool radiogroup_event(radiogroup_t *rg, const window_event_t *event,
+                      uint8_t *new_sel) {
+    if (event->type != WM_LBUTTONDOWN) return false;
+    int16_t mx = event->mouse.x;
+    int16_t my = event->mouse.y;
+    for (uint8_t i = 0; i < rg->count; i++) {
+        int16_t ry = rg->y + i * rg->spacing;
+        if (mx >= rg->x && mx < rg->x + 120 &&
+            my >= ry && my < ry + rg->spacing) {
+            if (rg->selected != i) {
+                rg->selected = i;
+                if (new_sel) *new_sel = i;
+                return true;
+            }
+            return false;
+        }
+    }
+    return false;
+}
+
+/*==========================================================================
+ * Single-line Text Field
+ *=========================================================================*/
+
+/* Draw sunken field border */
+static void tf_draw_border(int16_t x, int16_t y, int16_t w, int16_t h) {
+    wd_hline(x, y, w, COLOR_DARK_GRAY);
+    wd_vline(x, y, h, COLOR_DARK_GRAY);
+    wd_hline(x + 1, y + 1, w - 2, COLOR_BLACK);
+    wd_vline(x + 1, y + 1, h - 2, COLOR_BLACK);
+    wd_hline(x, y + h - 1, w, COLOR_WHITE);
+    wd_vline(x + w - 1, y, h, COLOR_WHITE);
+    wd_hline(x + 1, y + h - 2, w - 2, THEME_BUTTON_FACE);
+    wd_vline(x + w - 2, y + 1, h - 2, THEME_BUTTON_FACE);
+    wd_fill_rect(x + 2, y + 2, w - 4, h - 4, COLOR_WHITE);
+}
+
+void textfield_init(textfield_t *tf, char *buf, int16_t buf_size,
+                    hwnd_t hwnd) {
+    memset(tf, 0, sizeof(*tf));
+    tf->buf = buf;
+    tf->buf_size = buf_size;
+    tf->hwnd = hwnd;
+    tf->len = (int16_t)strlen(buf);
+    tf->cursor = tf->len;
+    tf->cursor_visible = true;
+    tf->focused = false;
+}
+
+void textfield_set_rect(textfield_t *tf, int16_t x, int16_t y,
+                        int16_t w, int16_t h) {
+    tf->x = x;
+    tf->y = y;
+    tf->w = w;
+    tf->h = h;
+}
+
+void textfield_paint(textfield_t *tf) {
+    tf_draw_border(tf->x, tf->y, tf->w, tf->h);
+
+    /* Text content — needs screen coords for pixel-level cursor */
+    window_t *win = wm_get_window(tf->hwnd);
+    if (!win) return;
+    point_t co = theme_client_origin(&win->frame, win->flags);
+
+    int tx = co.x + tf->x + 4;
+    int ty = co.y + tf->y + (tf->h - FONT_UI_HEIGHT) / 2;
+    gfx_text_ui(tx, ty, tf->buf, COLOR_BLACK, COLOR_WHITE);
+
+    /* Blinking cursor */
+    if (tf->focused && tf->cursor_visible) {
+        int cx = tx + tf->cursor * FONT_UI_WIDTH;
+        for (int r = 0; r < FONT_UI_HEIGHT; r++)
+            if ((unsigned)(ty + r) < (unsigned)FB_HEIGHT)
+                display_set_pixel(cx, ty + r, COLOR_BLACK);
+    }
+}
+
+bool textfield_event(textfield_t *tf, const window_event_t *event) {
+    switch (event->type) {
+    case WM_CHAR: {
+        if (!tf->focused) return false;
+        char ch = event->charev.ch;
+        if (ch < 0x20 || ch >= 0x7F) return false;
+        if (event->charev.modifiers & KMOD_CTRL) return false;
+        if (tf->len < tf->buf_size - 1) {
+            for (int i = tf->len; i > tf->cursor; i--)
+                tf->buf[i] = tf->buf[i - 1];
+            tf->buf[tf->cursor] = ch;
+            tf->len++;
+            tf->cursor++;
+            tf->buf[tf->len] = '\0';
+            tf->cursor_visible = true;
+            wm_invalidate(tf->hwnd);
+        }
+        return true;
+    }
+
+    case WM_KEYDOWN: {
+        if (!tf->focused) return false;
+        uint8_t sc = event->key.scancode;
+        switch (sc) {
+        case 0x2A: /* Backspace */
+            if (tf->cursor > 0) {
+                for (int i = tf->cursor - 1; i < tf->len - 1; i++)
+                    tf->buf[i] = tf->buf[i + 1];
+                tf->len--;
+                tf->cursor--;
+                tf->buf[tf->len] = '\0';
+                tf->cursor_visible = true;
+                wm_invalidate(tf->hwnd);
+            }
+            return true;
+        case 0x4C: /* Delete */
+            if (tf->cursor < tf->len) {
+                for (int i = tf->cursor; i < tf->len - 1; i++)
+                    tf->buf[i] = tf->buf[i + 1];
+                tf->len--;
+                tf->buf[tf->len] = '\0';
+                tf->cursor_visible = true;
+                wm_invalidate(tf->hwnd);
+            }
+            return true;
+        case 0x50: /* Left */
+            if (tf->cursor > 0) {
+                tf->cursor--;
+                tf->cursor_visible = true;
+                wm_invalidate(tf->hwnd);
+            }
+            return true;
+        case 0x4F: /* Right */
+            if (tf->cursor < tf->len) {
+                tf->cursor++;
+                tf->cursor_visible = true;
+                wm_invalidate(tf->hwnd);
+            }
+            return true;
+        case 0x4A: /* Home */
+            tf->cursor = 0;
+            tf->cursor_visible = true;
+            wm_invalidate(tf->hwnd);
+            return true;
+        case 0x4D: /* End */
+            tf->cursor = tf->len;
+            tf->cursor_visible = true;
+            wm_invalidate(tf->hwnd);
+            return true;
+        }
+        return false;
+    }
+
+    case WM_LBUTTONDOWN: {
+        int16_t mx = event->mouse.x;
+        int16_t my = event->mouse.y;
+        if (mx >= tf->x + 2 && mx < tf->x + tf->w - 2 &&
+            my >= tf->y && my < tf->y + tf->h) {
+            tf->focused = true;
+            int pos = (mx - tf->x - 4) / FONT_UI_WIDTH;
+            if (pos < 0) pos = 0;
+            if (pos > tf->len) pos = tf->len;
+            tf->cursor = (int16_t)pos;
+            tf->cursor_visible = true;
+            wm_invalidate(tf->hwnd);
+            return true;
+        }
+        return false;
+    }
+
+    default:
+        return false;
+    }
+}
+
+void textfield_blink(textfield_t *tf) {
+    tf->cursor_visible = !tf->cursor_visible;
+    wm_invalidate(tf->hwnd);
+}
+
+void textfield_set_text(textfield_t *tf, const char *text) {
+    strncpy(tf->buf, text, tf->buf_size - 1);
+    tf->buf[tf->buf_size - 1] = '\0';
+    tf->len = (int16_t)strlen(tf->buf);
+    tf->cursor = tf->len;
+}
+
+const char *textfield_get_text(textfield_t *tf) {
+    return tf->buf;
+}
+
+int16_t textfield_get_length(textfield_t *tf) {
+    return tf->len;
+}
+
+/*==========================================================================
+ * Slider
+ *=========================================================================*/
+
+#define SLIDER_THUMB_W  12
+#define SLIDER_THUMB_H  16
+
+void slider_init(slider_t *sl, bool horizontal) {
+    memset(sl, 0, sizeof(*sl));
+    sl->horizontal = horizontal;
+}
+
+void slider_set_range(slider_t *sl, int32_t min_val, int32_t max_val,
+                      int32_t step) {
+    sl->min_val = min_val;
+    sl->max_val = max_val;
+    sl->step = step;
+}
+
+void slider_set_rect(slider_t *sl, int16_t x, int16_t y,
+                     int16_t w, int16_t h) {
+    sl->x = x;
+    sl->y = y;
+    sl->w = w;
+    sl->h = h;
+}
+
+static int32_t slider_clamp(slider_t *sl, int32_t val) {
+    if (val < sl->min_val) val = sl->min_val;
+    if (val > sl->max_val) val = sl->max_val;
+    if (sl->step > 0) {
+        int32_t offset = val - sl->min_val;
+        offset = ((offset + sl->step / 2) / sl->step) * sl->step;
+        val = sl->min_val + offset;
+        if (val > sl->max_val) val = sl->max_val;
+    }
+    return val;
+}
+
+/* Pixel position of thumb for current value */
+static int16_t slider_thumb_pos(slider_t *sl) {
+    int32_t range = sl->max_val - sl->min_val;
+    if (range <= 0) return sl->x;
+    if (sl->horizontal) {
+        int16_t track = sl->w - SLIDER_THUMB_W;
+        return sl->x + (int16_t)((sl->value - sl->min_val) * track / range);
+    } else {
+        int16_t track = sl->h - SLIDER_THUMB_H;
+        return sl->y + (int16_t)((sl->value - sl->min_val) * track / range);
+    }
+}
+
+/* Value from pixel position */
+static int32_t slider_val_from_pos(slider_t *sl, int16_t pos) {
+    int32_t range = sl->max_val - sl->min_val;
+    if (range <= 0) return sl->min_val;
+    if (sl->horizontal) {
+        int16_t track = sl->w - SLIDER_THUMB_W;
+        if (track <= 0) return sl->min_val;
+        int rel = pos - sl->x;
+        if (rel < 0) rel = 0;
+        if (rel > track) rel = track;
+        return slider_clamp(sl, sl->min_val + (int32_t)rel * range / track);
+    } else {
+        int16_t track = sl->h - SLIDER_THUMB_H;
+        if (track <= 0) return sl->min_val;
+        int rel = pos - sl->y;
+        if (rel < 0) rel = 0;
+        if (rel > track) rel = track;
+        return slider_clamp(sl, sl->min_val + (int32_t)rel * range / track);
+    }
+}
+
+void slider_paint(slider_t *sl) {
+    /* Sunken track */
+    wd_bevel_rect(sl->x, sl->y, sl->w, sl->h,
+                  COLOR_DARK_GRAY, COLOR_WHITE, THEME_BUTTON_FACE);
+
+    /* Raised thumb */
+    if (sl->horizontal) {
+        int16_t tx = slider_thumb_pos(sl);
+        wd_bevel_rect(tx, sl->y, SLIDER_THUMB_W, sl->h,
+                      COLOR_WHITE, COLOR_DARK_GRAY, THEME_BUTTON_FACE);
+    } else {
+        int16_t ty = slider_thumb_pos(sl);
+        wd_bevel_rect(sl->x, ty, sl->w, SLIDER_THUMB_H,
+                      COLOR_WHITE, COLOR_DARK_GRAY, THEME_BUTTON_FACE);
+    }
+}
+
+bool slider_event(slider_t *sl, const window_event_t *event,
+                  int32_t *new_val) {
+    switch (event->type) {
+    case WM_LBUTTONDOWN: {
+        int16_t mx = event->mouse.x;
+        int16_t my = event->mouse.y;
+        if (mx >= sl->x && mx < sl->x + sl->w &&
+            my >= sl->y && my < sl->y + sl->h) {
+            sl->dragging = true;
+            int32_t val;
+            if (sl->horizontal)
+                val = slider_val_from_pos(sl, mx);
+            else
+                val = slider_val_from_pos(sl, my);
+            if (val != sl->value) {
+                sl->value = val;
+                if (new_val) *new_val = val;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    case WM_MOUSEMOVE: {
+        if (!sl->dragging) return false;
+        int32_t val;
+        if (sl->horizontal)
+            val = slider_val_from_pos(sl, event->mouse.x);
+        else
+            val = slider_val_from_pos(sl, event->mouse.y);
+        if (val != sl->value) {
+            sl->value = val;
+            if (new_val) *new_val = val;
+            return true;
+        }
+        return false;
+    }
+
+    case WM_LBUTTONUP:
+        sl->dragging = false;
+        return false;
+
+    default:
+        return false;
+    }
+}
+
+/*==========================================================================
+ * Combobox
+ *=========================================================================*/
+
+void combobox_init(combobox_t *cb, char *buf, int16_t buf_size, hwnd_t hwnd) {
+    memset(cb, 0, sizeof(*cb));
+    textfield_init(&cb->field, buf, buf_size, hwnd);
+    cb->drop_btn_w = 14;
+    cb->drop_hover = -1;
+    cb->max_visible = 3;
+    cb->drop_item_h = 14;
+    cb->hwnd = hwnd;
+}
+
+void combobox_set_rect(combobox_t *cb, int16_t x, int16_t y,
+                       int16_t w, int16_t h) {
+    /* Text field gets the left portion */
+    textfield_set_rect(&cb->field, x, y, w - cb->drop_btn_w - 2, h);
+    /* Store full rect for dropdown positioning */
+    cb->field.x = x;
+    cb->field.w = w - cb->drop_btn_w - 2;
+}
+
+void combobox_set_items(combobox_t *cb, char (*items)[64], int8_t count) {
+    cb->items = items;
+    cb->item_count = count > COMBOBOX_MAX_ITEMS ?
+                     COMBOBOX_MAX_ITEMS : count;
+}
+
+void combobox_paint(combobox_t *cb) {
+    textfield_t *tf = &cb->field;
+    int16_t full_w = tf->w + 2 + cb->drop_btn_w;
+
+    /* Draw combined sunken border */
+    tf_draw_border(tf->x, tf->y, full_w, tf->h);
+
+    /* Text content */
+    window_t *win = wm_get_window(cb->hwnd);
+    if (!win) return;
+    point_t co = theme_client_origin(&win->frame, win->flags);
+
+    int tx = co.x + tf->x + 4;
+    int ty = co.y + tf->y + (tf->h - FONT_UI_HEIGHT) / 2;
+    gfx_text_ui(tx, ty, tf->buf, COLOR_BLACK, COLOR_WHITE);
+
+    /* Cursor (when focused and dropdown closed) */
+    if (tf->focused && tf->cursor_visible && !cb->drop_open) {
+        int cx = tx + tf->cursor * FONT_UI_WIDTH;
+        for (int r = 0; r < FONT_UI_HEIGHT; r++)
+            if ((unsigned)(ty + r) < (unsigned)FB_HEIGHT)
+                display_set_pixel(cx, ty + r, COLOR_BLACK);
+    }
+
+    /* Arrow button area */
+    int16_t bx = tf->x + tf->w + 2;
+    int16_t bw = cb->drop_btn_w - 2;
+    int16_t by = tf->y + 2;
+    int16_t bh = tf->h - 4;
+    wd_fill_rect(bx, by, bw, bh, THEME_BUTTON_FACE);
+    wd_vline(bx - 1, by, bh, COLOR_DARK_GRAY);
+
+    /* Down-arrow triangle */
+    int16_t acx = bx + bw / 2;
+    int16_t acy = by + bh / 2;
+    wd_hline(acx - 2, acy - 1, 5, COLOR_BLACK);
+    wd_hline(acx - 1, acy,     3, COLOR_BLACK);
+    wd_pixel(acx,     acy + 1,    COLOR_BLACK);
+
+    /* Dropdown list */
+    if (cb->drop_open && cb->item_count > 0) {
+        int vis = cb->item_count < cb->max_visible ?
+                  cb->item_count : cb->max_visible;
+        int16_t dl_x = tf->x;
+        int16_t dl_y = tf->y + tf->h;
+        int16_t dl_w = full_w;
+        int16_t dl_h = (int16_t)(vis * cb->drop_item_h + 2);
+
+        wd_fill_rect(dl_x, dl_y, dl_w, dl_h, COLOR_WHITE);
+        wd_hline(dl_x, dl_y, dl_w, COLOR_DARK_GRAY);
+        wd_hline(dl_x, dl_y + dl_h - 1, dl_w, COLOR_DARK_GRAY);
+        wd_vline(dl_x, dl_y, dl_h, COLOR_DARK_GRAY);
+        wd_vline(dl_x + dl_w - 1, dl_y, dl_h, COLOR_DARK_GRAY);
+
+        for (int i = 0; i < vis; i++) {
+            int idx = cb->drop_scroll + i;
+            if (idx >= cb->item_count) break;
+            bool hov = (cb->drop_hover == idx);
+            uint8_t bg = hov ? COLOR_BLUE  : COLOR_WHITE;
+            uint8_t fg = hov ? COLOR_WHITE : COLOR_BLACK;
+            int16_t iy = dl_y + 1 + (int16_t)(i * cb->drop_item_h);
+
+            wd_fill_rect(dl_x + 1, iy, dl_w - 2,
+                         cb->drop_item_h, bg);
+            wd_text_ui(dl_x + 4,
+                       iy + (cb->drop_item_h - FONT_UI_HEIGHT) / 2,
+                       cb->items[idx], fg, bg);
+        }
+    }
+}
+
+/* Hit-test: returns item index or -1 */
+static int cb_drop_hittest(combobox_t *cb, int16_t mx, int16_t my) {
+    if (!cb->drop_open || cb->item_count == 0) return -1;
+    textfield_t *tf = &cb->field;
+    int16_t full_w = tf->w + 2 + cb->drop_btn_w;
+    int vis = cb->item_count < cb->max_visible ?
+              cb->item_count : cb->max_visible;
+    int16_t dl_x = tf->x;
+    int16_t dl_y = tf->y + tf->h;
+    int16_t dl_w = full_w;
+    int16_t dl_h = (int16_t)(vis * cb->drop_item_h + 2);
+
+    if (mx < dl_x || mx >= dl_x + dl_w) return -1;
+    if (my < dl_y || my >= dl_y + dl_h) return -1;
+
+    int rel = my - dl_y - 1;
+    if (rel < 0) return -1;
+    int idx = cb->drop_scroll + rel / cb->drop_item_h;
+    if (idx >= cb->item_count) return -1;
+    return idx;
+}
+
+bool combobox_event(combobox_t *cb, const window_event_t *event) {
+    textfield_t *tf = &cb->field;
+    int16_t full_w = tf->w + 2 + cb->drop_btn_w;
+
+    switch (event->type) {
+    case WM_LBUTTONDOWN: {
+        int16_t mx = event->mouse.x;
+        int16_t my = event->mouse.y;
+
+        /* Dropdown list has priority */
+        {
+            int hit = cb_drop_hittest(cb, mx, my);
+            if (hit >= 0) {
+                cb->drop_hover = (int8_t)hit;
+                wm_invalidate(cb->hwnd);
+                return true;
+            }
+        }
+
+        /* Arrow button */
+        int16_t btn_x = tf->x + tf->w + 2;
+        if (mx >= btn_x && mx < btn_x + cb->drop_btn_w &&
+            my >= tf->y && my < tf->y + tf->h) {
+            cb->drop_open = !cb->drop_open;
+            cb->drop_hover = -1;
+            cb->drop_scroll = 0;
+            wm_force_full_repaint();
+            return true;
+        }
+
+        /* Text field click */
+        if (mx >= tf->x + 2 && mx < tf->x + tf->w - 2 &&
+            my >= tf->y && my < tf->y + tf->h) {
+            tf->focused = true;
+            int pos = (mx - tf->x - 4) / FONT_UI_WIDTH;
+            if (pos < 0) pos = 0;
+            if (pos > tf->len) pos = tf->len;
+            tf->cursor = (int16_t)pos;
+            if (cb->drop_open) {
+                cb->drop_open = false;
+                wm_force_full_repaint();
+            } else {
+                tf->cursor_visible = true;
+                wm_invalidate(cb->hwnd);
+            }
+            return true;
+        }
+
+        /* Click elsewhere — close dropdown */
+        if (cb->drop_open) {
+            cb->drop_open = false;
+            cb->drop_hover = -1;
+            wm_force_full_repaint();
+        }
+        return false;
+    }
+
+    case WM_LBUTTONUP: {
+        if (cb->drop_open) {
+            int hit = cb_drop_hittest(cb, event->mouse.x, event->mouse.y);
+            if (hit >= 0) {
+                combobox_select_item(cb, (int8_t)hit);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    case WM_MOUSEMOVE: {
+        if (!cb->drop_open) return false;
+        int hit = cb_drop_hittest(cb, event->mouse.x, event->mouse.y);
+        if (hit != cb->drop_hover) {
+            cb->drop_hover = (int8_t)hit;
+            wm_invalidate(cb->hwnd);
+        }
+        return false;
+    }
+
+    case WM_KEYDOWN: {
+        if (!tf->focused) return false;
+        uint8_t sc = event->key.scancode;
+
+        /* Escape closes dropdown */
+        if (sc == 0x29 && cb->drop_open) {
+            cb->drop_open = false;
+            cb->drop_hover = -1;
+            wm_force_full_repaint();
+            return true;
+        }
+
+        /* Enter selects dropdown item */
+        if (sc == 0x28 && cb->drop_open) {
+            if (cb->drop_hover >= 0)
+                combobox_select_item(cb, cb->drop_hover);
+            else {
+                cb->drop_open = false;
+                cb->drop_hover = -1;
+                wm_force_full_repaint();
+            }
+            return true;
+        }
+
+        /* Down arrow: open/navigate dropdown */
+        if (sc == 0x51) {
+            if (cb->drop_open) {
+                if (cb->drop_hover < cb->item_count - 1) {
+                    cb->drop_hover++;
+                    int vis = cb->item_count < cb->max_visible ?
+                              cb->item_count : cb->max_visible;
+                    if (cb->drop_hover >= cb->drop_scroll + vis)
+                        cb->drop_scroll = cb->drop_hover - vis + 1;
+                }
+                wm_force_full_repaint();
+            } else if (cb->item_count > 0) {
+                cb->drop_open = true;
+                cb->drop_hover = -1;
+                cb->drop_scroll = 0;
+                wm_force_full_repaint();
+            }
+            return true;
+        }
+
+        /* Up arrow: navigate dropdown */
+        if (sc == 0x52 && cb->drop_open) {
+            if (cb->drop_hover > 0) {
+                cb->drop_hover--;
+                if (cb->drop_hover < cb->drop_scroll)
+                    cb->drop_scroll = cb->drop_hover;
+            } else if (cb->drop_hover == 0) {
+                cb->drop_hover = -1;
+            } else {
+                cb->drop_open = false;
+                cb->drop_hover = -1;
+            }
+            wm_force_full_repaint();
+            return true;
+        }
+
+        /* When dropdown is open, don't pass text editing keys */
+        if (cb->drop_open) return true;
+
+        /* Delegate text editing to textfield */
+        return textfield_event(tf, event);
+    }
+
+    case WM_CHAR:
+        if (!tf->focused || cb->drop_open) return cb->drop_open;
+        return textfield_event(tf, event);
+
+    default:
+        return false;
+    }
+}
+
+bool combobox_is_open(combobox_t *cb) {
+    return cb->drop_open;
+}
+
+void combobox_select_item(combobox_t *cb, int8_t index) {
+    if (index < 0 || index >= cb->item_count) return;
+    textfield_set_text(&cb->field, cb->items[index]);
+    cb->drop_open = false;
+    cb->drop_hover = -1;
+    cb->field.focused = true;
+    wm_force_full_repaint();
 }

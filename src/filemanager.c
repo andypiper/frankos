@@ -24,6 +24,7 @@
 #include "file_assoc.h"
 #include "desktop.h"
 #include "ico.h"
+#include "controls.h"
 #include "FreeRTOS.h"
 #include "task.h"
 #include <string.h>
@@ -610,71 +611,6 @@ static void fm_paint_toolbar(filemanager_t *fm, int16_t cw) {
 }
 
 /*==========================================================================
- * Painting: scrollbar
- *=========================================================================*/
-
-/* Draw a small arrow glyph for scrollbar buttons */
-static void fm_draw_sb_arrow(int16_t cx, int16_t cy, bool up) {
-    if (up) {
-        wd_pixel(cx, cy + 3, COLOR_BLACK);
-        wd_hline(cx - 1, cy + 4, 3, COLOR_BLACK);
-        wd_hline(cx - 2, cy + 5, 5, COLOR_BLACK);
-        wd_hline(cx - 3, cy + 6, 7, COLOR_BLACK);
-    } else {
-        wd_hline(cx - 3, cy + 3, 7, COLOR_BLACK);
-        wd_hline(cx - 2, cy + 4, 5, COLOR_BLACK);
-        wd_hline(cx - 1, cy + 5, 3, COLOR_BLACK);
-        wd_pixel(cx, cy + 6, COLOR_BLACK);
-    }
-}
-
-static void fm_paint_scrollbar(filemanager_t *fm, int16_t cw, int16_t ch) {
-    int16_t fah = fm_file_area_height(ch);
-    int16_t sx = cw - FN_SCROLLBAR_W;
-    int16_t sy = FN_HEADER_HEIGHT;
-    int16_t sb_w = FN_SCROLLBAR_W;
-    int16_t btn_h = sb_w; /* square arrow buttons */
-
-    if (fah < btn_h * 2 + 8) return; /* not enough room */
-
-    /* Up arrow button */
-    wd_bevel_rect(sx, sy, sb_w, btn_h,
-                   COLOR_WHITE, COLOR_DARK_GRAY, THEME_BUTTON_FACE);
-    fm_draw_sb_arrow(sx + sb_w / 2, sy, true);
-
-    /* Down arrow button */
-    wd_bevel_rect(sx, sy + fah - btn_h, sb_w, btn_h,
-                   COLOR_WHITE, COLOR_DARK_GRAY, THEME_BUTTON_FACE);
-    fm_draw_sb_arrow(sx + sb_w / 2, sy + fah - btn_h, false);
-
-    /* Track area between arrow buttons */
-    int16_t track_y = sy + btn_h;
-    int16_t track_h = fah - btn_h * 2;
-
-    /* Fill track with dithered pattern */
-    for (int16_t y = 0; y < track_h; y++) {
-        for (int16_t x = 0; x < sb_w; x++) {
-            uint8_t c = ((x + y) & 1) ? COLOR_WHITE : COLOR_LIGHT_GRAY;
-            wd_pixel(sx + x, track_y + y, c);
-        }
-    }
-
-    if (fm->content_height <= fah || track_h < 8) return;
-
-    /* Thumb proportional to visible area */
-    int thumb_h = (int)track_h * fah / fm->content_height;
-    if (thumb_h < 16) thumb_h = 16;
-    if (thumb_h > track_h) thumb_h = track_h;
-    int max_scroll = fm->content_height - fah;
-    int thumb_y = 0;
-    if (max_scroll > 0)
-        thumb_y = (int)fm->scroll_y * (track_h - thumb_h) / max_scroll;
-
-    wd_bevel_rect(sx, track_y + thumb_y, sb_w, thumb_h,
-                   COLOR_WHITE, COLOR_DARK_GRAY, THEME_BUTTON_FACE);
-}
-
-/*==========================================================================
  * Painting: status bar
  *=========================================================================*/
 
@@ -1004,9 +940,18 @@ static void fm_paint(hwnd_t hwnd) {
     if (dirty & FM_DIRTY_TOOLBAR)
         fm_paint_toolbar(fm, cw);
 
-    /* Scrollbar — always when content overflows */
-    if (need_scrollbar)
-        fm_paint_scrollbar(fm, cw, ch);
+    /* Scrollbar — update geometry and paint via API control */
+    {
+        int16_t fah_sb = fm_file_area_height(ch);
+        fm->vscroll.x = cw - FN_SCROLLBAR_W;
+        fm->vscroll.y = FN_HEADER_HEIGHT;
+        fm->vscroll.w = FN_SCROLLBAR_W;
+        fm->vscroll.h = fah_sb;
+        scrollbar_set_range(&fm->vscroll, fm->content_height, fah_sb);
+        scrollbar_set_pos(&fm->vscroll, fm->scroll_y);
+        if (fm->vscroll.visible)
+            scrollbar_paint(&fm->vscroll);
+    }
 
     /* Status bar — always */
     fm_paint_statusbar(fm, cw, ch);
@@ -1571,51 +1516,6 @@ static void fm_show_context_menu(filemanager_t *fm, int16_t sx, int16_t sy,
 }
 
 /*==========================================================================
- * Scrollbar mouse handling
- *=========================================================================*/
-
-static bool fm_scrollbar_click(filemanager_t *fm, int16_t mx, int16_t my,
-                                int16_t cw, int16_t ch) {
-    int16_t sx = cw - FN_SCROLLBAR_W;
-    if (mx < sx) return false;
-
-    int16_t fah = fm_file_area_height(ch);
-    if (fm->content_height <= fah) return false;
-
-    int16_t ry = my - FN_HEADER_HEIGHT;
-    if (ry < 0 || ry >= fah) return false;
-
-    int16_t btn_h = FN_SCROLLBAR_W; /* square buttons */
-    int scroll_step = 32; /* pixels to scroll per arrow click */
-
-    /* Up arrow button */
-    if (ry < btn_h) {
-        fm->scroll_y -= scroll_step;
-        fm_clamp_scroll(fm, ch);
-        fm_invalidate(fm, FM_DIRTY_FILES | FM_DIRTY_SCROLLBAR);
-        return true;
-    }
-
-    /* Down arrow button */
-    if (ry >= fah - btn_h) {
-        fm->scroll_y += scroll_step;
-        fm_clamp_scroll(fm, ch);
-        fm_invalidate(fm, FM_DIRTY_FILES | FM_DIRTY_SCROLLBAR);
-        return true;
-    }
-
-    /* Track area: proportional jump */
-    int16_t track_y = btn_h;
-    int16_t track_h = fah - btn_h * 2;
-    int max_scroll = fm->content_height - fah;
-    if (track_h > 0 && max_scroll > 0)
-        fm->scroll_y = (int16_t)((ry - track_y) * max_scroll / track_h);
-    fm_clamp_scroll(fm, ch);
-    fm_invalidate(fm, FM_DIRTY_FILES | FM_DIRTY_SCROLLBAR);
-    return true;
-}
-
-/*==========================================================================
  * Batch-open helper  (kept noinline so the 2 KB buffer is only on the
  * stack when actually opening files — not for every fm_event call)
  *=========================================================================*/
@@ -1739,9 +1639,15 @@ static bool fm_event(hwnd_t hwnd, const window_event_t *event) {
             return true;
         }
 
-        /* Scrollbar */
-        if (fm_scrollbar_click(fm, mx, my, cw, ch))
-            return true;
+        /* Scrollbar — forward to API control */
+        {
+            int32_t new_pos;
+            if (scrollbar_event(&fm->vscroll, event, &new_pos)) {
+                fm->scroll_y = (int16_t)new_pos;
+                fm_invalidate(fm, FM_DIRTY_FILES | FM_DIRTY_SCROLLBAR);
+                return true;
+            }
+        }
 
         /* File area hit-test */
         int16_t idx = fm_hit_test(fm, mx, my, cw);
@@ -1818,6 +1724,16 @@ static bool fm_event(hwnd_t hwnd, const window_event_t *event) {
                 }
             }
             return true;
+        }
+
+        /* Scrollbar thumb release */
+        {
+            int32_t new_pos;
+            if (scrollbar_event(&fm->vscroll, event, &new_pos)) {
+                fm->scroll_y = (int16_t)new_pos;
+                fm_invalidate(fm, FM_DIRTY_FILES | FM_DIRTY_SCROLLBAR);
+                return true;
+            }
         }
 
         /* End rubber band */
@@ -1917,10 +1833,12 @@ static bool fm_event(hwnd_t hwnd, const window_event_t *event) {
             return true;
         }
 
-        /* Scrollbar drag */
-        if (event->mouse.buttons & 0x01) {
-            if (mx >= cw - FN_SCROLLBAR_W) {
-                fm_scrollbar_click(fm, mx, my, cw, ch);
+        /* Scrollbar drag — forward to API control */
+        {
+            int32_t new_pos;
+            if (scrollbar_event(&fm->vscroll, event, &new_pos)) {
+                fm->scroll_y = (int16_t)new_pos;
+                fm_invalidate(fm, FM_DIRTY_FILES | FM_DIRTY_SCROLLBAR);
                 return true;
             }
         }
@@ -2278,6 +2196,9 @@ hwnd_t filemanager_create(const char *initial_path) {
     fm->sort_column = 0;   /* sort by name */
     fm->sort_ascending = 1;
     fm->col_resize_active = -1;
+
+    /* Vertical scrollbar (API control) */
+    scrollbar_init(&fm->vscroll, false);
 
     /* Create window */
     fm->hwnd = wm_create_window(

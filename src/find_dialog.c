@@ -10,6 +10,7 @@
  */
 
 #include "find_dialog.h"
+#include "controls.h"
 #include "window.h"
 #include "window_event.h"
 #include "window_draw.h"
@@ -37,7 +38,6 @@
 #define FND_BTN_W           90
 #define FND_BTN_H           23
 #define FND_BTN_GAP          4
-#define FND_CHECK_SIZE      13
 
 /* Find-only client area */
 #define FND_FIND_CLIENT_W   360
@@ -57,19 +57,15 @@ static bool     fnd_replace_mode;
 
 /* Text fields */
 static char     fnd_find_buf[FND_FIND_BUF_MAX + 1];
-static uint8_t  fnd_find_len;
-static uint8_t  fnd_find_cursor;
-
 static char     fnd_repl_buf[FND_REPL_BUF_MAX + 1];
-static uint8_t  fnd_repl_len;
-static uint8_t  fnd_repl_cursor;
+static textfield_t fnd_find_tf;
+static textfield_t fnd_repl_tf;
 
 /* Focus: 0 = find field, 1 = replace field, 2+ = buttons */
 static int8_t   fnd_focus;
-static bool     fnd_match_case;
+static checkbox_t fnd_checkbox;
 
 /* Cursor blink */
-static bool          fnd_cursor_visible;
 static TimerHandle_t fnd_blink_timer = NULL;
 
 /* Button press state */
@@ -87,65 +83,20 @@ static int16_t  fnd_field_w;
 
 static void fnd_blink_callback(TimerHandle_t xTimer) {
     (void)xTimer;
-    fnd_cursor_visible = !fnd_cursor_visible;
-    wm_invalidate(fnd_hwnd);
+    if (fnd_focus == 0)
+        textfield_blink(&fnd_find_tf);
+    else if (fnd_focus == 1)
+        textfield_blink(&fnd_repl_tf);
 }
 
 static void fnd_blink_reset(void) {
-    fnd_cursor_visible = true;
+    fnd_find_tf.cursor_visible = true;
+    fnd_repl_tf.cursor_visible = true;
     if (fnd_blink_timer) xTimerReset(fnd_blink_timer, 0);
     wm_invalidate(fnd_hwnd);
 }
 
-/*==========================================================================
- * Sunken field
- *=========================================================================*/
-
-static void fnd_draw_sunken(int16_t x, int16_t y, int16_t w, int16_t h) {
-    wd_hline(x, y, w, COLOR_DARK_GRAY);
-    wd_vline(x, y, h, COLOR_DARK_GRAY);
-    wd_hline(x + 1, y + 1, w - 2, COLOR_BLACK);
-    wd_vline(x + 1, y + 1, h - 2, COLOR_BLACK);
-    wd_hline(x, y + h - 1, w, COLOR_WHITE);
-    wd_vline(x + w - 1, y, h, COLOR_WHITE);
-    wd_hline(x + 1, y + h - 2, w - 2, THEME_BUTTON_FACE);
-    wd_vline(x + w - 2, y + 1, h - 2, THEME_BUTTON_FACE);
-    wd_fill_rect(x + 2, y + 2, w - 4, h - 4, COLOR_WHITE);
-}
-
-/*==========================================================================
- * Checkbox drawing
- *=========================================================================*/
-
-static void fnd_draw_checkbox(int16_t x, int16_t y, bool checked) {
-    /* Sunken box */
-    wd_hline(x, y, FND_CHECK_SIZE, COLOR_DARK_GRAY);
-    wd_vline(x, y, FND_CHECK_SIZE, COLOR_DARK_GRAY);
-    wd_hline(x, y + FND_CHECK_SIZE - 1, FND_CHECK_SIZE, COLOR_WHITE);
-    wd_vline(x + FND_CHECK_SIZE - 1, y, FND_CHECK_SIZE, COLOR_WHITE);
-    wd_fill_rect(x + 1, y + 1, FND_CHECK_SIZE - 2, FND_CHECK_SIZE - 2,
-                  COLOR_WHITE);
-
-    if (checked) {
-        /* Draw checkmark */
-        int cx = x + 3, cy = y + 5;
-        wd_pixel(cx, cy, COLOR_BLACK);
-        wd_pixel(cx + 1, cy + 1, COLOR_BLACK);
-        wd_pixel(cx + 2, cy + 2, COLOR_BLACK);
-        wd_pixel(cx + 3, cy + 1, COLOR_BLACK);
-        wd_pixel(cx + 4, cy, COLOR_BLACK);
-        wd_pixel(cx + 5, cy - 1, COLOR_BLACK);
-        wd_pixel(cx + 6, cy - 2, COLOR_BLACK);
-        /* Thicken */
-        wd_pixel(cx, cy - 1, COLOR_BLACK);
-        wd_pixel(cx + 1, cy, COLOR_BLACK);
-        wd_pixel(cx + 2, cy + 1, COLOR_BLACK);
-        wd_pixel(cx + 3, cy, COLOR_BLACK);
-        wd_pixel(cx + 4, cy - 1, COLOR_BLACK);
-        wd_pixel(cx + 5, cy - 2, COLOR_BLACK);
-        wd_pixel(cx + 6, cy - 3, COLOR_BLACK);
-    }
-}
+/* Sunken field and checkbox drawing now use controls.h */
 
 /*==========================================================================
  * Layout helpers
@@ -217,54 +168,25 @@ static int fnd_btn_index(void) {
 static void fnd_paint(hwnd_t hwnd) {
     (void)hwnd;
 
-    window_t *win = wm_get_window(fnd_hwnd);
-    int sox = 0, soy = 0;
-    if (win) {
-        point_t co = theme_client_origin(&win->frame, win->flags);
-        sox = co.x;
-        soy = co.y;
-    }
-
     /* "Find what:" field */
     wd_text_ui(FND_PAD, fnd_find_field_y() + (FND_FIELD_H - FONT_UI_HEIGHT) / 2,
                "Find what:", COLOR_BLACK, THEME_BUTTON_FACE);
-    fnd_draw_sunken(fnd_field_x, fnd_find_field_y(), fnd_field_w, FND_FIELD_H);
-    {
-        int tx = sox + fnd_field_x + 4;
-        int ty = soy + fnd_find_field_y() + (FND_FIELD_H - FONT_UI_HEIGHT) / 2;
-        gfx_text_ui(tx, ty, fnd_find_buf, COLOR_BLACK, COLOR_WHITE);
-        if (fnd_focus == 0 && fnd_cursor_visible) {
-            int cx = tx + fnd_find_cursor * FONT_UI_WIDTH;
-            for (int r = 0; r < FONT_UI_HEIGHT; r++)
-                display_set_pixel(cx, ty + r, COLOR_BLACK);
-        }
-    }
+    fnd_find_tf.focused = (fnd_focus == 0);
+    textfield_paint(&fnd_find_tf);
 
     /* "Replace with:" field (replace mode only) */
     if (fnd_replace_mode) {
         wd_text_ui(FND_PAD,
                    fnd_repl_field_y() + (FND_FIELD_H - FONT_UI_HEIGHT) / 2,
                    "Replace with:", COLOR_BLACK, THEME_BUTTON_FACE);
-        fnd_draw_sunken(fnd_field_x, fnd_repl_field_y(),
-                        fnd_field_w, FND_FIELD_H);
-        {
-            int tx = sox + fnd_field_x + 4;
-            int ty = soy + fnd_repl_field_y() + (FND_FIELD_H - FONT_UI_HEIGHT) / 2;
-            gfx_text_ui(tx, ty, fnd_repl_buf, COLOR_BLACK, COLOR_WHITE);
-            if (fnd_focus == 1 && fnd_cursor_visible) {
-                int cx = tx + fnd_repl_cursor * FONT_UI_WIDTH;
-                for (int r = 0; r < FONT_UI_HEIGHT; r++)
-                    display_set_pixel(cx, ty + r, COLOR_BLACK);
-            }
-        }
+        fnd_repl_tf.focused = (fnd_focus == 1);
+        textfield_paint(&fnd_repl_tf);
     }
 
     /* "Match case" checkbox */
-    int16_t cby = fnd_checkbox_y();
-    fnd_draw_checkbox(FND_PAD, cby, fnd_match_case);
-    wd_text_ui(FND_PAD + FND_CHECK_SIZE + 4,
-               cby + (FND_CHECK_SIZE - FONT_UI_HEIGHT) / 2,
-               "Match case", COLOR_BLACK, THEME_BUTTON_FACE);
+    fnd_checkbox.x = FND_PAD;
+    fnd_checkbox.y = fnd_checkbox_y();
+    checkbox_paint(&fnd_checkbox);
 
     /* Buttons (right column) */
     int bc = fnd_btn_count();
@@ -328,43 +250,7 @@ static void fnd_activate_button(int idx) {
     }
 }
 
-/*==========================================================================
- * Text field editing helpers
- *=========================================================================*/
-
-static void fnd_field_char(char *buf, uint8_t *len, uint8_t *cursor,
-                            uint8_t max_len, char ch) {
-    if (*len < max_len) {
-        for (int i = *len; i > *cursor; i--)
-            buf[i] = buf[i - 1];
-        buf[*cursor] = ch;
-        (*len)++;
-        (*cursor)++;
-        buf[*len] = '\0';
-        fnd_blink_reset();
-    }
-}
-
-static void fnd_field_backspace(char *buf, uint8_t *len, uint8_t *cursor) {
-    if (*cursor > 0) {
-        for (int i = *cursor - 1; i < *len - 1; i++)
-            buf[i] = buf[i + 1];
-        (*len)--;
-        (*cursor)--;
-        buf[*len] = '\0';
-        fnd_blink_reset();
-    }
-}
-
-static void fnd_field_delete(char *buf, uint8_t *len, uint8_t *cursor) {
-    if (*cursor < *len) {
-        for (int i = *cursor; i < *len - 1; i++)
-            buf[i] = buf[i + 1];
-        (*len)--;
-        buf[*len] = '\0';
-        fnd_blink_reset();
-    }
-}
+/* Text field editing now uses controls.h textfield_t */
 
 /*==========================================================================
  * Event handler
@@ -380,17 +266,12 @@ static bool fnd_event(hwnd_t hwnd, const window_event_t *event) {
 
     case WM_CHAR:
         if (fnd_is_field_focus()) {
-            char ch = event->charev.ch;
-            if (ch < 0x20 || ch >= 0x7F) return true;
-            if (event->charev.modifiers & KMOD_CTRL) return true;
-            if (fnd_focus == 0) {
-                fnd_field_char(fnd_find_buf, &fnd_find_len,
-                               &fnd_find_cursor, FND_FIND_BUF_MAX, ch);
-            } else if (fnd_focus == 1 && fnd_replace_mode) {
-                fnd_field_char(fnd_repl_buf, &fnd_repl_len,
-                               &fnd_repl_cursor, FND_REPL_BUF_MAX, ch);
+            textfield_t *tf = (fnd_focus == 0) ? &fnd_find_tf : &fnd_repl_tf;
+            tf->focused = true;
+            if (textfield_event(tf, event)) {
+                fnd_blink_reset();
+                return true;
             }
-            return true;
         }
         return false;
 
@@ -421,41 +302,9 @@ static bool fnd_event(hwnd_t hwnd, const window_event_t *event) {
 
         /* Field editing keys */
         if (fnd_is_field_focus()) {
-            char *buf;
-            uint8_t *len, *cursor;
-            uint8_t max_len;
-            if (fnd_focus == 0) {
-                buf = fnd_find_buf;
-                len = &fnd_find_len;
-                cursor = &fnd_find_cursor;
-                max_len = FND_FIND_BUF_MAX;
-            } else {
-                buf = fnd_repl_buf;
-                len = &fnd_repl_len;
-                cursor = &fnd_repl_cursor;
-                max_len = FND_REPL_BUF_MAX;
-            }
-            (void)max_len;
-
-            switch (sc) {
-            case 0x2A: /* Backspace */
-                fnd_field_backspace(buf, len, cursor);
-                return true;
-            case 0x4C: /* Delete */
-                fnd_field_delete(buf, len, cursor);
-                return true;
-            case 0x50: /* Left */
-                if (*cursor > 0) { (*cursor)--; fnd_blink_reset(); }
-                return true;
-            case 0x4F: /* Right */
-                if (*cursor < *len) { (*cursor)++; fnd_blink_reset(); }
-                return true;
-            case 0x4A: /* Home */
-                *cursor = 0;
-                fnd_blink_reset();
-                return true;
-            case 0x4D: /* End */
-                *cursor = *len;
+            textfield_t *tf = (fnd_focus == 0) ? &fnd_find_tf : &fnd_repl_tf;
+            tf->focused = true;
+            if (textfield_event(tf, event)) {
                 fnd_blink_reset();
                 return true;
             }
@@ -470,40 +319,23 @@ static bool fnd_event(hwnd_t hwnd, const window_event_t *event) {
         fnd_btn_pressed = -1;
 
         /* Hit-test: Find field */
-        if (mx >= fnd_field_x + 2 && mx < fnd_field_x + fnd_field_w - 2 &&
-            my >= fnd_find_field_y() &&
-            my < fnd_find_field_y() + FND_FIELD_H) {
+        if (textfield_event(&fnd_find_tf, event)) {
             fnd_focus = 0;
-            int click_x = mx - fnd_field_x - 4;
-            int new_pos = click_x / FONT_UI_WIDTH;
-            if (new_pos < 0) new_pos = 0;
-            if (new_pos > fnd_find_len) new_pos = fnd_find_len;
-            fnd_find_cursor = new_pos;
             fnd_blink_reset();
             return true;
         }
 
         /* Hit-test: Replace field */
-        if (fnd_replace_mode &&
-            mx >= fnd_field_x + 2 && mx < fnd_field_x + fnd_field_w - 2 &&
-            my >= fnd_repl_field_y() &&
-            my < fnd_repl_field_y() + FND_FIELD_H) {
+        if (fnd_replace_mode && textfield_event(&fnd_repl_tf, event)) {
             fnd_focus = 1;
-            int click_x = mx - fnd_field_x - 4;
-            int new_pos = click_x / FONT_UI_WIDTH;
-            if (new_pos < 0) new_pos = 0;
-            if (new_pos > fnd_repl_len) new_pos = fnd_repl_len;
-            fnd_repl_cursor = new_pos;
             fnd_blink_reset();
             return true;
         }
 
         /* Hit-test: Match case checkbox */
         {
-            int16_t cby = fnd_checkbox_y();
-            if (mx >= FND_PAD && mx < FND_PAD + FND_CHECK_SIZE + 70 &&
-                my >= cby && my < cby + FND_CHECK_SIZE) {
-                fnd_match_case = !fnd_match_case;
+            bool changed = false;
+            if (checkbox_event(&fnd_checkbox, event, &changed) && changed) {
                 wm_invalidate(fnd_hwnd);
                 return true;
             }
@@ -571,6 +403,11 @@ static hwnd_t fnd_open(hwnd_t parent, bool replace_mode) {
     fnd_replace_mode = replace_mode;
     fnd_focus = 0;
     fnd_btn_pressed = -1;
+    {
+        bool was_checked = fnd_checkbox.checked;
+        checkbox_init(&fnd_checkbox, FND_PAD, 0, "Match case");
+        fnd_checkbox.checked = was_checked;
+    }
 
     /* Keep existing search text if any */
 
@@ -603,6 +440,25 @@ static hwnd_t fnd_open(hwnd_t parent, bool replace_mode) {
                                   fnd_event, fnd_paint);
     if (fnd_hwnd == HWND_NULL) return HWND_NULL;
 
+    /* Initialize text fields (preserve existing text) */
+    {
+        int16_t find_len = (int16_t)strlen(fnd_find_buf);
+        int16_t repl_len = (int16_t)strlen(fnd_repl_buf);
+        textfield_init(&fnd_find_tf, fnd_find_buf, FND_FIND_BUF_MAX + 1,
+                       fnd_hwnd);
+        fnd_find_tf.len = find_len;
+        fnd_find_tf.cursor = find_len;
+        textfield_set_rect(&fnd_find_tf, fnd_field_x, fnd_find_field_y(),
+                           fnd_field_w, FND_FIELD_H);
+
+        textfield_init(&fnd_repl_tf, fnd_repl_buf, FND_REPL_BUF_MAX + 1,
+                       fnd_hwnd);
+        fnd_repl_tf.len = repl_len;
+        fnd_repl_tf.cursor = repl_len;
+        textfield_set_rect(&fnd_repl_tf, fnd_field_x, fnd_repl_field_y(),
+                           fnd_field_w, FND_FIELD_H);
+    }
+
     window_t *win = wm_get_window(fnd_hwnd);
     if (win) win->bg_color = THEME_BUTTON_FACE;
 
@@ -610,7 +466,8 @@ static hwnd_t fnd_open(hwnd_t parent, bool replace_mode) {
     /* Note: NOT modal — user can still interact with parent */
 
     /* Cursor blink timer */
-    fnd_cursor_visible = true;
+    fnd_find_tf.cursor_visible = true;
+    fnd_repl_tf.cursor_visible = true;
     fnd_blink_timer = xTimerCreate("fndblink", pdMS_TO_TICKS(500),
                                      pdTRUE, NULL, fnd_blink_callback);
     if (fnd_blink_timer) xTimerStart(fnd_blink_timer, 0);
@@ -639,7 +496,7 @@ const char *find_dialog_get_replace_text(void) {
 }
 
 bool find_dialog_case_sensitive(void) {
-    return fnd_match_case;
+    return fnd_checkbox.checked;
 }
 
 void find_dialog_close(void) {

@@ -11,6 +11,7 @@
 
 #include <stdint.h>
 #include "window.h"
+#include "controls.h"
 
 /*==========================================================================
  * General constants
@@ -167,6 +168,9 @@ typedef struct {
     /* --- misc flags ---------------------------------------------------- */
     uint8_t  has_custom_layout;
     uint8_t  pending_rename;
+
+    /* --- scrollbar (API control) --------------------------------------- */
+    scrollbar_t  vscroll;
 
     /* --- paint dirty flags --------------------------------------------- */
     uint8_t  dirty;                 /* FM_DIRTY_* bitmask               */

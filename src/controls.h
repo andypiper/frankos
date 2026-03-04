@@ -98,4 +98,117 @@ int  textarea_replace_all(textarea_t *ta, const char *needle,
                            const char *replacement, bool case_sensitive);
 void textarea_blink(textarea_t *ta);
 
+/*==========================================================================
+ * Checkbox
+ *=========================================================================*/
+
+#define CHECKBOX_SIZE  13
+
+typedef struct {
+    int16_t  x, y;
+    bool     checked;
+    char     label[24];
+} checkbox_t;
+
+void checkbox_init(checkbox_t *cb, int16_t x, int16_t y, const char *label);
+void checkbox_paint(checkbox_t *cb);
+bool checkbox_event(checkbox_t *cb, const window_event_t *event, bool *changed);
+
+/*==========================================================================
+ * Radio Button Group
+ *=========================================================================*/
+
+#define RADIO_MAX_OPTIONS 6
+
+typedef struct {
+    int16_t  x, y;
+    uint8_t  count;
+    uint8_t  selected;
+    int16_t  spacing;
+    char     labels[RADIO_MAX_OPTIONS][24];
+} radiogroup_t;
+
+void radiogroup_init(radiogroup_t *rg, int16_t x, int16_t y,
+                     uint8_t count, int16_t spacing);
+void radiogroup_set_labels(radiogroup_t *rg, const char **labels);
+void radiogroup_paint(radiogroup_t *rg);
+bool radiogroup_event(radiogroup_t *rg, const window_event_t *event,
+                      uint8_t *new_sel);
+
+/*==========================================================================
+ * Single-line Text Field
+ *=========================================================================*/
+
+typedef struct {
+    int16_t  x, y, w, h;
+    char    *buf;
+    int16_t  buf_size;
+    int16_t  len;
+    int16_t  cursor;
+    int16_t  scroll_x;
+    bool     cursor_visible;
+    bool     focused;
+    hwnd_t   hwnd;
+} textfield_t;
+
+void textfield_init(textfield_t *tf, char *buf, int16_t buf_size, hwnd_t hwnd);
+void textfield_set_rect(textfield_t *tf, int16_t x, int16_t y,
+                        int16_t w, int16_t h);
+void textfield_paint(textfield_t *tf);
+bool textfield_event(textfield_t *tf, const window_event_t *event);
+void textfield_blink(textfield_t *tf);
+void textfield_set_text(textfield_t *tf, const char *text);
+const char *textfield_get_text(textfield_t *tf);
+int16_t textfield_get_length(textfield_t *tf);
+
+/*==========================================================================
+ * Slider
+ *=========================================================================*/
+
+typedef struct {
+    int16_t  x, y, w, h;
+    bool     horizontal;
+    int32_t  min_val, max_val;
+    int32_t  value;
+    int32_t  step;
+    bool     dragging;
+    int16_t  drag_offset;
+} slider_t;
+
+void slider_init(slider_t *sl, bool horizontal);
+void slider_set_range(slider_t *sl, int32_t min_val, int32_t max_val,
+                      int32_t step);
+void slider_set_rect(slider_t *sl, int16_t x, int16_t y,
+                     int16_t w, int16_t h);
+void slider_paint(slider_t *sl);
+bool slider_event(slider_t *sl, const window_event_t *event, int32_t *new_val);
+
+/*==========================================================================
+ * Combobox (text field + dropdown)
+ *=========================================================================*/
+
+#define COMBOBOX_MAX_ITEMS 10
+
+typedef struct {
+    textfield_t  field;
+    int16_t      drop_btn_w;
+    bool         drop_open;
+    int8_t       drop_hover;
+    int8_t       drop_scroll;
+    int8_t       item_count;
+    char       (*items)[64];
+    int16_t      max_visible;
+    int16_t      drop_item_h;
+    hwnd_t       hwnd;
+} combobox_t;
+
+void combobox_init(combobox_t *cb, char *buf, int16_t buf_size, hwnd_t hwnd);
+void combobox_set_rect(combobox_t *cb, int16_t x, int16_t y,
+                       int16_t w, int16_t h);
+void combobox_set_items(combobox_t *cb, char (*items)[64], int8_t count);
+void combobox_paint(combobox_t *cb);
+bool combobox_event(combobox_t *cb, const window_event_t *event);
+bool combobox_is_open(combobox_t *cb);
+void combobox_select_item(combobox_t *cb, int8_t index);
+
 #endif /* CONTROLS_H */
