@@ -390,9 +390,11 @@ void __attribute__((used)) hardfault_c_handler(uint32_t *stack, uint32_t lr_val)
 static void usb_service_task(void *params) {
     (void)params;
     for (;;) {
+#ifndef FRANK_BOARD_FRUIT_JAM
+        /* Device mode CDC stdio (M2 only; Fruit Jam uses host mode instead) */
         tud_task();
-#ifdef BOARD_FRUIT_JAM
-        /* Also service the TinyUSB host stack for USB HID keyboard/mouse */
+#else
+        /* Service the TinyUSB host stack for USB HID keyboard/mouse */
         usb_hid_task();
 #endif
         vTaskDelay(1);

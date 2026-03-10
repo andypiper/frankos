@@ -22,5 +22,6 @@ if(NOT TARGET usb_hid_host)
         hardware_gpio
         tinyusb_host
         tinyusb_board
+        pico_pio_usb
     )
 endif()

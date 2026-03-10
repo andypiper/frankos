@@ -49,20 +49,12 @@
 // Board identity
 //=============================================================================
 
-#if defined(PICO_BOARD_adafruit_fruit_jam) || \
-    (defined(PICO_BOARD) && (PICO_BOARD == adafruit_fruit_jam))
+// Board identity is set via FRANK_BOARD_FRUIT_JAM compile definition from CMake
+// (CMakeLists.txt: -DFRANK_BOARD=fruit_jam sets FRANK_BOARD_FRUIT_JAM=1).
+#ifdef FRANK_BOARD_FRUIT_JAM
 #  define BOARD_FRUIT_JAM
 #else
 #  define BOARD_M2
-#endif
-
-// A cleaner detection: the Pico SDK sets PICO_BOARD as a string via CMake.
-// We expose it via a compile definition FRANK_BOARD_FRUIT_JAM from CMake.
-#ifdef FRANK_BOARD_FRUIT_JAM
-#  ifndef BOARD_FRUIT_JAM
-#    define BOARD_FRUIT_JAM
-#  endif
-#  undef BOARD_M2
 #endif
 
 //=============================================================================

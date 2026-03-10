@@ -29,7 +29,11 @@
 #include "hooks.h"
 #include "portable.h"
 #include "timers.h" // TODO
+#ifdef FRANK_BOARD_FRUIT_JAM
+#include "usb_hid.h"
+#else
 #include "ps2.h"
+#endif
 #include "app.h"
 #include "cmd.h"
 #include "psram_spi.h"

@@ -22,10 +22,19 @@ target_compile_definitions(opl PRIVATE
     PICO_ON_DEVICE=1
 )
 target_include_directories(opl PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+# Detect FreeRTOS RP2350 port path (old layout vs Community-Supported-Ports layout)
+set(_opl_freertos_port_old "${CMAKE_SOURCE_DIR}/lib/FreeRTOS-Kernel/portable/ThirdParty/GCC/RP2350_ARM_NTZ/non_secure")
+set(_opl_freertos_port_new "${CMAKE_SOURCE_DIR}/lib/FreeRTOS-Kernel/portable/ThirdParty/Community-Supported-Ports/GCC/RP2350_ARM_NTZ/non_secure")
+if(EXISTS "${_opl_freertos_port_old}/portmacro.h")
+    set(_opl_freertos_port_inc "${_opl_freertos_port_old}")
+else()
+    set(_opl_freertos_port_inc "${_opl_freertos_port_new}")
+endif()
+
 target_include_directories(opl PRIVATE
     ${CMAKE_SOURCE_DIR}/drivers/fatfs
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/lib/FreeRTOS-Kernel/include
-    ${CMAKE_SOURCE_DIR}/lib/FreeRTOS-Kernel/portable/ThirdParty/Community-Supported-Ports/GCC/RP2350_ARM_NTZ/non_secure
+    ${_opl_freertos_port_inc}
 )
 target_link_libraries(opl PRIVATE hardware_interp hardware_gpio)

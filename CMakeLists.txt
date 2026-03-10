@@ -34,8 +34,9 @@ set(FREERTOS_CONFIG_FILE_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}/src CACHE STRING ""
 # DispHSTX display driver (DVI via HSTX peripheral)
 add_subdirectory(lib/DispHSTX DispHSTX)
 
-# PS/2 driver (M2 only) or USB HID host driver (Fruit Jam)
+# PS/2 driver (M2 only) or USB HID host driver + PIO USB (Fruit Jam)
 if(_FRANK_BOARD_FRUIT_JAM)
+    add_subdirectory(lib/Pico-PIO-USB pico_pio_usb)
     add_subdirectory(drivers/usb_hid)
 else()
     add_subdirectory(drivers/ps2)
@@ -260,8 +261,13 @@ target_link_options(frankos PRIVATE
     -Wl,--undefined=sys_table_ptrs
 )
 
-# USB output for printf, no UART
-pico_enable_stdio_usb(frankos 1)
-pico_enable_stdio_uart(frankos 0)
+# USB CDC stdio for printf (disabled on Fruit Jam: TinyUSB host prevents it)
+if(_FRANK_BOARD_FRUIT_JAM)
+    pico_enable_stdio_usb(frankos 0)
+    pico_enable_stdio_uart(frankos 0)
+else()
+    pico_enable_stdio_usb(frankos 1)
+    pico_enable_stdio_uart(frankos 0)
+endif()
 
 pico_add_extra_outputs(frankos)

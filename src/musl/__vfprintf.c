@@ -9,6 +9,11 @@
 #include <stdlib.h>
 #include "sys_table.h"
 
+/* NL_ARGMAX: max positional args in printf; not in bare-metal ARM limits.h */
+#ifndef NL_ARGMAX
+#define NL_ARGMAX 128
+#endif
+
 /* Some useful macros */
 #ifndef MAX
 #define MAX(a,b) ((a)>(b) ? (a) : (b))
