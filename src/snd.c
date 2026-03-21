@@ -119,7 +119,11 @@ static void __not_in_flash_func(snd_fill_dma)(int buf_index,
             c->phase += c->phase_inc;
         }
 
-        /* Volume: right-shift (level 4 = mute) */
+        /* Attenuate mix to prevent clipping when multiple channels
+         * are active, then apply volume control. */
+        left  >>= 1;
+        right >>= 1;
+
         if (snd_volume >= 4) {
             left  = 0;
             right = 0;

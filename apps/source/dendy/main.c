@@ -76,7 +76,7 @@ typedef struct {
     void    *app_task;       /* FreeRTOS task handle */
     uint8_t *rom_buf;        /* ROM data buffer (heap-allocated) */
     int16_t *audio_buf;      /* stereo interleave buffer for pcm_write */
-    uint8_t  nes_palette_cache[256]; /* NES palette index -> 8bpp color index */
+    uint8_t  saved_volume;   /* system volume before we changed it */
 } app_globals_t;
 
 register app_globals_t *G asm("r9");
@@ -250,10 +250,11 @@ static void push_audio(void) {
         long n = qnes_read_samples(tmp, 256);
         if (n <= 0) break;
 
-        /* Interleave mono -> stereo */
+        /* Interleave mono -> stereo, attenuate to avoid distortion */
         for (long i = 0; i < n; i++) {
-            stereo[i * 2]     = tmp[i];
-            stereo[i * 2 + 1] = tmp[i];
+            int16_t s = tmp[i] >> 2;
+            stereo[i * 2]     = s;
+            stereo[i * 2 + 1] = s;
         }
         pcm_write(stereo, (int)n);
     }
@@ -353,8 +354,17 @@ int main(int argc, char **argv) {
         display_set_palette_entry((uint8_t)i, 0x000000);
     display_clear(0);
 
-    /* Initialize audio: mono NES samples played as stereo I2S */
+    /* Initialize audio: mono NES samples played as stereo I2S.
+     * Channel samples are attenuated (>>2), so boost system volume
+     * to compensate.  Restore original volume on exit. */
     pcm_init(NES_SAMPLE_RATE, 2);
+    {
+        typedef uint8_t (*get_vol_t)(void);
+        typedef void (*set_vol_t)(uint8_t);
+        G->saved_volume = ((get_vol_t)_sys_table_ptrs[535])();
+        uint8_t new_vol = (G->saved_volume >= 2) ? G->saved_volume - 2 : 0;
+        ((set_vol_t)_sys_table_ptrs[534])(new_vol);
+    }
 
     /* Clear screen to black */
     display_clear(0);
@@ -372,7 +382,11 @@ int main(int argc, char **argv) {
         push_audio();
     }
 
-    /* Cleanup */
+    /* Restore system volume */
+    {
+        typedef void (*set_vol_t)(uint8_t);
+        ((set_vol_t)_sys_table_ptrs[534])(G->saved_volume);
+    }
     qnes_close();
     pcm_cleanup();
 

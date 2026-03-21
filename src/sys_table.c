@@ -713,6 +713,8 @@ unsigned long __in_systable() __aligned(4096) sys_table_ptrs[] = {
     display_request_mode,     // 531
     &display_compositor_idle, // 532
     wm_force_full_repaint,    // 533
+    snd_set_volume,           // 534
+    snd_get_volume,           // 535
     // TODO:
     0
 };
