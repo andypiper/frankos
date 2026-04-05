@@ -1,6 +1,6 @@
 /*
  * FRANK OS — Find/Replace Dialog
- * Copyright (c) 2025 Mikhail Matveev <xtreme@rh1.tech>
+ * Copyright (c) 2026 Mikhail Matveev <xtreme@rh1.tech>
  * https://rh1.tech
  *
  * Modeless dialog following the dialog.c input pattern.

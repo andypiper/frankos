@@ -412,6 +412,16 @@ static bool zx_event(hwnd_t hwnd, const window_event_t *ev) {
             wm_toggle_fullscreen(hwnd);
             return true;
         }
+        /* Ctrl+O: load TAP file */
+        if (ev->type == WM_KEYDOWN &&
+            (ev->key.modifiers & KMOD_CTRL) &&
+            ev->key.scancode == 0x12) {
+            return handle_menu_command(hwnd, g, CMD_LOAD_TAP);
+        }
+        /* F1: about */
+        if (ev->type == WM_KEYDOWN && ev->key.scancode == 0x3A) {
+            return handle_menu_command(hwnd, g, CMD_ABOUT);
+        }
         int zx_key = hid_to_zx(ev->key.scancode);
         if (zx_key >= 0) {
             if (ev->type == WM_KEYDOWN) zx_key_down(sys, zx_key);
@@ -598,8 +608,9 @@ static void setup_menu(hwnd_t hwnd) {
     file->accel_key = 0x09; /* HID 'F' — underlines F, enables Alt+F */
     file->item_count = 4;
 
-    strncpy(file->items[0].text, "Load TAP...", 19);
+    strncpy(file->items[0].text, "Load TAP..Ctrl+O", 19);
     file->items[0].command_id = CMD_LOAD_TAP;
+    file->items[0].accel_key = 0x12;
 
     strncpy(file->items[1].text, "Reset", 19);
     file->items[1].command_id = CMD_RESET;
@@ -614,8 +625,9 @@ static void setup_menu(hwnd_t hwnd) {
     strncpy(help->title, "Help", sizeof(help->title) - 1);
     help->accel_key = 0x0B; /* HID 'H' */
     help->item_count = 1;
-    strncpy(help->items[0].text, "About", 19);
+    strncpy(help->items[0].text, "About      F1", 19);
     help->items[0].command_id = CMD_ABOUT;
+    help->items[0].accel_key = 0x3A;
 
     menu_set(hwnd, &bar);
 }
@@ -645,7 +657,9 @@ static bool handle_menu_command(hwnd_t hwnd, app_globals_t *g, int command_id) {
     if (command_id == CMD_ABOUT) {
         dialog_show(hwnd, "About ZX Spectrum",
                     "ZX Spectrum\n\nFRANK OS v" FRANK_VERSION_STR
-                    " (c) 2026\nMikhail Matveev",
+                    "\n(c) 2026 Mikhail Matveev\n"
+                    "<xtreme@rh1.tech>\n"
+                    "github.com/rh1tech/frank-os",
                     DLG_ICON_INFO, DLG_BTN_OK);
         return true;
     }

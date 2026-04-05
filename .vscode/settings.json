@@ -1,0 +1,15 @@
+{
+    "cmake.sourceDirectory": "${workspaceFolder}",
+    "cmake.useCMakePresets": "always",
+    "cmake.configureOnOpen": true,
+    "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
+    "C_Cpp.debugShortcut": false,
+    "raspberry-pi-pico.cmakeListsFile": "${workspaceFolder}/CMakeLists.txt",
+    "raspberry-pi-pico.board": "frank_m2",
+    "raspberry-pi-pico.useCmakeTools": true,
+    "raspberry-pi-pico.cmakeAutoConfigure": true,
+    "raspberry-pi-pico.sdkPath": "/Users/A2506402/Documents/pico/pico-sdk",
+    "raspberry-pi-pico.toolchainPath": "/opt/homebrew",
+    "raspberry-pi-pico.ninjaPath": "/opt/homebrew/bin/ninja",
+    "raspberry-pi-pico.cmakePath": "/opt/homebrew/bin/cmake"
+}

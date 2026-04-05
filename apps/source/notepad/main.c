@@ -1,6 +1,6 @@
 /*
  * FRANK OS — Notepad (standalone ELF app)
- * Copyright (c) 2025 Mikhail Matveev <xtreme@rh1.tech>
+ * Copyright (c) 2026 Mikhail Matveev <xtreme@rh1.tech>
  * https://rh1.tech
  *
  * Full-featured text editor with menu bar, file I/O, clipboard,
@@ -120,12 +120,15 @@ static void np_setup_menu(hwnd_t hwnd) {
     strncpy(file->title, "File", sizeof(file->title) - 1);
     file->accel_key = 0x09; /* HID 'F' */
     file->item_count = 6;
-    strncpy(file->items[0].text, "New",        sizeof(file->items[0].text) - 1);
+    strncpy(file->items[0].text, "New    Ctrl+N", sizeof(file->items[0].text) - 1);
     file->items[0].command_id = CMD_NEW;
-    strncpy(file->items[1].text, "Open...",    sizeof(file->items[1].text) - 1);
+    file->items[0].accel_key = 0x11;
+    strncpy(file->items[1].text, "Open.. Ctrl+O", sizeof(file->items[1].text) - 1);
     file->items[1].command_id = CMD_OPEN;
-    strncpy(file->items[2].text, "Save",       sizeof(file->items[2].text) - 1);
+    file->items[1].accel_key = 0x12;
+    strncpy(file->items[2].text, "Save   Ctrl+S", sizeof(file->items[2].text) - 1);
     file->items[2].command_id = CMD_SAVE;
+    file->items[2].accel_key = 0x16;
     strncpy(file->items[3].text, "Save As...", sizeof(file->items[3].text) - 1);
     file->items[3].command_id = CMD_SAVE_AS;
     file->items[4].flags = MIF_SEPARATOR;
@@ -137,19 +140,25 @@ static void np_setup_menu(hwnd_t hwnd) {
     strncpy(edit->title, "Edit", sizeof(edit->title) - 1);
     edit->accel_key = 0x08; /* HID 'E' */
     edit->item_count = 7;
-    strncpy(edit->items[0].text, "Cut",        sizeof(edit->items[0].text) - 1);
+    strncpy(edit->items[0].text, "Cut    Ctrl+X", sizeof(edit->items[0].text) - 1);
     edit->items[0].command_id = CMD_CUT;
-    strncpy(edit->items[1].text, "Copy",       sizeof(edit->items[1].text) - 1);
+    edit->items[0].accel_key = 0x1B;
+    strncpy(edit->items[1].text, "Copy   Ctrl+C", sizeof(edit->items[1].text) - 1);
     edit->items[1].command_id = CMD_COPY;
-    strncpy(edit->items[2].text, "Paste",      sizeof(edit->items[2].text) - 1);
+    edit->items[1].accel_key = 0x06;
+    strncpy(edit->items[2].text, "Paste  Ctrl+V", sizeof(edit->items[2].text) - 1);
     edit->items[2].command_id = CMD_PASTE;
-    strncpy(edit->items[3].text, "Select All", sizeof(edit->items[3].text) - 1);
+    edit->items[2].accel_key = 0x19;
+    strncpy(edit->items[3].text, "SelAll Ctrl+A", sizeof(edit->items[3].text) - 1);
     edit->items[3].command_id = CMD_SELECT_ALL;
+    edit->items[3].accel_key = 0x04;
     edit->items[4].flags = MIF_SEPARATOR;
-    strncpy(edit->items[5].text, "Find...",    sizeof(edit->items[5].text) - 1);
+    strncpy(edit->items[5].text, "Find.. Ctrl+F", sizeof(edit->items[5].text) - 1);
     edit->items[5].command_id = CMD_FIND;
-    strncpy(edit->items[6].text, "Replace...", sizeof(edit->items[6].text) - 1);
+    edit->items[5].accel_key = 0x09;
+    strncpy(edit->items[6].text, "Replc  Ctrl+H", sizeof(edit->items[6].text) - 1);
     edit->items[6].command_id = CMD_REPLACE;
+    edit->items[6].accel_key = 0x0B;
 
     /* Syntax menu */
     menu_def_t *syntax = &bar.menus[2];
@@ -187,10 +196,12 @@ static void np_setup_menu(hwnd_t hwnd) {
         strncpy(dev->title, "Dev", sizeof(dev->title) - 1);
         dev->accel_key = 0x07; /* HID 'D' */
         dev->item_count = 2;
-        strncpy(dev->items[0].text, "Compile", sizeof(dev->items[0].text) - 1);
+        strncpy(dev->items[0].text, "Compile    F5", sizeof(dev->items[0].text) - 1);
         dev->items[0].command_id = CMD_DEV_COMPILE;
-        strncpy(dev->items[1].text, "Run", sizeof(dev->items[1].text) - 1);
+        dev->items[0].accel_key = 0x3E;
+        strncpy(dev->items[1].text, "Run        F9", sizeof(dev->items[1].text) - 1);
         dev->items[1].command_id = CMD_DEV_RUN;
+        dev->items[1].accel_key = 0x42;
     }
 
     /* Help menu */
@@ -198,8 +209,9 @@ static void np_setup_menu(hwnd_t hwnd) {
     strncpy(help->title, "Help", sizeof(help->title) - 1);
     help->accel_key = 0x0B; /* HID 'H' */
     help->item_count = 1;
-    strncpy(help->items[0].text, "About Notepad", sizeof(help->items[0].text) - 1);
+    strncpy(help->items[0].text, "About       F1", sizeof(help->items[0].text) - 1);
     help->items[0].command_id = CMD_ABOUT;
+    help->items[0].accel_key = 0x3A;
 
     menu_set(hwnd, &bar);
 
@@ -1228,7 +1240,9 @@ static bool np_event(hwnd_t hwnd, const window_event_t *event) {
         else if (cmd == CMD_ABOUT) {
             dialog_show(np.hwnd, "About Notepad",
                         "Notepad\n\nFRANK OS v" FRANK_VERSION_STR
-                        " (c) 2026\nMikhail Matveev",
+                        "\n(c) 2026 Mikhail Matveev\n"
+                        "<xtreme@rh1.tech>\n"
+                        "github.com/rh1tech/frank-os",
                         DLG_ICON_INFO, DLG_BTN_OK);
             return true;
         }
@@ -1400,6 +1414,24 @@ static bool np_event(hwnd_t hwnd, const window_event_t *event) {
         /* Ctrl+H — replace */
         if (ctrl && sc == 0x0B) { /* HID 'h' */
             replace_dialog_show(np.hwnd);
+            return true;
+        }
+        /* F1 — about */
+        if (sc == 0x3A) {
+            window_event_t ce = {0}; ce.type = WM_COMMAND; ce.command.id = CMD_ABOUT;
+            wm_post_event(np.hwnd, &ce);
+            return true;
+        }
+        /* F5 — compile (Dev menu) */
+        if (sc == 0x3E) {
+            window_event_t ce = {0}; ce.type = WM_COMMAND; ce.command.id = CMD_DEV_COMPILE;
+            wm_post_event(np.hwnd, &ce);
+            return true;
+        }
+        /* F9 — run (Dev menu) */
+        if (sc == 0x42) {
+            window_event_t ce = {0}; ce.type = WM_COMMAND; ce.command.id = CMD_DEV_RUN;
+            wm_post_event(np.hwnd, &ce);
             return true;
         }
 

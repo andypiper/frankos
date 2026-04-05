@@ -1,6 +1,6 @@
 /*
  * FRANK OS — System Clipboard
- * Copyright (c) 2025 Mikhail Matveev <xtreme@rh1.tech>
+ * Copyright (c) 2026 Mikhail Matveev <xtreme@rh1.tech>
  * https://rh1.tech
  *
  * Simple text clipboard backed by a 4KB static buffer in SRAM.

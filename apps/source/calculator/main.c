@@ -52,7 +52,7 @@ typedef struct {
 
     /* About dialog strings — RAM copies */
     char about_title[20];
-    char about_text[48];
+    char about_text[128];
 
     /* Display */
     char    disp[MAX_DISP + 4];
@@ -388,13 +388,15 @@ static void setup_menu(hwnd_t hwnd) {
     edit->item_count = 1;
     strncpy(edit->items[0].text, "Copy  Ctrl+C", sizeof(edit->items[0].text) - 1);
     edit->items[0].command_id = CMD_COPY;
+    edit->items[0].accel_key = 0x06;
 
     menu_def_t *help = &bar.menus[2];
     strncpy(help->title, "Help", sizeof(help->title) - 1);
     help->accel_key = 0x0B;
     help->item_count = 1;
-    strncpy(help->items[0].text, "About", sizeof(help->items[0].text) - 1);
+    strncpy(help->items[0].text, "About      F1", sizeof(help->items[0].text) - 1);
     help->items[0].command_id = CMD_ABOUT;
+    help->items[0].accel_key = 0x3A;
 
     menu_set(hwnd, &bar);
 }
@@ -471,6 +473,10 @@ static bool calc_event(hwnd_t hwnd, const window_event_t *ev) {
     if (ev->type == WM_KEYDOWN) {
         if (ev->key.scancode == 0x2A) { do_backspace(c); wm_invalidate(hwnd); return true; }
         if (ev->key.scancode == 0x29) { do_clear(c); wm_invalidate(hwnd); return true; }
+        if (ev->key.scancode == 0x3A) { /* F1 */
+            window_event_t ce = {0}; ce.type = WM_COMMAND; ce.command.id = CMD_ABOUT;
+            wm_post_event(hwnd, &ce); return true;
+        }
         return false;
     }
 
@@ -489,7 +495,10 @@ static hwnd_t calc_create(void) {
      * see .rodata correctly due to ELF loader relocation issues) */
     memcpy(c->labels, labels_src, sizeof(c->labels));
     strcpy(c->about_title, "About Calculator");
-    strcpy(c->about_text, "Calculator\n\n(c) 2026\nMikhail Matveev");
+    strcpy(c->about_text, "Calculator\n\nFRANK OS v" FRANK_VERSION_STR
+                           "\n(c) 2026 Mikhail Matveev\n"
+                           "<xtreme@rh1.tech>\n"
+                           "github.com/rh1tech/frank-os");
 
     c->pressed_row = -1;
     c->pressed_col = -1;

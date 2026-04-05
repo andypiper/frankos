@@ -1,6 +1,6 @@
 /*
  * FRANK OS — Start > Run dialog
- * Copyright (c) 2025 Mikhail Matveev <xtreme@rh1.tech>
+ * Copyright (c) 2026 Mikhail Matveev <xtreme@rh1.tech>
  * https://rh1.tech
  *
  * Win95-style Run dialog: bottom-left of screen, icon, text field,

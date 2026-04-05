@@ -59,8 +59,9 @@ static void setup_menu(hwnd_t hwnd) {
     strncpy(help->title, "Help", sizeof(help->title) - 1);
     help->accel_key = 0x0B; /* Alt+H */
     help->item_count = 1;
-    strncpy(help->items[0].text, "About", sizeof(help->items[0].text) - 1);
+    strncpy(help->items[0].text, "About      F1", sizeof(help->items[0].text) - 1);
     help->items[0].command_id = CMD_ABOUT;
+    help->items[0].accel_key = 0x3A;
 
     menu_set(hwnd, &bar);
 }
@@ -95,10 +96,12 @@ static bool pshell_event(hwnd_t hwnd, const window_event_t *event) {
         }
         if (event->command.id == CMD_ABOUT) {
             dialog_show(hwnd, "About PShell",
-                        "PShell - Pico Shell for FRANK OS\n\n"
-                        "Interactive shell, vi editor, C compiler\n"
-                        "Based on pshell by Thomas Edison\n\n"
-                        "(c) 2026 Mikhail Matveev",
+                        "PShell\n\nFRANK OS v" FRANK_VERSION_STR
+                        "\nPico Shell: shell, vi, C compiler\n"
+                        "Based on pshell by Thomas Edison\n"
+                        "(c) 2026 Mikhail Matveev\n"
+                        "<xtreme@rh1.tech>\n"
+                        "github.com/rh1tech/frank-os",
                         DLG_ICON_INFO, DLG_BTN_OK);
             return true;
         }
@@ -150,6 +153,12 @@ static bool pshell_event(hwnd_t hwnd, const window_event_t *event) {
     if (event->type == WM_KEYDOWN) {
         uint8_t sc  = event->key.scancode;
         uint8_t mod = event->key.modifiers;
+
+        /* F1: about */
+        if (sc == 0x3A) {
+            window_event_t ce = {0}; ce.type = WM_COMMAND; ce.command.id = CMD_ABOUT;
+            wm_post_event(g_hwnd, &ce); return true;
+        }
 
         /* Ctrl+C via raw scan: HID 'c' = 0x06 */
         if ((mod & KMOD_CTRL) && sc == 0x06) {

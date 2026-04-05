@@ -1,6 +1,6 @@
 /*
  * FRANK OS — Alt+Tab Window Switcher Overlay
- * Copyright (c) 2025 Mikhail Matveev <xtreme@rh1.tech>
+ * Copyright (c) 2026 Mikhail Matveev <xtreme@rh1.tech>
  *
  * Windows 95-style Alt+Tab overlay: shows a centered bar with icons
  * and titles of all open app windows.  Pressing Tab while holding

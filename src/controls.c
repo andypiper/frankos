@@ -1,6 +1,6 @@
 /*
  * FRANK OS — Reusable UI Controls
- * Copyright (c) 2025 Mikhail Matveev <xtreme@rh1.tech>
+ * Copyright (c) 2026 Mikhail Matveev <xtreme@rh1.tech>
  * https://rh1.tech
  *
  * Scrollbar and Textarea controls — struct-based, drawn within parent

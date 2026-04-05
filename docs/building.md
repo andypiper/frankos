@@ -13,6 +13,17 @@ Set the SDK path:
 export PICO_SDK_PATH=/path/to/pico-sdk
 ```
 
+## Required Libraries (git submodules)
+
+The project depends on two external libraries managed as git submodules:
+
+| Library | Path | Description |
+|---------|------|-------------|
+| [FreeRTOS-Kernel](https://github.com/raspberrypi/FreeRTOS-Kernel) | `lib/FreeRTOS-Kernel` | RTOS kernel (Raspberry Pi fork with RP2350 port) |
+| [DispHSTX](https://github.com/Panda381/DispHSTX) | `lib/DispHSTX` | DVI/VGA scanline renderer for RP2350 HSTX peripheral |
+
+These are fetched automatically when cloning with `--recursive`. Additional bundled libraries in `lib/` (helix MP3 decoder, hxcmod tracker, opl FM synth) do not require submodule init.
+
 ## Building the Firmware
 
 ```bash

@@ -1,6 +1,6 @@
 /*
  * FRANK OS — I2S Audio Driver (PIO1 + DMA ping-pong)
- * Copyright (c) 2025 Mikhail Matveev <xtreme@rh1.tech>
+ * Copyright (c) 2026 Mikhail Matveev <xtreme@rh1.tech>
  * https://rh1.tech
  *
  * SPDX-License-Identifier: GPL-3.0-or-later

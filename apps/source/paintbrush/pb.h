@@ -1,6 +1,6 @@
 /*
  * FRANK OS — Paintbrush (shared header)
- * Copyright (c) 2025 Mikhail Matveev <xtreme@rh1.tech>
+ * Copyright (c) 2026 Mikhail Matveev <xtreme@rh1.tech>
  * Windows 95 MS Paint clone for FRANK OS
  * SPDX-License-Identifier: GPL-3.0-or-later
  */

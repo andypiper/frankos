@@ -239,6 +239,6 @@ lib/                    Third-party libraries (git submodules)
 
 apps/                   Standalone applications
   api/frankos-app.h     App development header
-  source/               App source code (10 apps)
+  source/               App source code (14 apps)
   build_apps.sh         Build script
 ```

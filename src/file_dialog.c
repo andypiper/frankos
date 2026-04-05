@@ -1,6 +1,6 @@
 /*
  * FRANK OS — System File Dialog
- * Copyright (c) 2025 Mikhail Matveev <xtreme@rh1.tech>
+ * Copyright (c) 2026 Mikhail Matveev <xtreme@rh1.tech>
  * https://rh1.tech
  *
  * Modal file browser dialog following the dialog.c pattern.

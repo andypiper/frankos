@@ -1,6 +1,6 @@
 /*
  * FRANK OS — Paintbrush (Windows 95 MS Paint clone)
- * Copyright (c) 2025 Mikhail Matveev <xtreme@rh1.tech>
+ * Copyright (c) 2026 Mikhail Matveev <xtreme@rh1.tech>
  * https://rh1.tech
  *
  * Freehand drawing uses the solitaire timer pattern:
@@ -219,23 +219,23 @@ static void pb_setup_menu(void) {
     menu_bar_t bar; memset(&bar, 0, sizeof(bar)); bar.menu_count = 4;
     menu_def_t *m;
     m = &bar.menus[0]; strncpy(m->title, "File", 11); m->accel_key = 0x09; m->item_count = 6;
-    strncpy(m->items[0].text, "New", 19); m->items[0].command_id = CMD_NEW;
-    strncpy(m->items[1].text, "Open...", 19); m->items[1].command_id = CMD_OPEN;
-    strncpy(m->items[2].text, "Save", 19); m->items[2].command_id = CMD_SAVE;
+    strncpy(m->items[0].text, "New    Ctrl+N", 19); m->items[0].command_id = CMD_NEW; m->items[0].accel_key = 0x11;
+    strncpy(m->items[1].text, "Open.. Ctrl+O", 19); m->items[1].command_id = CMD_OPEN; m->items[1].accel_key = 0x12;
+    strncpy(m->items[2].text, "Save   Ctrl+S", 19); m->items[2].command_id = CMD_SAVE; m->items[2].accel_key = 0x16;
     strncpy(m->items[3].text, "Save As...", 19); m->items[3].command_id = CMD_SAVE_AS;
     m->items[4].flags = MIF_SEPARATOR;
     strncpy(m->items[5].text, "Exit", 19); m->items[5].command_id = CMD_EXIT;
     m = &bar.menus[1]; strncpy(m->title, "Edit", 11); m->accel_key = 0x08; m->item_count = 8;
-    strncpy(m->items[0].text, "Undo", 19); m->items[0].command_id = CMD_UNDO;
+    strncpy(m->items[0].text, "Undo   Ctrl+Z", 19); m->items[0].command_id = CMD_UNDO; m->items[0].accel_key = 0x1D;
     if (!pb.has_undo) m->items[0].flags = MIF_DISABLED;
     m->items[1].flags = MIF_SEPARATOR;
-    strncpy(m->items[2].text, "Cut", 19); m->items[2].command_id = CMD_CUT;
+    strncpy(m->items[2].text, "Cut    Ctrl+X", 19); m->items[2].command_id = CMD_CUT; m->items[2].accel_key = 0x1B;
     if (!pb.has_selection) m->items[2].flags = MIF_DISABLED;
-    strncpy(m->items[3].text, "Copy", 19); m->items[3].command_id = CMD_COPY;
+    strncpy(m->items[3].text, "Copy   Ctrl+C", 19); m->items[3].command_id = CMD_COPY; m->items[3].accel_key = 0x06;
     if (!pb.has_selection) m->items[3].flags = MIF_DISABLED;
-    strncpy(m->items[4].text, "Paste", 19); m->items[4].command_id = CMD_PASTE;
+    strncpy(m->items[4].text, "Paste  Ctrl+V", 19); m->items[4].command_id = CMD_PASTE; m->items[4].accel_key = 0x19;
     if (!pb.sel_buf) m->items[4].flags = MIF_DISABLED;
-    strncpy(m->items[5].text, "Select All", 19); m->items[5].command_id = CMD_SELECT_ALL;
+    strncpy(m->items[5].text, "SelAll Ctrl+A", 19); m->items[5].command_id = CMD_SELECT_ALL; m->items[5].accel_key = 0x04;
     m->items[6].flags = MIF_SEPARATOR;
     strncpy(m->items[7].text, "Clear Image", 19); m->items[7].command_id = CMD_CLEAR;
     m = &bar.menus[2]; strncpy(m->title, "Image", 11); m->accel_key = 0x0C; m->item_count = 3;
@@ -243,7 +243,7 @@ static void pb_setup_menu(void) {
     strncpy(m->items[1].text, "Flip Vert.", 19); m->items[1].command_id = CMD_FLIP_V;
     strncpy(m->items[2].text, "Invert Colors", 19); m->items[2].command_id = CMD_INVERT;
     m = &bar.menus[3]; strncpy(m->title, "Help", 11); m->accel_key = 0x0B; m->item_count = 1;
-    strncpy(m->items[0].text, "About", 19); m->items[0].command_id = CMD_ABOUT;
+    strncpy(m->items[0].text, "About      F1", 19); m->items[0].command_id = CMD_ABOUT; m->items[0].accel_key = 0x3A;
     menu_set(pb.hwnd, &bar);
 }
 
@@ -574,7 +574,7 @@ static bool pb_event(hwnd_t hwnd, const window_event_t *ev) {
         if (cmd == CMD_SAVE) { pb_do_save(); return true; }
         if (cmd == CMD_SAVE_AS) { pb_do_save_as(); return true; }
         if (cmd == CMD_EXIT) { if (pb.modified) pb_prompt_save(PENDING_EXIT); else pb_do_exit(); return true; }
-        if (cmd == CMD_ABOUT) { dialog_show(hwnd, "About Paintbrush", "Paintbrush\n\nFRANK OS v" FRANK_VERSION_STR " (c) 2026\nMikhail Matveev", DLG_ICON_INFO, DLG_BTN_OK); return true; }
+        if (cmd == CMD_ABOUT) { dialog_show(hwnd, "About Paintbrush", "Paintbrush\n\nFRANK OS v" FRANK_VERSION_STR "\n(c) 2026 Mikhail Matveev\n<xtreme@rh1.tech>\ngithub.com/rh1tech/frank-os", DLG_ICON_INFO, DLG_BTN_OK); return true; }
         if (cmd == CMD_CUT) { sel_cut(); pb_setup_menu(); wm_invalidate(hwnd); return true; }
         if (cmd == CMD_COPY) { sel_copy(); pb_setup_menu(); wm_invalidate(hwnd); return true; }
         if (cmd == CMD_PASTE) { sel_start_floating(); wm_invalidate(hwnd); return true; }
@@ -663,6 +663,10 @@ static bool pb_event(hwnd_t hwnd, const window_event_t *ev) {
         if ((mod & KMOD_CTRL) && sc == 0x11) { if (pb.modified) pb_prompt_save(PENDING_NEW); else pb_do_new(); return true; } /* Ctrl+N */
         if ((mod & KMOD_CTRL) && sc == 0x12) { if (pb.modified) pb_prompt_save(PENDING_OPEN); else pb_do_open(); return true; } /* Ctrl+O */
         if ((mod & KMOD_CTRL) && sc == 0x16) { pb_do_save(); return true; } /* Ctrl+S */
+        if (sc == 0x3A) { /* F1 */
+            window_event_t ce = {0}; ce.type = WM_COMMAND; ce.command.id = CMD_ABOUT;
+            wm_post_event(hwnd, &ce); return true;
+        }
         return false;
     }
 

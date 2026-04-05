@@ -14,7 +14,7 @@ Built on FreeRTOS with DVI video output, PS/2 keyboard and mouse input, SD card 
 
 - Windows 95-style desktop on a microcontroller: window management, menus, dialogs, multitasking
 - Loads standalone ELF apps from SD card via a stable syscall table (binary-compatible across firmware updates)
-- 10 built-in apps: text editor, card games, MP3 player, NES emulator, ZX Spectrum emulator, BASIC interpreter, and more
+- 14 built-in apps: text editor, drawing program, card games, MP3 player, video player, NES emulator, ZX Spectrum emulator, BASIC interpreter, and more
 - Dual-core: Core 0 runs FreeRTOS (UI, input, apps), Core 1 does real-time DVI scanline rendering
 - Hard fault recovery with crash dumps that survive warm resets
 
@@ -110,13 +110,19 @@ The Terminal runs PShell, an interactive command interpreter. It can also launch
 
 ## Applications
 
-FRANK OS ships with 10 standalone applications:
+FRANK OS ships with 14 standalone applications:
 
 ### Terminal
 VT100 terminal emulator with multiple concurrent instances, each running its own shell session. Supports 16-color text, cursor movement, SGR escape sequences, and a 70x20 character grid (80x30 in fullscreen with Alt+Enter). Runs built-in shell commands and launches MOS2-compatible console applications from the SD card. The `sdcard/mos2/` directory includes 50+ command-line utilities (hex editor, file tools, benchmarks, and more).
 
 ### Notepad
 Text editor with menu bar, clipboard, find/replace, and syntax highlighting. Supports C, C++, and INI highlighting modes. Includes a Dev menu for compiling and running C source files directly.
+
+### Calculator
+Simple calculator application with standard arithmetic operations. Button-driven interface styled after the classic Windows calculator.
+
+### Paintbrush
+MS Paint-style bitmap drawing application. Features 16 tools in a 2x8 toolbar grid including pencil, brush, eraser, fill, line, rectangle, ellipse, and selection tools. Supports cut/copy/paste, undo, image flip and invert operations, and BMP file loading and saving. Sub-options panel for tool variants (line width, shape fill mode). File/Edit/Image/Help menu bar.
 
 ### Solitaire
 Classic Klondike card game with Draw One and Draw Three modes. 45x60 pixel cards with suit symbols rendered as bitmap art. Proper cascading tableau, stock/waste pile, and four foundation piles.
@@ -136,11 +142,17 @@ Zilog Z80 emulation with an ARM Thumb-2 assembly dispatcher for real-time perfor
 ### FrankAmp
 WinAmp 2.x-style MP3 player. Playlist of up to 64 tracks with shuffle and repeat modes. Transport controls (play/pause/stop/next/previous), seek bar, volume slider, and 7-segment time display. Decodes MP3 via the Helix fixed-point decoder.
 
+### Video Player
+MPEG-1 video playback application. Plays `.mpg` files from the SD card with dithered 4bpp output, audio decoding, and transport controls. Uses SRAM bitstream windowing and scaled dequantization for real-time performance on RP2350.
+
 ### MMBasic
 PicoMite BASIC interpreter running as a windowed GUI application. Supports traditional BASIC syntax with file I/O, graphics commands, and sound.
 
 ### PShell
 The interactive shell that runs inside the terminal. Built-in commands for file operations, a vi text editor, a C compiler (`cc`), and tar archive management.
+
+### Kickstart
+UF2 firmware launcher for loading and managing firmware files. Lists `.uf2` and `.m2p2` files from the SD card and flashes them to the RP2350's lower flash region for execution on next boot.
 
 ## File Manager (Navigator)
 
@@ -291,15 +303,33 @@ Crash dumps are saved to uninitialized SRAM and survive warm resets for post-mor
 4. Python 3 (for icon tools)
 5. `picotool` (for flashing)
 
+```bash
+export PICO_SDK_PATH=/path/to/pico-sdk
+```
+
+### Required Libraries (git submodules)
+
+The following libraries are pulled automatically via `git clone --recursive` or `git submodule update --init --recursive`:
+
+| Library | Path | Description |
+|---------|------|-------------|
+| [FreeRTOS-Kernel](https://github.com/raspberrypi/FreeRTOS-Kernel) | `lib/FreeRTOS-Kernel` | RTOS kernel (Raspberry Pi fork with RP2350 port) |
+| [DispHSTX](https://github.com/Panda381/DispHSTX) | `lib/DispHSTX` | DVI/VGA scanline renderer for RP2350 HSTX peripheral |
+
+Additional libraries in `lib/` (helix, hxcmod, opl) are bundled directly and do not require submodule init.
+
 ### Build Steps
 
 ```bash
+# Clone with submodules (FreeRTOS-Kernel + DispHSTX):
 git clone --recursive https://github.com/rh1tech/frankos.git
 cd frankos
 
-# Or if already cloned:
+# If you already cloned without --recursive, fetch submodules separately:
 git submodule update --init --recursive
 
+# Set SDK path and build:
+export PICO_SDK_PATH=/path/to/pico-sdk
 ./build.sh
 ```
 
@@ -351,7 +381,7 @@ Third-party components retain their original licenses (MIT, BSD-3-Clause, ISC, A
 
 ## Author
 
-**Mikhail Matveev** <<xtreme@rh1.tech>>, [https://rh1.tech](https://rh1.tech)
+**Mikhail Matveev** <<xtreme@rh1.tech>>, [github.com/rh1tech/frank-os](https://github.com/rh1tech/frank-os)
 
 ## Acknowledgments
 

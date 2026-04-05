@@ -1,7 +1,7 @@
 /*
  * FRANK OS — FrankAmp (standalone ELF app)
  * WinAmp 2.x style MP3 player
- * Copyright (c) 2025 Mikhail Matveev <xtreme@rh1.tech>
+ * Copyright (c) 2026 Mikhail Matveev <xtreme@rh1.tech>
  * https://rh1.tech
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -1286,7 +1286,9 @@ static bool main_event(hwnd_t hwnd, const window_event_t *ev) {
         if (cmd == CMD_ABOUT) {
             dialog_show(hwnd, "About FrankAmp",
                         "FrankAmp\n\nFRANK OS v" FRANK_VERSION_STR
-                        " (c) 2026\nMikhail Matveev",
+                        "\n(c) 2026 Mikhail Matveev\n"
+                        "<xtreme@rh1.tech>\n"
+                        "github.com/rh1tech/frank-os",
                         DLG_ICON_INFO, DLG_BTN_OK);
             return true;
         }
@@ -1389,6 +1391,12 @@ static bool main_event(hwnd_t hwnd, const window_event_t *ev) {
             return true;
         }
 
+        /* F1: about */
+        if (key == 0x3A) {
+            window_event_t ce = {0}; ce.type = WM_COMMAND; ce.command.id = CMD_ABOUT;
+            wm_post_event(hwnd, &ce); return true;
+        }
+
         return false;
     }
 
@@ -1449,8 +1457,9 @@ static void setup_menu(hwnd_t hwnd) {
     file->accel_key = 0x09; /* HID 'F' */
     file->item_count = 3;
 
-    strncpy(file->items[0].text, "Open", sizeof(file->items[0].text) - 1);
+    strncpy(file->items[0].text, "Open   Ctrl+O", sizeof(file->items[0].text) - 1);
     file->items[0].command_id = CMD_OPEN;
+    file->items[0].accel_key = 0x12;
 
     file->items[1].flags = MIF_SEPARATOR;
 
@@ -1491,8 +1500,9 @@ static void setup_menu(hwnd_t hwnd) {
     strncpy(help->title, "Help", sizeof(help->title) - 1);
     help->accel_key = 0x0B; /* HID 'H' */
     help->item_count = 1;
-    strncpy(help->items[0].text, "About", sizeof(help->items[0].text) - 1);
+    strncpy(help->items[0].text, "About      F1", sizeof(help->items[0].text) - 1);
     help->items[0].command_id = CMD_ABOUT;
+    help->items[0].accel_key = 0x3A;
 
     menu_set(hwnd, &bar);
 }

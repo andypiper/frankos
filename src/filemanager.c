@@ -1,6 +1,6 @@
 /*
  * FRANK OS
- * Copyright (c) 2025 Mikhail Matveev <xtreme@rh1.tech>
+ * Copyright (c) 2026 Mikhail Matveev <xtreme@rh1.tech>
  * https://rh1.tech
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -1943,6 +1943,11 @@ static bool fm_event(hwnd_t hwnd, const window_event_t *event) {
             fm_rename_selected(fm);
             return true;
         }
+        /* F1: about */
+        if (sc == 0x3A /* HID F1 */) {
+            window_event_t ce = {0}; ce.type = WM_COMMAND; ce.command.id = FN_CMD_ABOUT;
+            wm_post_event(hwnd, &ce); return true;
+        }
         /* Menu/Application key (0x65) or Ctrl+Space: open context menu */
         if (sc == 0x65 || (sc == 0x2C && (mods & KMOD_CTRL))) {
             window_t *win = wm_get_window(hwnd);
@@ -2151,8 +2156,9 @@ static bool fm_event(hwnd_t hwnd, const window_event_t *event) {
         case FN_CMD_ABOUT:
             dialog_show(hwnd, "About Navigator",
                         "FRANK Navigator\n\nFRANK OS v" FRANK_VERSION_STR
-                        "\nCopyright (c) 2026 Mikhail Matveev\n"
-                        "rh1.tech",
+                        "\n(c) 2026 Mikhail Matveev\n"
+                        "<xtreme@rh1.tech>\n"
+                        "github.com/rh1tech/frank-os",
                         DLG_ICON_INFO, DLG_BTN_OK);
             return true;
         }
@@ -2231,10 +2237,11 @@ hwnd_t filemanager_create(const char *initial_path) {
         strncpy(bar->menus[0].items[0].text, "New Folder", 20);
         bar->menus[0].items[0].command_id = FN_CMD_NEW_FOLDER;
         bar->menus[0].items[1].flags = MIF_SEPARATOR;
-        strncpy(bar->menus[0].items[2].text, "Delete", 20);
+        strncpy(bar->menus[0].items[2].text, "Delete     Del", 20);
         bar->menus[0].items[2].command_id = FN_CMD_DELETE;
-        strncpy(bar->menus[0].items[3].text, "Rename", 20);
+        strncpy(bar->menus[0].items[3].text, "Rename      F2", 20);
         bar->menus[0].items[3].command_id = FN_CMD_RENAME;
+        bar->menus[0].items[3].accel_key = 0x3B;
         bar->menus[0].items[4].flags = MIF_SEPARATOR;
         strncpy(bar->menus[0].items[5].text, "Close", 20);
         bar->menus[0].items[5].command_id = FN_CMD_CLOSE;
@@ -2243,15 +2250,19 @@ hwnd_t filemanager_create(const char *initial_path) {
         strncpy(bar->menus[1].title, "Edit", sizeof(bar->menus[1].title));
         bar->menus[1].accel_key = 0x08; /* HID E */
         bar->menus[1].item_count = 5;
-        strncpy(bar->menus[1].items[0].text, "Cut", 20);
+        strncpy(bar->menus[1].items[0].text, "Cut    Ctrl+X", 20);
         bar->menus[1].items[0].command_id = FN_CMD_CUT;
-        strncpy(bar->menus[1].items[1].text, "Copy", 20);
+        bar->menus[1].items[0].accel_key = 0x1B;
+        strncpy(bar->menus[1].items[1].text, "Copy   Ctrl+C", 20);
         bar->menus[1].items[1].command_id = FN_CMD_COPY;
-        strncpy(bar->menus[1].items[2].text, "Paste", 20);
+        bar->menus[1].items[1].accel_key = 0x06;
+        strncpy(bar->menus[1].items[2].text, "Paste  Ctrl+V", 20);
         bar->menus[1].items[2].command_id = FN_CMD_PASTE;
+        bar->menus[1].items[2].accel_key = 0x19;
         bar->menus[1].items[3].flags = MIF_SEPARATOR;
-        strncpy(bar->menus[1].items[4].text, "Select All", 20);
+        strncpy(bar->menus[1].items[4].text, "SelAll Ctrl+A", 20);
         bar->menus[1].items[4].command_id = FN_CMD_SELECT_ALL;
+        bar->menus[1].items[4].accel_key = 0x04;
 
         /* View menu */
         strncpy(bar->menus[2].title, "View", sizeof(bar->menus[2].title));
@@ -2264,15 +2275,17 @@ hwnd_t filemanager_create(const char *initial_path) {
         strncpy(bar->menus[2].items[2].text, "List", 20);
         bar->menus[2].items[2].command_id = FN_CMD_LIST;
         bar->menus[2].items[3].flags = MIF_SEPARATOR;
-        strncpy(bar->menus[2].items[4].text, "Refresh", 20);
+        strncpy(bar->menus[2].items[4].text, "Refresh     F5", 20);
         bar->menus[2].items[4].command_id = FN_CMD_REFRESH;
+        bar->menus[2].items[4].accel_key = 0x3E;
 
         /* Help menu */
         strncpy(bar->menus[3].title, "Help", sizeof(bar->menus[3].title));
         bar->menus[3].accel_key = 0x0B; /* HID H */
         bar->menus[3].item_count = 1;
-        strncpy(bar->menus[3].items[0].text, "About", 20);
+        strncpy(bar->menus[3].items[0].text, "About      F1", 20);
         bar->menus[3].items[0].command_id = FN_CMD_ABOUT;
+        bar->menus[3].items[0].accel_key = 0x3A;
 
         menu_set(fm->hwnd, bar);
         vPortFree(bar);

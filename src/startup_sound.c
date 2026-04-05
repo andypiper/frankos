@@ -1,6 +1,6 @@
 /*
  * FRANK OS — Startup Sound
- * Copyright (c) 2025 Mikhail Matveev <xtreme@rh1.tech>
+ * Copyright (c) 2026 Mikhail Matveev <xtreme@rh1.tech>
  * https://rh1.tech
  *
  * Plays the embedded WAV file (8-bit unsigned PCM, mono, 22050 Hz) through

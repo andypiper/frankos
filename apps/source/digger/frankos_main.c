@@ -116,8 +116,9 @@ void digger_setup_menu(void) {
     help->accel_key = 0x0B; /* Alt+H */
     help->item_count = 1;
 
-    strncpy(help->items[0].text, "About", sizeof(help->items[0].text) - 1);
+    strncpy(help->items[0].text, "About      F1", sizeof(help->items[0].text) - 1);
     help->items[0].command_id = CMD_ABOUT;
+    help->items[0].accel_key = 0x3A;
 
     menu_set(g_app->app_hwnd, &bar);
 }
@@ -171,11 +172,12 @@ bool digger_event(hwnd_t hwnd, const window_event_t *event) {
             return true;
         case CMD_ABOUT:
             dialog_show(hwnd, "About Digger",
-                        "Digger Remastered\n\n"
-                        "(c) 1983 Windmill Software\n"
-                        "Restored by AJ Software\n\n"
-                        "FRANK OS port (c) 2026\n"
-                        "Mikhail Matveev",
+                        "Digger\n\nFRANK OS v" FRANK_VERSION_STR
+                        "\n(c) 1983 Windmill Software\n"
+                        "Restored by AJ Software\n"
+                        "(c) 2026 Mikhail Matveev\n"
+                        "<xtreme@rh1.tech>\n"
+                        "github.com/rh1tech/frank-os",
                         DLG_ICON_INFO, DLG_BTN_OK);
             return true;
         }
@@ -188,6 +190,11 @@ bool digger_event(hwnd_t hwnd, const window_event_t *event) {
         if (sc == 0x28 && (event->key.modifiers & KMOD_ALT)) {
             wm_toggle_fullscreen(hwnd);
             return true;
+        }
+        /* F1: about */
+        if (sc == 0x3A) {
+            window_event_t ce = {0}; ce.type = WM_COMMAND; ce.command.id = CMD_ABOUT;
+            wm_post_event(hwnd, &ce); return true;
         }
         g_app->key_state[sc] = 1;
 

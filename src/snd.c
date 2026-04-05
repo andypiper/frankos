@@ -1,6 +1,6 @@
 /*
  * FRANK OS — Sound Mixer
- * Copyright (c) 2025 Mikhail Matveev <xtreme@rh1.tech>
+ * Copyright (c) 2026 Mikhail Matveev <xtreme@rh1.tech>
  * https://rh1.tech
  *
  * Multi-channel ring-buffer mixer with nearest-neighbour resampling.

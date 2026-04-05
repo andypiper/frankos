@@ -760,10 +760,11 @@ static bool event_handler(hwnd_t hwnd, const window_event_t *event) {
         }
         if (id == CMD_ABOUT) {
             dialog_show(hwnd, "About Kickstart",
-                        "Kickstart v1.0\n\n"
-                        "UF2 Firmware Launcher\n"
-                        "for FRANK OS\n\n"
-                        "(c) 2026 Mikhail Matveev",
+                        "Kickstart\n\nFRANK OS v" FRANK_VERSION_STR
+                        "\nUF2 Firmware Launcher\n"
+                        "(c) 2026 Mikhail Matveev\n"
+                        "<xtreme@rh1.tech>\n"
+                        "github.com/rh1tech/frank-os",
                         DLG_ICON_INFO, DLG_BTN_OK);
             return true;
         }
@@ -800,6 +801,10 @@ static bool event_handler(hwnd_t hwnd, const window_event_t *event) {
             app_closing = true;
             xTaskNotifyGive(app_task);
             return true;
+        }
+        if (sc == 0x3A) { /* F1 */
+            window_event_t ce = {0}; ce.type = WM_COMMAND; ce.command.id = CMD_ABOUT;
+            wm_post_event(hwnd, &ce); return true;
         }
         return false;
     }
@@ -906,7 +911,7 @@ static const menu_bar_t menu_bar = {
             .accel_key = 0x0B, /* HID 'H' — Alt+H */
             .item_count = 1,
             .items = {
-                { "About...",    CMD_ABOUT,  0, 0 },
+                { "About...  F1", CMD_ABOUT, 0, 0x3A },
             }
         },
     }

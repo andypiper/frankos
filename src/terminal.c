@@ -1,6 +1,6 @@
 /*
  * FRANK OS
- * Copyright (c) 2025 Mikhail Matveev <xtreme@rh1.tech>
+ * Copyright (c) 2026 Mikhail Matveev <xtreme@rh1.tech>
  * https://rh1.tech
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -261,6 +261,11 @@ static bool terminal_event(hwnd_t hwnd, const window_event_t *event) {
             wm_toggle_fullscreen(hwnd);
             return true;
         }
+        /* F1: about */
+        if (event->key.scancode == 0x3A) {
+            window_event_t ce = {0}; ce.type = WM_COMMAND; ce.command.id = TCMD_HELP_ABOUT;
+            wm_post_event(hwnd, &ce); return true;
+        }
         switch (event->key.scancode) {
         case 0x28: terminal_input_push(t, '\n');  return true;
         case 0x29: terminal_input_push(t, 0x1B);  return true;
@@ -275,10 +280,11 @@ static bool terminal_event(hwnd_t hwnd, const window_event_t *event) {
             terminal_force_close(t, hwnd);
             return true;
         case TCMD_HELP_ABOUT:
-            dialog_show(hwnd, "About",
-                        "FRANK OS\n\nVersion " FRANK_VERSION_STR "\n"
-                        "Copyright (c) 2026 Mikhail Matveev\n"
-                        "rh1.tech",
+            dialog_show(hwnd, "About Terminal",
+                        "Terminal\n\nFRANK OS v" FRANK_VERSION_STR
+                        "\n(c) 2026 Mikhail Matveev\n"
+                        "<xtreme@rh1.tech>\n"
+                        "github.com/rh1tech/frank-os",
                         DLG_ICON_INFO, DLG_BTN_OK);
             return true;
         }
@@ -407,8 +413,9 @@ hwnd_t terminal_create(void) {
         strncpy(help->title, "Help", sizeof(help->title) - 1);
         help->accel_key = 0x0B;  /* HID_KEY_H */
         help->item_count = 1;
-        strncpy(help->items[0].text, "About", sizeof(help->items[0].text) - 1);
+        strncpy(help->items[0].text, "About      F1", sizeof(help->items[0].text) - 1);
         help->items[0].command_id = TCMD_HELP_ABOUT;
+        help->items[0].accel_key = 0x3A;
 
         menu_set(t->hwnd, &bar);
     }

@@ -16,7 +16,7 @@
  *   DMA 14/15 + DMA_IRQ_1 — reserved for DispHSTX (Core 1)
  *   DMA 10/11 + DMA_IRQ_0 — used here for audio (Core 0)
  *
- * Copyright (c) 2025 Mikhail Matveev <xtreme@rh1.tech>
+ * Copyright (c) 2026 Mikhail Matveev <xtreme@rh1.tech>
  * https://rh1.tech
  *
  * SPDX-License-Identifier: GPL-3.0-or-later

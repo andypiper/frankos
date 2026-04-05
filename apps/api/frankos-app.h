@@ -1,6 +1,6 @@
 /*
  * FRANK OS Application API
- * Copyright (c) 2025 Mikhail Matveev <xtreme@rh1.tech>
+ * Copyright (c) 2026 Mikhail Matveev <xtreme@rh1.tech>
  * https://rh1.tech
  *
  * Standalone ELF apps include this header to access FRANK OS GUI services

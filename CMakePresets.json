@@ -1,0 +1,26 @@
+{
+	"version": 3,
+	"cmakeMinimumRequired": {
+		"major": 3,
+		"minor": 13,
+		"patch": 0
+	},
+	"configurePresets": [
+		{
+			"name": "frank_m2",
+			"displayName": "FRANK M2 (RP2350)",
+			"description": "Build for FRANK M2 board (RP2350B)",
+			"generator": "Ninja",
+			"binaryDir": "${sourceDir}/build",
+			"cacheVariables": {
+				"PICO_BOARD": "frank_m2"
+			}
+		}
+	],
+	"buildPresets": [
+		{
+			"name": "frank_m2",
+			"configurePreset": "frank_m2"
+		}
+	]
+}
