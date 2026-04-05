@@ -1381,6 +1381,10 @@ enum plm_buffer_mode {
 	PLM_BUFFER_MODE_APPEND
 };
 
+/* SRAM read window: bulk-copy from PSRAM, then bit reads hit fast SRAM */
+#define PLM_SRAM_WINDOW_SIZE 512
+#define PLM_SRAM_WINDOW_REFILL 256  /* refill when less than this remains */
+
 struct plm_buffer_t {
 	size_t bit_index;
 	size_t capacity;
@@ -1399,6 +1403,11 @@ struct plm_buffer_t {
 	void *load_callback_user_data;
 	uint8_t *bytes;
 	enum plm_buffer_mode mode;
+
+	/* SRAM read window — hot bit reads go here instead of PSRAM bytes[] */
+	uint8_t  sram_win[PLM_SRAM_WINDOW_SIZE + 4]; /* +4 for word-aligned overread */
+	size_t   win_base;  /* byte offset in bytes[] where sram_win starts */
+	size_t   win_len;   /* valid bytes in sram_win */
 };
 
 typedef struct {
@@ -1580,6 +1589,8 @@ void plm_buffer_rewind(plm_buffer_t *self) {
 
 void plm_buffer_seek(plm_buffer_t *self, size_t pos) {
 	self->has_ended = FALSE;
+	self->win_base = 0;
+	self->win_len = 0;  /* invalidate SRAM window */
 
 	if (self->seek_callback) {
 		self->seek_callback(self, pos, self->load_callback_user_data);
@@ -1617,6 +1628,8 @@ void plm_buffer_discard_read_bytes(plm_buffer_t *self) {
 		self->bit_index -= byte_pos << 3;
 		self->length -= byte_pos;
 	}
+	self->win_base = 0;
+	self->win_len = 0;  /* invalidate SRAM window */
 }
 
 #ifndef PLM_NO_STDIO
@@ -1653,45 +1666,61 @@ int plm_buffer_has_ended(plm_buffer_t *self) {
 	return self->has_ended;
 }
 
+/* Refresh SRAM window from PSRAM bytes[] when needed */
+static void plm_buffer_refresh_window(plm_buffer_t *self) {
+	size_t byte_pos = self->bit_index >> 3;
+	size_t avail = self->length - byte_pos;
+	size_t copy = avail < PLM_SRAM_WINDOW_SIZE ? avail : PLM_SRAM_WINDOW_SIZE;
+	if (copy > 0) {
+		memcpy(self->sram_win, self->bytes + byte_pos, copy);
+	}
+	/* Clear the +4 overread zone */
+	self->sram_win[copy] = 0;
+	self->sram_win[copy+1] = 0;
+	self->sram_win[copy+2] = 0;
+	self->sram_win[copy+3] = 0;
+	self->win_base = byte_pos;
+	self->win_len = copy;
+}
+
 int plm_buffer_has(plm_buffer_t *self, size_t count) {
-	if (((self->length << 3) - self->bit_index) >= count) {
+	if (__builtin_expect(((self->length << 3) - self->bit_index) >= count, 1)) {
+		/* Refresh SRAM window if we're near the end */
+		size_t byte_pos = self->bit_index >> 3;
+		if (__builtin_expect(byte_pos - self->win_base + 8 > self->win_len, 0)) {
+			plm_buffer_refresh_window(self);
+		}
 		return TRUE;
 	}
 
 	if (self->load_callback) {
 		self->load_callback(self, self->load_callback_user_data);
-		
 		if (((self->length << 3) - self->bit_index) >= count) {
+			plm_buffer_refresh_window(self);
 			return TRUE;
 		}
-	}	
-	
+	}
+
 	if (self->total_size != 0 && self->length == self->total_size) {
 		self->has_ended = TRUE;
 	}
 	return FALSE;
 }
 
+/* Fast word-aligned bit read from SRAM window (up to 25 bits) */
 int plm_buffer_read(plm_buffer_t *self, int count) {
-	if (!plm_buffer_has(self, count)) {
+	if (__builtin_expect(!plm_buffer_has(self, count), 0)) {
 		return 0;
 	}
-
-	int value = 0;
-	while (count) {
-		int current_byte = self->bytes[self->bit_index >> 3];
-
-		int remaining = 8 - (self->bit_index & 7); // Remaining bits in byte
-		int read = remaining < count ? remaining : count; // Bits in self run
-		int shift = remaining - read;
-		int mask = (0xff >> (8 - read));
-
-		value = (value << read) | ((current_byte & (mask << shift)) >> shift);
-
-		self->bit_index += read;
-		count -= read;
-	}
-
+	size_t bi = self->bit_index;
+	size_t win_off = (bi >> 3) - self->win_base;
+	int bit_off = bi & 7;
+	/* Load 4 bytes from SRAM window as big-endian 32-bit word */
+	uint8_t *p = self->sram_win + win_off;
+	uint32_t word = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16)
+	              | ((uint32_t)p[2] << 8)  | (uint32_t)p[3];
+	int value = (word >> (32 - bit_off - count)) & ((1u << count) - 1);
+	self->bit_index = bi + count;
 	return value;
 }
 
@@ -1760,19 +1789,24 @@ int plm_buffer_peek_non_zero(plm_buffer_t *self, int bit_count) {
 	if (!plm_buffer_has(self, bit_count)) {
 		return FALSE;
 	}
-
-	int val = plm_buffer_read(self, bit_count);
-	self->bit_index -= bit_count;
-	return val != 0;
+	/* Direct peek from SRAM window — no read/rewind */
+	size_t bi = self->bit_index;
+	size_t win_off = (bi >> 3) - self->win_base;
+	int bit_off = bi & 7;
+	uint8_t *p = self->sram_win + win_off;
+	uint32_t word = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16)
+	              | ((uint32_t)p[2] << 8)  | (uint32_t)p[3];
+	uint32_t mask = ((1u << bit_count) - 1) << (32 - bit_off - bit_count);
+	return (word & mask) != 0;
 }
 
 int16_t plm_buffer_read_vlc(plm_buffer_t *self, const plm_vlc_t *table) {
-	/* Fast inline single-bit reads — avoids full plm_buffer_read overhead
-	 * for each bit of the VLC tree walk (called thousands of times/frame) */
+	/* Fast single-bit reads from SRAM window */
 	plm_vlc_t state = {0, 0};
 	do {
 		size_t bi = self->bit_index;
-		int bit = (self->bytes[bi >> 3] >> (7 - (bi & 7))) & 1;
+		size_t win_off = (bi >> 3) - self->win_base;
+		int bit = (self->sram_win[win_off] >> (7 - (bi & 7))) & 1;
 		self->bit_index = bi + 1;
 		state = table[state.index + bit];
 	} while (state.index > 0);
@@ -2729,6 +2763,8 @@ struct plm_video_t {
 	int has_sequence_header;
 
 	int quantizer_scale;
+	int scaled_intra_quant[64];     /* quantizer_scale * intra_quant_matrix[i] */
+	int scaled_non_intra_quant[64]; /* quantizer_scale * non_intra_quant_matrix[i] */
 	int slice_begin;
 	int macroblock_address;
 
@@ -2772,6 +2808,7 @@ void plm_video_init_frame(plm_video_t *self, plm_frame_t *frame, uint8_t *base);
 void plm_video_decode_picture(plm_video_t *self);
 void plm_video_decode_slice(plm_video_t *self, int slice);
 void plm_video_decode_macroblock(plm_video_t *self);
+static void plm_video_update_scaled_quant(plm_video_t *self);
 void plm_video_decode_motion_vectors(plm_video_t *self);
 int plm_video_decode_motion_vector(plm_video_t *self, int r_size, int motion);
 void plm_video_predict_macroblock(plm_video_t *self);
@@ -3125,6 +3162,7 @@ void plm_video_decode_slice(plm_video_t *self, int slice) {
 	self->dc_predictor[2] = 128;
 
 	self->quantizer_scale = plm_buffer_read(self->buffer, 5);
+	plm_video_update_scaled_quant(self);
 
 	// Skip extra
 	while (plm_buffer_read(self->buffer, 1)) {
@@ -3209,6 +3247,7 @@ void plm_video_decode_macroblock(plm_video_t *self) {
 	// Quantizer scale
 	if ((self->macroblock_type & 0x10) != 0) {
 		self->quantizer_scale = plm_buffer_read(self->buffer, 5);
+		plm_video_update_scaled_quant(self);
 	}
 
 	if (self->macroblock_intra) {
@@ -3386,10 +3425,18 @@ void plm_video_process_macroblock(
 	#undef PLM_MB_CASE
 }
 
+static void plm_video_update_scaled_quant(plm_video_t *self) {
+	int qs = self->quantizer_scale;
+	for (int i = 0; i < 64; i++) {
+		self->scaled_intra_quant[i] = qs * self->intra_quant_matrix[i];
+		self->scaled_non_intra_quant[i] = qs * self->non_intra_quant_matrix[i];
+	}
+}
+
 void plm_video_decode_block(plm_video_t *self, int block) {
 
 	int n = 0;
-	uint8_t *quant_matrix;
+	int *quant_matrix;
 
 	// Decode DC coefficient of intra-coded blocks
 	if (self->macroblock_intra) {
@@ -3421,11 +3468,11 @@ void plm_video_decode_block(plm_video_t *self, int block) {
 		// Dequantize + premultiply
 		self->block_data[0] <<= (3 + 5);
 
-		quant_matrix = self->intra_quant_matrix;
+		quant_matrix = self->scaled_intra_quant;
 		n = 1;
 	}
 	else {
-		quant_matrix = self->non_intra_quant_matrix;
+		quant_matrix = self->scaled_non_intra_quant;
 	}
 
 	// Decode AC coefficients (+DC for non-intra)
@@ -3473,7 +3520,7 @@ void plm_video_decode_block(plm_video_t *self, int block) {
 		if (!self->macroblock_intra) {
 			level += (level < 0 ? -1 : 1);
 		}
-		level = (level * self->quantizer_scale * quant_matrix[de_zig_zagged]) >> 4;
+		level = (level * quant_matrix[de_zig_zagged]) >> 4;
 		if ((level & 1) == 0) {
 			level -= level > 0 ? 1 : -1;
 		}
@@ -3511,17 +3558,36 @@ void plm_video_decode_block(plm_video_t *self, int block) {
 	}
 
 	int *s = self->block_data;
-	int si = 0;
 	if (self->macroblock_intra) {
 		// Overwrite (no prediction)
 		if (n == 1) {
-			int clamped = plm_clamp((s[0] + 128) >> 8);
-			PLM_BLOCK_SET(d, di, dw, si, 8, 8, clamped);
+			/* DC-only: fill 8×8 block with one value using word writes */
+			uint8_t cv = plm_clamp((s[0] + 128) >> 8);
+			uint32_t fill = cv | ((uint32_t)cv << 8) | ((uint32_t)cv << 16) | ((uint32_t)cv << 24);
+			for (int y = 0; y < 8; y++) {
+				*(uint32_t *)(d + di) = fill;
+				*(uint32_t *)(d + di + 4) = fill;
+				di += dw;
+			}
 			s[0] = 0;
 		}
 		else {
 			plm_video_idct(s);
-			PLM_BLOCK_SET(d, di, dw, si, 8, 8, plm_clamp(s[si]));
+			/* Word-wide write: pack 4 clamped pixels into uint32_t */
+			int si = 0;
+			for (int y = 0; y < 8; y++) {
+				uint32_t w0 = (uint32_t)plm_clamp(s[si])
+				            | ((uint32_t)plm_clamp(s[si+1]) << 8)
+				            | ((uint32_t)plm_clamp(s[si+2]) << 16)
+				            | ((uint32_t)plm_clamp(s[si+3]) << 24);
+				uint32_t w1 = (uint32_t)plm_clamp(s[si+4])
+				            | ((uint32_t)plm_clamp(s[si+5]) << 8)
+				            | ((uint32_t)plm_clamp(s[si+6]) << 16)
+				            | ((uint32_t)plm_clamp(s[si+7]) << 24);
+				*(uint32_t *)(d + di) = w0;
+				*(uint32_t *)(d + di + 4) = w1;
+				si += 8; di += dw;
+			}
 			memset(self->block_data, 0, sizeof(self->block_data));
 		}
 	}
@@ -3529,11 +3595,13 @@ void plm_video_decode_block(plm_video_t *self, int block) {
 		// Add data to the predicted macroblock
 		if (n == 1) {
 			int value = (s[0] + 128) >> 8;
+			int si = 0;
 			PLM_BLOCK_SET(d, di, dw, si, 8, 8, plm_clamp(d[di] + value));
 			s[0] = 0;
 		}
 		else {
 			plm_video_idct(s);
+			int si = 0;
 			PLM_BLOCK_SET(d, di, dw, si, 8, 8, plm_clamp(d[di] + s[si]));
 			memset(self->block_data, 0, sizeof(self->block_data));
 		}
