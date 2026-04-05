@@ -449,11 +449,25 @@ static void wrap_wfi(void) { __wfi(); };
 // Wrapper functions for cc_extrns.h under FRANK OS.
 // Needed because the compat macros are function-like and don't expand
 // when used as bare function pointers in the external function table.
-static int wrap_getchar(void) { return vt100_getch(); }
-static int wrap_getchar_timeout_us(int us) { return vt100_getch_timeout(us); }
+static int wrap_getchar(void) {
+    int c = vt100_getch();
+    if (vt100_is_close_requested()) cc_exit(0);
+    return c;
+}
+static int wrap_getchar_timeout_us(int us) {
+    int c = vt100_getch_timeout(us);
+    if (vt100_is_close_requested()) cc_exit(0);
+    return c;
+}
 static void wrap_putchar_frankos(int c) { vt100_putc((char)c); }
-static void wrap_sleep_ms(int ms) { vTaskDelay(pdMS_TO_TICKS(ms)); }
-static void wrap_sleep_us(int us) { vTaskDelay(pdMS_TO_TICKS(us / 1000 + 1)); }
+static void wrap_sleep_ms(int ms) {
+    vTaskDelay(pdMS_TO_TICKS(ms));
+    if (vt100_is_close_requested()) cc_exit(0);
+}
+static void wrap_sleep_us(int us) {
+    vTaskDelay(pdMS_TO_TICKS(us / 1000 + 1));
+    if (vt100_is_close_requested()) cc_exit(0);
+}
 
 // Math wrappers — sys_table has double versions, cc needs float
 #define SYS(idx) _sys_table_ptrs[idx]
@@ -4608,8 +4622,9 @@ int cc(int mode, int argc, char** argv) {
     memset(&done_jmp, 0, sizeof(done_jmp));
     file_list = NULL; fd = NULL; fp = NULL;
     cc_malloc_reset();
-    // Allocate code/data buffer on first use
-    if (!__StackLimit) __StackLimit = malloc(TEXT_BYTES + DATA_BYTES);
+    // Allocate code/data buffer on first use — SRAM preferred for fast
+    // ARM execution (the blx instruction runs from this buffer).
+    if (!__StackLimit) __StackLimit = sram_malloc(TEXT_BYTES + DATA_BYTES);
     if (!__StackLimit) {
         printf("cc: out of memory (need %d bytes)\n", TEXT_BYTES + DATA_BYTES);
         return -1;
@@ -5017,7 +5032,7 @@ done: // clean up and return
 void cc_cleanup(void) {
     cc_free_all();
     if (__StackLimit) {
-        free(__StackLimit);
+        sram_free(__StackLimit);
         __StackLimit = NULL;
     }
 }

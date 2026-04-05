@@ -233,6 +233,9 @@ static inline uint32_t get_rand_32(void) {
 }
 #endif
 
+/* ── SRAM-first allocator ─────────────────────────────────────────────── */
+#include "pshell_sram.h"
+
 /* ── Heap boundaries (for status_cmd) ─────────────────────────────────── */
 extern char __heap_start;
 extern char __heap_end;

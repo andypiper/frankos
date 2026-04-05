@@ -12,6 +12,7 @@
 #include "m-os-api.h"
 #include "frankos-app.h"
 #include "pshell_vt100.h"
+#include "pshell_sram.h"
 #include "font.h"
 
 #include <string.h>
@@ -543,8 +544,10 @@ void vt100_input_push_str(const char *s) {
 int vt100_getch(void) {
     /* Flush pending display updates before blocking */
     flush_display();
-    while (in_tail == in_head)
+    while (in_tail == in_head) {
+        if (vt_close_requested) return '\r';  /* unblock on window close */
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100));
+    }
     int c = inbuf[in_tail];
     in_tail = (in_tail + 1) % VT100_INBUF_SIZE;
     return c;
@@ -605,8 +608,8 @@ void vt100_init(int cols, int rows) {
     tb_rows = rows;
 
     int buf_size = cols * rows * 2;
-    textbuf = (uint8_t *)malloc(buf_size);
-    shadow_buf = (uint8_t *)malloc(buf_size);
+    textbuf = (uint8_t *)sram_malloc(buf_size);
+    shadow_buf = (uint8_t *)sram_malloc(buf_size);
     if (!textbuf || !shadow_buf) return;
 
     /* Fill with spaces, default attribute (light gray on black) */
@@ -638,8 +641,8 @@ void vt100_init(int cols, int rows) {
 }
 
 void vt100_destroy(void) {
-    if (textbuf) { free(textbuf); textbuf = NULL; }
-    if (shadow_buf) { free(shadow_buf); shadow_buf = NULL; }
+    if (textbuf) { sram_free(textbuf); textbuf = NULL; }
+    if (shadow_buf) { sram_free(shadow_buf); shadow_buf = NULL; }
     in_waiter = NULL;
 }
 
@@ -669,11 +672,11 @@ void vt100_resize(int cols, int rows) {
     if (cols == tb_cols && rows == tb_rows) return;
 
     int new_size = cols * rows * 2;
-    uint8_t *new_buf = (uint8_t *)malloc(new_size);
-    uint8_t *new_shadow = (uint8_t *)malloc(new_size);
+    uint8_t *new_buf = (uint8_t *)sram_malloc(new_size);
+    uint8_t *new_shadow = (uint8_t *)sram_malloc(new_size);
     if (!new_buf || !new_shadow) {
-        if (new_buf) free(new_buf);
-        if (new_shadow) free(new_shadow);
+        if (new_buf) sram_free(new_buf);
+        if (new_shadow) sram_free(new_shadow);
         return;
     }
 
@@ -696,8 +699,8 @@ void vt100_resize(int cols, int rows) {
 
     memset(new_shadow, 0xFF, new_size); /* force full repaint */
 
-    free(textbuf);
-    free(shadow_buf);
+    sram_free(textbuf);
+    sram_free(shadow_buf);
     textbuf = new_buf;
     shadow_buf = new_shadow;
     tb_cols = cols;

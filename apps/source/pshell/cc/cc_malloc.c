@@ -26,9 +26,9 @@ void cc_malloc_reset(void) {
 }
 #endif
 
-// local memory management functions
+// local memory management functions — use SRAM-first allocator for speed
 void* cc_malloc(int l, int cc, int zero) {
-    qentry_t* p = malloc(l + sizeof(qentry_t));
+    qentry_t* p = sram_malloc(l + sizeof(qentry_t));
     if (!p) {
         if (cc)
             run_fatal("out of memory");
@@ -55,7 +55,7 @@ void cc_free(void* p, int user) {
     while (p3) {
         if (p2 == p3) {
             last->next = p2->next;
-            free(p2);
+            sram_free(p2);
             return;
         }
         last = p3;
@@ -71,6 +71,6 @@ void cc_free_all(void) {
     while (malloc_list.next) {
         qentry_t* p = malloc_list.next;
         malloc_list.next = p->next;
-        free(p);
+        sram_free(p);
     }
 }

@@ -1133,10 +1133,12 @@ int pshell_exec(const char *file) {
         cc_cleanup();
     }
 
-    /* Wait for a keypress before closing */
-    printf("\n" VT_BOLD "Press any key to close..." VT_NORMAL);
-    fflush(stdout);
-    getchar();
+    /* Wait for a keypress before closing (skip if window close requested) */
+    if (!vt100_is_close_requested()) {
+        printf("\n" VT_BOLD "Press any key to close..." VT_NORMAL);
+        fflush(stdout);
+        getchar();
+    }
 
     return 0;
 }
