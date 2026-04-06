@@ -3,9 +3,9 @@
  * Copyright(C) 2005-2014 Simon Howard
  * Copyright(C) 2021-2022 Graham Sanderson
  *
- * Stripped of Doom dependencies.  Uses FatFS for file I/O.
- * True streaming: reads one event at a time from the file,
- * no event buffer allocation.
+ * Stripped of Doom dependencies.  Uses FatFS for initial file load.
+ * The entire file is loaded into RAM so that event parsing during
+ * playback never touches the SD card (avoids periodic GC stalls).
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -42,6 +42,41 @@ typedef struct {
 } midi_header_t;
 #pragma pack(pop)
 
+/* ------------------------------------------------------------------ */
+/* In-memory cursor — replaces FatFS streaming during playback        */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    const uint8_t *data;
+    uint32_t       size;
+    uint32_t       pos;
+} mem_cursor_t;
+
+static inline bool mc_read(mem_cursor_t *mc, void *dst, uint32_t n) {
+    if (mc->pos + n > mc->size) return false;
+    memcpy(dst, mc->data + mc->pos, n);
+    mc->pos += n;
+    return true;
+}
+
+static inline bool mc_read_byte(mem_cursor_t *mc, uint8_t *out) {
+    if (mc->pos >= mc->size) return false;
+    *out = mc->data[mc->pos++];
+    return true;
+}
+
+static inline void mc_seek(mem_cursor_t *mc, uint32_t pos) {
+    mc->pos = pos;
+}
+
+static inline uint32_t mc_tell(mem_cursor_t *mc) {
+    return mc->pos;
+}
+
+/* ------------------------------------------------------------------ */
+/* Track / file structures                                             */
+/* ------------------------------------------------------------------ */
+
 typedef struct {
     unsigned int data_len;
 
@@ -51,9 +86,9 @@ typedef struct {
     uint8_t       next_idx;     /* index of the lookahead event */
     bool          has_next;
 
-    /* File streaming state */
-    FSIZE_t      file_pos;
-    FSIZE_t      initial_file_pos;
+    /* Memory-cursor streaming state (offsets into file->buf) */
+    uint32_t     file_pos;
+    uint32_t     initial_file_pos;
     unsigned int last_event_type;
     bool         end_of_track;
 } midi_track_t;
@@ -63,9 +98,9 @@ struct midi_file_s {
     midi_track_t *tracks;
     unsigned int  num_tracks;
 
-    /* Keep file open for streaming */
-    FIL           fil;
-    bool          fil_open;
+    /* Entire MIDI file loaded into RAM */
+    uint8_t      *buf;
+    uint32_t      buf_size;
 };
 
 struct midi_track_iter_s {
@@ -75,21 +110,18 @@ struct midi_track_iter_s {
 };
 
 /* ------------------------------------------------------------------ */
-/* FatFS-based byte reading helpers                                    */
+/* Memory-based byte reading helpers                                   */
 /* ------------------------------------------------------------------ */
 
-static bool ReadByte(uint8_t *result, FIL *f) {
-    UINT br;
-    if (f_read(f, result, 1, &br) != FR_OK || br != 1)
-        return false;
-    return true;
+static bool ReadByte(uint8_t *result, mem_cursor_t *mc) {
+    return mc_read_byte(mc, result);
 }
 
-static bool ReadVariableLength(uint32_t *result, FIL *f) {
+static bool ReadVariableLength(uint32_t *result, mem_cursor_t *mc) {
     uint8_t b;
     *result = 0;
     for (int i = 0; i < 4; i++) {
-        if (!ReadByte(&b, f))
+        if (!ReadByte(&b, mc))
             return false;
         *result = (*result << 7) | (b & 0x7f);
         if ((b & 0x80) == 0)
@@ -98,11 +130,10 @@ static bool ReadVariableLength(uint32_t *result, FIL *f) {
     return false;
 }
 
-static void *ReadByteSequence(unsigned int num_bytes, FIL *f) {
+static void *ReadByteSequence(unsigned int num_bytes, mem_cursor_t *mc) {
     uint8_t *result = malloc(num_bytes + 1);
     if (!result) return NULL;
-    UINT br;
-    if (f_read(f, result, num_bytes, &br) != FR_OK || br != num_bytes) {
+    if (!mc_read(mc, result, num_bytes)) {
         free(result);
         return NULL;
     }
@@ -114,14 +145,14 @@ static void *ReadByteSequence(unsigned int num_bytes, FIL *f) {
 /* ------------------------------------------------------------------ */
 
 static bool ReadChannelEvent(midi_event_t *event, uint8_t event_type,
-                             bool two_param, FIL *f) {
+                             bool two_param, mem_cursor_t *mc) {
     uint8_t b;
     event->event_type = (midi_event_type_t)(event_type & 0xf0);
     event->data.channel.channel = event_type & 0x0f;
-    if (!ReadByte(&b, f)) return false;
+    if (!ReadByte(&b, mc)) return false;
     event->data.channel.param1 = b;
     if (two_param) {
-        if (!ReadByte(&b, f)) return false;
+        if (!ReadByte(&b, mc)) return false;
         event->data.channel.param2 = b;
     } else {
         event->data.channel.param2 = 0;
@@ -129,46 +160,47 @@ static bool ReadChannelEvent(midi_event_t *event, uint8_t event_type,
     return true;
 }
 
-static bool ReadSysExEvent(midi_event_t *event, int event_type, FIL *f) {
+static bool ReadSysExEvent(midi_event_t *event, int event_type,
+                           mem_cursor_t *mc) {
     uint32_t length;
     event->event_type = (midi_event_type_t)event_type;
-    if (!ReadVariableLength(&length, f)) return false;
+    if (!ReadVariableLength(&length, mc)) return false;
     event->data.sysex.length = length;
     event->data.sysex.data = NULL;
     if (length > 0)
-        f_lseek(f, f_tell(f) + length);
+        mc_seek(mc, mc_tell(mc) + length);
     return true;
 }
 
-static bool ReadMetaEvent(midi_event_t *event, FIL *f) {
+static bool ReadMetaEvent(midi_event_t *event, mem_cursor_t *mc) {
     uint8_t b;
     uint32_t length;
     event->event_type = MIDI_EVENT_META;
-    if (!ReadByte(&b, f)) return false;
+    if (!ReadByte(&b, mc)) return false;
     event->data.meta.type = b;
-    if (!ReadVariableLength(&length, f)) return false;
+    if (!ReadVariableLength(&length, mc)) return false;
     event->data.meta.length = length;
     /* Only store data for SET_TEMPO events */
     if (b == MIDI_META_SET_TEMPO && length == 3) {
-        event->data.meta.data = ReadByteSequence(length, f);
+        event->data.meta.data = ReadByteSequence(length, mc);
         if (!event->data.meta.data) return false;
     } else {
         event->data.meta.data = NULL;
         if (length > 0)
-            f_lseek(f, f_tell(f) + length);
+            mc_seek(mc, mc_tell(mc) + length);
     }
     return true;
 }
 
 static bool ReadEvent(midi_event_t *event, unsigned int *last_event_type,
-                      FIL *f) {
+                      mem_cursor_t *mc) {
     uint8_t event_type;
-    if (!ReadVariableLength(&event->delta_time, f)) return false;
-    if (!ReadByte(&event_type, f)) return false;
+    if (!ReadVariableLength(&event->delta_time, mc)) return false;
+    if (!ReadByte(&event_type, mc)) return false;
 
     if ((event_type & 0x80) == 0) {
         event_type = (uint8_t)*last_event_type;
-        f_lseek(f, f_tell(f) - 1);
+        mc_seek(mc, mc_tell(mc) - 1);
     } else {
         *last_event_type = event_type;
     }
@@ -179,19 +211,19 @@ static bool ReadEvent(midi_event_t *event, unsigned int *last_event_type,
         case MIDI_EVENT_AFTERTOUCH:
         case MIDI_EVENT_CONTROLLER:
         case MIDI_EVENT_PITCH_BEND:
-            return ReadChannelEvent(event, event_type, true, f);
+            return ReadChannelEvent(event, event_type, true, mc);
         case MIDI_EVENT_PROGRAM_CHANGE:
         case MIDI_EVENT_CHAN_AFTERTOUCH:
-            return ReadChannelEvent(event, event_type, false, f);
+            return ReadChannelEvent(event, event_type, false, mc);
         default:
             break;
     }
     switch (event_type) {
         case MIDI_EVENT_SYSEX:
         case MIDI_EVENT_SYSEX_SPLIT:
-            return ReadSysExEvent(event, event_type, f);
+            return ReadSysExEvent(event, event_type, mc);
         case MIDI_EVENT_META:
-            return ReadMetaEvent(event, f);
+            return ReadMetaEvent(event, mc);
         default:
             break;
     }
@@ -218,7 +250,7 @@ static void FreeEventData(midi_event_t *event) {
 /* ------------------------------------------------------------------ */
 
 static void ReadAheadEvent(midi_file_t *file, midi_track_t *track) {
-    if (track->end_of_track || !file->fil_open) {
+    if (track->end_of_track || !file->buf) {
         track->has_next = false;
         return;
     }
@@ -228,39 +260,24 @@ static void ReadAheadEvent(midi_file_t *file, midi_track_t *track) {
     /* Free any previous data in this slot */
     FreeEventData(ev);
 
-    /* Seek to this track's read position */
-    f_lseek(&file->fil, track->file_pos);
+    /* Set up memory cursor at this track's read position */
+    mem_cursor_t mc = { file->buf, file->buf_size, track->file_pos };
 
     memset(ev, 0, sizeof(*ev));
-    if (!ReadEvent(ev, &track->last_event_type, &file->fil)) {
+    if (!ReadEvent(ev, &track->last_event_type, &mc)) {
         track->has_next = false;
         track->end_of_track = true;
         return;
     }
 
-    /* Save file position for next read */
-    track->file_pos = f_tell(&file->fil);
+    /* Save cursor position for next read */
+    track->file_pos = mc_tell(&mc);
     track->has_next = true;
 
     if (ev->event_type == MIDI_EVENT_META &&
         ev->data.meta.type == MIDI_META_END_OF_TRACK) {
         track->end_of_track = true;
     }
-}
-
-/* ------------------------------------------------------------------ */
-/* Track header reading                                                */
-/* ------------------------------------------------------------------ */
-
-static bool ReadTrackHeader(midi_track_t *track, FIL *f) {
-    chunk_header_t hdr;
-    UINT br;
-    if (f_read(f, &hdr, sizeof(hdr), &br) != FR_OK || br != sizeof(hdr))
-        return false;
-    if (memcmp(hdr.chunk_id, TRACK_CHUNK_ID, 4) != 0)
-        return false;
-    track->data_len = swap32(hdr.chunk_size);
-    return true;
 }
 
 /* ------------------------------------------------------------------ */
@@ -289,18 +306,36 @@ midi_file_t *MIDI_LoadFile(const char *filename) {
     midi_file_t *file = calloc(1, sizeof(midi_file_t));
     if (!file) return NULL;
 
-    if (f_open(&file->fil, filename, FA_READ | FA_OPEN_EXISTING) != FR_OK) {
+    FIL fil;
+    if (f_open(&fil, filename, FA_READ | FA_OPEN_EXISTING) != FR_OK) {
         free(file);
         return NULL;
     }
-    file->fil_open = true;
 
-    /* Read MIDI header */
-    UINT br;
-    if (f_read(&file->fil, &file->header, sizeof(midi_header_t), &br) != FR_OK ||
-        br != sizeof(midi_header_t)) {
-        goto fail;
+    /* Load entire file into RAM — MIDI files are small (typically < 100 KB) */
+    file->buf_size = (uint32_t)f_size(&fil);
+    file->buf = malloc(file->buf_size);
+    if (!file->buf) {
+        f_close(&fil);
+        free(file);
+        return NULL;
     }
+
+    UINT br;
+    if (f_read(&fil, file->buf, file->buf_size, &br) != FR_OK ||
+        br != file->buf_size) {
+        f_close(&fil);
+        free(file->buf);
+        free(file);
+        return NULL;
+    }
+    f_close(&fil);
+
+    /* Parse header from the in-memory buffer */
+    mem_cursor_t mc = { file->buf, file->buf_size, 0 };
+
+    if (!mc_read(&mc, &file->header, sizeof(midi_header_t)))
+        goto fail;
     if (memcmp(file->header.chunk_header.chunk_id, HEADER_CHUNK_ID, 4) != 0)
         goto fail;
 
@@ -311,22 +346,26 @@ midi_file_t *MIDI_LoadFile(const char *filename) {
     file->tracks = calloc(file->num_tracks, sizeof(midi_track_t));
     if (!file->tracks) goto fail;
 
-    /* Read each track header and record file position */
+    /* Read each track header and record buffer offset */
     for (unsigned int i = 0; i < file->num_tracks; i++) {
         midi_track_t *track = &file->tracks[i];
-        if (!ReadTrackHeader(track, &file->fil))
+        chunk_header_t hdr;
+        if (!mc_read(&mc, &hdr, sizeof(hdr)))
             goto fail;
-        track->initial_file_pos = f_tell(&file->fil);
+        if (memcmp(hdr.chunk_id, TRACK_CHUNK_ID, 4) != 0)
+            goto fail;
+        track->data_len = swap32(hdr.chunk_size);
+        track->initial_file_pos = mc_tell(&mc);
         track->file_pos = track->initial_file_pos;
-        /* Skip track data (will be streamed event by event) */
-        f_lseek(&file->fil, f_tell(&file->fil) + track->data_len);
+        /* Skip track data */
+        mc_seek(&mc, mc_tell(&mc) + track->data_len);
     }
 
     return file;
 
 fail:
     if (file->tracks) free(file->tracks);
-    if (file->fil_open) f_close(&file->fil);
+    free(file->buf);
     free(file);
     return NULL;
 }
@@ -340,8 +379,7 @@ void MIDI_FreeFile(midi_file_t *file) {
         }
         free(file->tracks);
     }
-    if (file->fil_open)
-        f_close(&file->fil);
+    free(file->buf);
     free(file);
 }
 

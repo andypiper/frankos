@@ -1663,8 +1663,8 @@ static bool fm_event(hwnd_t hwnd, const window_event_t *event) {
             uint32_t now = xTaskGetTickCount();
             if (idx == fm->last_click_index &&
                 (now - fm->last_click_tick) < pdMS_TO_TICKS(DBLCLICK_MS)) {
-                fm_open_item(fm, idx);
                 fm->last_click_index = -1;
+                fm_open_item(fm, idx);
                 return true;
             }
             fm->last_click_index = idx;

@@ -153,6 +153,11 @@ typedef struct {
     /* Deferred play: path set by WM task, picked up by app task */
     char            pending_path[MAX_PATH_LEN];
 
+    /* Deferred command from event handler (compositor task) — executed
+     * in the main loop (app task) so pcm_init/pcm_cleanup use the
+     * correct FreeRTOS thread-local storage for the snd channel. */
+    volatile int8_t pending_cmd;  /* 0=none, 1=play, 2=stop, 3=next, 4=prev */
+
     /* System */
     TimerHandle_t   ui_timer;
     volatile bool   closing;
@@ -347,12 +352,23 @@ static int decode_frame_mod(frankamp_t *fa) {
 
 static int decode_frame_midi(frankamp_t *fa) {
     int nf = midi_opl_render(fa->midi, fa->pcm_buf, MIDI_CHUNK_FRAMES);
-    /* Apply volume */
-    if (fa->volume < 100 && nf > 0) {
-        int shift = ((100 - fa->volume) * 8 + 50) / 100;
-        if (shift > 0)
-            for (int i = 0; i < nf * 2; i++)
-                fa->pcm_buf[i] >>= shift;
+    if (nf > 0) {
+        /* Apply OPL gain (×8) and user volume in one 32-bit step.
+         * The OPL output is already >>1 and clamped to int16 (±18k peak
+         * at 9 voices).  Applying <<3 then >>vol_shift separately would
+         * clip at ≥5 voices, destroying dynamics.  Combining them into
+         * one net shift preserves the full signal. */
+        int vol_shift = (fa->volume < 100)
+                      ? ((100 - fa->volume) * 8 + 50) / 100
+                      : 0;
+        int net_shift = 4 - vol_shift;  /* <<4 base gain minus >>vol attenuation */
+        for (int i = 0; i < nf * 2; i++) {
+            int32_t s = fa->pcm_buf[i];
+            s = (net_shift >= 0) ? (s << net_shift) : (s >> -net_shift);
+            if (s > 32767) s = 32767;
+            else if (s < -32768) s = -32768;
+            fa->pcm_buf[i] = (int16_t)s;
+        }
     }
     return nf;
 }
@@ -1076,13 +1092,20 @@ static bool hit_rem_btn(int16_t mx, int16_t my) {
  * Action helpers (shared by event handler, menu, and keyboard)
  *=========================================================================*/
 
+/* Defer playback commands to the main loop (app task context) so that
+ * pcm_init / pcm_cleanup use the correct FreeRTOS thread-local storage.
+ * The event handler runs in the compositor task — wrong TLS for audio. */
+#define PCMD_NONE 0
+#define PCMD_PLAY 1
+#define PCMD_STOP 2
+#define PCMD_NEXT 3
+#define PCMD_PREV 4
+
 static void do_play(frankamp_t *fa) {
     if (fa->play_state == PS_STOPPED) {
-        int idx = fa->pl_selected >= 0 ? fa->pl_selected : 0;
-        if (fa->pl_count > 0)
-            play_start(fa, idx);
+        fa->pending_cmd = PCMD_PLAY;
     } else if (fa->play_state == PS_PAUSED) {
-        play_pause(fa);
+        play_pause(fa);  /* pause/unpause is safe — no pcm calls */
     }
 }
 
@@ -1155,8 +1178,8 @@ static bool main_event(hwnd_t hwnd, const window_event_t *ev) {
             int idx = fa->pl_scroll + plrow;
             if (idx >= 0 && idx < fa->pl_count) {
                 if (fa->pl_selected == idx) {
-                    /* Second click on same item: play it */
-                    play_start(fa, idx);
+                    /* Second click on same item: play it (deferred) */
+                    fa->pending_cmd = PCMD_PLAY;
                 } else {
                     fa->pl_selected = idx;
                 }
@@ -1214,11 +1237,11 @@ static bool main_event(hwnd_t hwnd, const window_event_t *ev) {
         if (btn >= 0 && btn < NUM_TRANSPORT) {
             int actual = hit_transport(mx, my);
             if (actual == btn) {
-                if (btn == 0) play_prev(fa);
+                if (btn == 0) fa->pending_cmd = PCMD_PREV;
                 else if (btn == 1) do_play(fa);
                 else if (btn == 2) play_pause(fa);
-                else if (btn == 3) play_stop(fa);
-                else if (btn == 4) play_next(fa);
+                else if (btn == 3) fa->pending_cmd = PCMD_STOP;
+                else if (btn == 4) fa->pending_cmd = PCMD_NEXT;
             }
         }
         wm_invalidate(hwnd);
@@ -1278,9 +1301,9 @@ static bool main_event(hwnd_t hwnd, const window_event_t *ev) {
         }
         if (cmd == CMD_PLAY)    { do_play(fa); wm_invalidate(hwnd); return true; }
         if (cmd == CMD_PAUSE)   { play_pause(fa); wm_invalidate(hwnd); return true; }
-        if (cmd == CMD_STOP)    { play_stop(fa); wm_invalidate(hwnd); return true; }
-        if (cmd == CMD_NEXT)    { play_next(fa); wm_invalidate(hwnd); return true; }
-        if (cmd == CMD_PREV)    { play_prev(fa); wm_invalidate(hwnd); return true; }
+        if (cmd == CMD_STOP)    { fa->pending_cmd = PCMD_STOP; wm_invalidate(hwnd); return true; }
+        if (cmd == CMD_NEXT)    { fa->pending_cmd = PCMD_NEXT; wm_invalidate(hwnd); return true; }
+        if (cmd == CMD_PREV)    { fa->pending_cmd = PCMD_PREV; wm_invalidate(hwnd); return true; }
         if (cmd == CMD_SHUFFLE) { fa->shuffle = !fa->shuffle; wm_invalidate(hwnd); return true; }
         if (cmd == CMD_REPEAT)  { fa->repeat = !fa->repeat; wm_invalidate(hwnd); return true; }
         if (cmd == CMD_ABOUT) {
@@ -1305,7 +1328,7 @@ static bool main_event(hwnd_t hwnd, const window_event_t *ev) {
             if (fa->play_state == PS_PLAYING || fa->play_state == PS_PAUSED)
                 play_pause(fa);
             else if (fa->pl_count > 0)
-                play_start(fa, fa->pl_selected >= 0 ? fa->pl_selected : 0);
+                fa->pending_cmd = PCMD_PLAY;
             wm_invalidate(hwnd);
             return true;
         }
@@ -1313,13 +1336,13 @@ static bool main_event(hwnd_t hwnd, const window_event_t *ev) {
         /* Enter: play selected track */
         if (key == KEY_ENTER) {
             if (fa->pl_selected >= 0 && fa->pl_selected < fa->pl_count)
-                play_start(fa, fa->pl_selected);
+                fa->pending_cmd = PCMD_PLAY;
             wm_invalidate(hwnd);
             return true;
         }
 
         /* Z: previous track */
-        if (key == KEY_Z) { play_prev(fa); wm_invalidate(hwnd); return true; }
+        if (key == KEY_Z) { fa->pending_cmd = PCMD_PREV; wm_invalidate(hwnd); return true; }
 
         /* X: play from stop */
         if (key == KEY_X) { do_play(fa); wm_invalidate(hwnd); return true; }
@@ -1328,10 +1351,10 @@ static bool main_event(hwnd_t hwnd, const window_event_t *ev) {
         if (key == KEY_C) { play_pause(fa); wm_invalidate(hwnd); return true; }
 
         /* V: stop */
-        if (key == KEY_V) { play_stop(fa); wm_invalidate(hwnd); return true; }
+        if (key == KEY_V) { fa->pending_cmd = PCMD_STOP; wm_invalidate(hwnd); return true; }
 
         /* B: next track */
-        if (key == KEY_B) { play_next(fa); wm_invalidate(hwnd); return true; }
+        if (key == KEY_B) { fa->pending_cmd = PCMD_NEXT; wm_invalidate(hwnd); return true; }
 
         /* O: open file */
         if (key == KEY_O) { do_open(fa); return true; }
@@ -1621,10 +1644,20 @@ int main(int argc, char **argv) {
                 play_start(fa, idx);
         }
 
+        /* Process deferred transport commands (must run in app task
+         * context so pcm_init/pcm_cleanup use the correct TLS). */
+        if (fa->pending_cmd) {
+            int8_t cmd = fa->pending_cmd;
+            fa->pending_cmd = PCMD_NONE;
+            if (cmd == PCMD_PLAY) {
+                int idx = fa->pl_selected >= 0 ? fa->pl_selected : 0;
+                if (fa->pl_count > 0) play_start(fa, idx);
+            } else if (cmd == PCMD_STOP) play_stop(fa);
+            else if (cmd == PCMD_NEXT) play_next(fa);
+            else if (cmd == PCMD_PREV) play_prev(fa);
+        }
+
         if (!app_closing && fa->play_state == PS_PLAYING) {
-            /* Decode one frame and write to I2S (blocks until DMA
-             * buffer is free — ~26ms per frame at 44.1 kHz).
-             * FreeRTOS can schedule other tasks during the wait. */
             if (!audio_step(fa))
                 play_next(fa);
         } else {

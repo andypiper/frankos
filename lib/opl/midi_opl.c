@@ -141,6 +141,10 @@ struct midi_opl {
     /* Music volume (0–127) */
     int music_volume;
 
+    /* Fractional µs remainder from sample→time conversion (0..MIDI_SAMPLE_RATE-1).
+     * Prevents cumulative clock drift when many small render chunks are used. */
+    uint32_t time_frac;
+
     /* OPL temp buffer for 32→16 bit conversion */
     int32_t opl_buf[2048];
 };
@@ -268,10 +272,12 @@ static inline void opl_write(midi_opl_t *ctx, unsigned int reg, uint8_t val) {
 
 static opl_voice_t *GetFreeVoice(midi_opl_t *ctx) {
     if (ctx->voice_free_num == 0) return NULL;
-    opl_voice_t *result = ctx->voice_free_list[0];
-    ctx->voice_free_num--;
-    for (int i = 0; i < ctx->voice_free_num; i++)
-        ctx->voice_free_list[i] = ctx->voice_free_list[i + 1];
+    /* LIFO: take the most recently freed voice.  This makes rapid
+     * note-off→note-on sequences (drum rolls, retriggering) reuse the
+     * same OPL voice, cutting its release tail immediately instead of
+     * cycling through all voices and leaving decaying tails that eat
+     * every voice slot and drown out the melody. */
+    opl_voice_t *result = ctx->voice_free_list[--ctx->voice_free_num];
     ctx->voice_alloced_list[ctx->voice_alloced_num++] = result;
     return result;
 }
@@ -313,9 +319,9 @@ static void LoadOperatorData(midi_opl_t *ctx, int op, genmidi_op_t *data,
 
 static void SetVoiceInstrument(midi_opl_t *ctx, opl_voice_t *voice,
                                genmidi_instr_t *instr, unsigned int instr_voice) {
-    if (voice->current_instr == instr &&
-        voice->current_instr_voice == instr_voice)
-        return;
+    /* Always reload operator data — caching caused stale OPL registers
+     * when a voice was released, reused by a different channel, then
+     * reclaimed by the original instrument. */
     voice->current_instr = instr;
     voice->current_instr_voice = instr_voice;
     genmidi_voice_t *data = &instr->voices[instr_voice];
@@ -377,11 +383,46 @@ static void UpdateVoiceFrequency(midi_opl_t *ctx, opl_voice_t *voice) {
     }
 }
 
+/* Check if a voice has decayed to silence in the OPL emulator.
+ * For FM (alg0): only the carrier matters (modulator feeds into carrier).
+ * For additive (alg1): both operators output independently — must check both. */
+static bool VoiceIsSilent(midi_opl_t *ctx, opl_voice_t *voice) {
+    OPL_SLOT *carrier = &ctx->opl->slot[voice->index * 2 + 1];
+    if (SLOT_MEMBER(carrier, eg_out) < EG_MUTE)
+        return false;
+    /* For additive synthesis, modulator also produces audible output */
+    if (ctx->opl->ch_alg[voice->index]) {
+        OPL_SLOT *modulator = &ctx->opl->slot[voice->index * 2];
+        if (SLOT_MEMBER(modulator, eg_out) < EG_MUTE)
+            return false;
+    }
+    return true;
+}
+
 static void ReplaceExistingVoice(midi_opl_t *ctx) {
-    int result = 0;
+    /* First pass: look for a voice that has already decayed to silence
+     * in the OPL emulator — free to reclaim with zero audible impact. */
     for (int i = 0; i < ctx->voice_alloced_num; i++) {
-        if (ctx->voice_alloced_list[i]->current_instr_voice != 0 ||
-            ctx->voice_alloced_list[i]->channel >= ctx->voice_alloced_list[result]->channel)
+        if (VoiceIsSilent(ctx, ctx->voice_alloced_list[i])) {
+            ReleaseVoice(ctx, i);
+            return;
+        }
+    }
+
+    /* Second pass: no silent voices — steal the least important one.
+     * Prefer second voices of double-voice instruments, then lowest
+     * priority (fastest decay = least audible loss). */
+    int result = 0;
+    for (int i = 1; i < ctx->voice_alloced_num; i++) {
+        opl_voice_t *best = ctx->voice_alloced_list[result];
+        opl_voice_t *cand = ctx->voice_alloced_list[i];
+        if (cand->current_instr_voice != 0 && best->current_instr_voice == 0) {
+            result = i;
+            continue;
+        }
+        if (cand->current_instr_voice == 0 && best->current_instr_voice != 0)
+            continue;
+        if (cand->priority < best->priority)
             result = i;
     }
     ReleaseVoice(ctx, result);
@@ -472,11 +513,23 @@ static void KeyOnEvent(midi_opl_t *ctx, midi_event_t *event) {
         instrument = channel->instrument;
     }
 
-    bool double_voice = (instrument->flags & GENMIDI_FLAG_2VOICE) != 0;
-    if (ctx->voice_free_num == 0)
+    /* Release any existing voices for this key on this channel.
+     * Prevents voice slot leaks on retriggered notes. */
+    for (int i = 0; i < ctx->voice_alloced_num; i++) {
+        if (ctx->voice_alloced_list[i]->channel == channel &&
+            ctx->voice_alloced_list[i]->key == key) {
+            ReleaseVoice(ctx, i);
+            i--;
+        }
+    }
+
+    int voices_needed = (instrument->flags & GENMIDI_FLAG_2VOICE) ? 2 : 1;
+    while (ctx->voice_free_num < voices_needed &&
+           ctx->voice_alloced_num > 0)
         ReplaceExistingVoice(ctx);
+
     VoiceKeyOn(ctx, channel, instrument, 0, note, key, volume);
-    if (double_voice)
+    if (voices_needed == 2)
         VoiceKeyOn(ctx, channel, instrument, 1, note, key, volume);
 }
 
@@ -665,6 +718,7 @@ bool midi_opl_load(midi_opl_t *ctx, const char *filepath) {
     ctx->ticks_per_beat = MIDI_GetFileTimeDivision(ctx->midi);
     ctx->us_per_beat = 500000; /* Default 120 BPM */
     ctx->current_time = 0;
+    ctx->time_frac = 0;
 
     ctx->tracks = calloc(ctx->num_tracks, sizeof(opl_track_data_t));
     ctx->track_next_time = calloc(ctx->num_tracks, sizeof(uint64_t));
@@ -740,20 +794,21 @@ int midi_opl_render(midi_opl_t *ctx, int16_t *buf, int max_frames) {
 
         OPL_calc_buffer_stereo(ctx->opl, ctx->opl_buf, to_render);
 
-        /* Extract mono sample from packed stereo (both halves identical) + amplify */
+        /* Extract mono sample from packed stereo and pass through without
+         * amplification.  The OPL sum is already >>1 and clamped to int16
+         * inside OPL_calc_buffer_stereo.  Gain is applied together with
+         * volume in decode_frame_midi to avoid intermediate clipping. */
         int16_t *out = buf + total_rendered * 2;
         for (unsigned int i = 0; i < to_render; i++) {
             int16_t sample = (int16_t)(ctx->opl_buf[i] & 0xFFFF);
-            /* Amplify by 8x for audible output */
-            int32_t s = (int32_t)sample << 3;
-            if (s > 32767) s = 32767; else if (s < -32768) s = -32768;
-            out[i * 2] = (int16_t)s;
-            out[i * 2 + 1] = (int16_t)s;
+            out[i * 2] = sample;
+            out[i * 2 + 1] = sample;
         }
 
-        /* Advance time */
-        uint64_t us_rendered = ((uint64_t)to_render * 1000000) / MIDI_SAMPLE_RATE;
-        ctx->current_time += us_rendered;
+        /* Advance time — use fractional accumulator to prevent clock drift */
+        uint64_t us_numer = (uint64_t)to_render * 1000000 + ctx->time_frac;
+        ctx->current_time += us_numer / MIDI_SAMPLE_RATE;
+        ctx->time_frac = (uint32_t)(us_numer % MIDI_SAMPLE_RATE);
         total_rendered += to_render;
 
         /* Process any events that are now due */

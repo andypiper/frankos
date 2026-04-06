@@ -1881,21 +1881,11 @@ void OPL_calc_buffer_stereo(OPL *opl, int32_t *buffer, uint32_t nsamples) {
     }
 #else
     OPL_calc_buffer_linear(opl, buffer, nsamples);
-//    if (0)
     for (unsigned i = 0; i < nsamples; i++) {
-#if DUMPO
-        uint16_t raw = _MO(buffer[i]);
-        printf("SND %d %d %08x : ", bc, i, raw);
-        for (int j = 0; j < 18; j++) {
-            printf("%04x ", (uint16_t) slot_output[j][i]);
-        }
-        printf("\n");
-#else
         int32_t sum = buffer[i] >> 1;
         if (sum > 32767) sum = 32767;
         else if (sum < -32768) sum = -32768;
         uint16_t raw = (uint16_t)(int16_t)sum;
-#endif
         buffer[i] = (raw << 16u) | raw;
     }
 #endif
