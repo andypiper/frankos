@@ -5,3 +5,4 @@ apps/compiled/
 
 .DS_Store
 Thumbs.db
+tmp/

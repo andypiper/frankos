@@ -1,9 +1,10 @@
 /*
  * FRANK OS — Video Player (standalone ELF app)
  *
- * Fullscreen 320x240x256 MPEG-1 video player using pl_mpeg.
+ * Fullscreen 320x240x256 video player.
+ * Supports MPEG-1 (.mpg) via pl_mpeg and PSX STR (.str) via psx_str.
  * Streams from SD card — no file size limit.
- * Launched by opening .mpg files from Navigator.
+ * Launched by opening video files from Navigator.
  * Space to pause, ESC to exit.
  *
  * MEMORY MODEL: same as Dendy — all mutable state heap-allocated in SRAM,
@@ -40,11 +41,16 @@ static inline void *plm_sram_malloc(size_t sz) {
 #define PL_MPEG_IMPLEMENTATION
 #include "pl_mpeg.h"
 
+#define PSX_MALLOC(sz)  plm_sram_malloc(sz)
+#define PSX_FREE(p)     free(p)
+#define PSX_STR_IMPLEMENTATION
+#include "psx_str.h"
+
 #include <string.h>
 
 #define HID_KEY_ESCAPE  0x29
 #define HID_KEY_SPACE   0x2C
-#define AUDIO_BUF_SAMPLES  1152
+#define AUDIO_BUF_SAMPLES  2048  /* max(1152 MPEG, 2016 XA), rounded up */
 
 typedef struct {
     volatile bool closing;
@@ -52,6 +58,8 @@ typedef struct {
     uint8_t  key_state[256];
     void    *app_task;
     plm_t   *plm;
+    psx_str_t *str;             /* PSX STR decoder (NULL for MPEG-1) */
+    bool     is_str;            /* true if playing .str file */
     FIL     *fil;
     int16_t *audio_buf;
     uint8_t *y_tab;
@@ -61,6 +69,7 @@ typedef struct {
     uint8_t  dither_phase;      /* toggles each frame for temporal dithering */
     uint32_t time_debt;         /* ms lost to elapsed cap, repaid gradually */
     uint8_t  saved_volume;
+    bool     audio_inited;      /* true after pcm_init called */
     int      video_w;
     int      video_h;
     int      offset_x;
@@ -354,6 +363,80 @@ static void on_audio(plm_t *mpeg, plm_samples_t *samples, void *user) {
 }
 
 /* ======================================================================
+ * PSX STR I/O callbacks
+ * ====================================================================== */
+
+static int str_read_cb(void *buf, uint32_t size, void *user) {
+    UINT br = 0;
+    f_read((FIL *)user, buf, (UINT)size, &br);
+    return (int)br;
+}
+
+static void str_seek_cb(uint32_t offset, void *user) {
+    f_lseek((FIL *)user, (FSIZE_t)offset);
+}
+
+static uint32_t str_tell_cb(void *user) {
+    return (uint32_t)f_tell((FIL *)user);
+}
+
+/* PSX STR video callback — convert psx_frame_t to plm_frame_t for reuse
+ * of existing dither renderers. The plane layouts are identical. */
+static void on_str_video(psx_str_t *str, psx_frame_t *frame, void *user) {
+    (void)str; (void)user;
+
+    G->skip_count++;
+    if (G->time_debt > 20 && G->skip_count < 3) return;
+    G->skip_count = 0;
+
+    uint8_t *fb = display_get_framebuffer();
+    if (!fb) return;
+
+    /* Wrap psx_frame_t as plm_frame_t for the existing renderers */
+    plm_frame_t pf;
+    pf.width  = frame->width;
+    pf.height = frame->height;
+    pf.y.width  = frame->y.width;
+    pf.y.height = frame->y.height;
+    pf.y.data   = frame->y.data;
+    pf.cb.width  = frame->cb.width;
+    pf.cb.height = frame->cb.height;
+    pf.cb.data   = frame->cb.data;
+    pf.cr.width  = frame->cr.width;
+    pf.cr.height = frame->cr.height;
+    pf.cr.data   = frame->cr.data;
+
+    if ((int)pf.width <= 160 && (int)pf.height <= 120)
+        render_2x(fb, &pf);
+    else {
+        int rows = (int)pf.height >> 1;
+        if (rows > 120) rows = 120;
+        render_1x_rows(fb, &pf, 0, rows);
+    }
+}
+
+/* PSX STR audio callback — XA-ADPCM samples are already int16_t PCM.
+ * Init audio on first callback since STR has no upfront header. */
+static void on_str_audio(psx_str_t *str, psx_audio_t *audio, void *user) {
+    (void)str; (void)user;
+    if (audio->count <= 0) return;
+
+    if (!G->audio_inited) {
+        pcm_init(audio->sample_rate, audio->channels);
+        G->audio_inited = true;
+    }
+
+    /* Scale down to 25% volume to match MPEG path */
+    int16_t *out = G->audio_buf;
+    int n = audio->count * audio->channels;
+    for (int i = 0; i < n; i++) {
+        int v = audio->samples[i] >> 2;
+        out[i] = (int16_t)v;
+    }
+    pcm_write(out, audio->count);
+}
+
+/* ======================================================================
  * Input
  * ====================================================================== */
 
@@ -376,8 +459,8 @@ static void process_input(void) {
 int main(int argc, char **argv) {
     if (argc < 2 || !argv[1] || !argv[1][0]) {
         dialog_show(HWND_NULL, "Video Player",
-                    "Open a .mpg video file from\n"
-                    "the Navigator to play.\n\n"
+                    "Open a .mpg or .str video\n"
+                    "file from Navigator to play.\n\n"
                     "Space = Pause, Esc = Exit",
                     DLG_ICON_INFO, DLG_BTN_OK);
         return 0;
@@ -406,6 +489,16 @@ int main(int argc, char **argv) {
     G->app_task = xTaskGetCurrentTaskHandle();
     init_tables();
 
+    /* Detect file format by extension */
+    const char *path = argv[1];
+    int plen = 0;
+    while (path[plen]) plen++;
+    G->is_str = (plen >= 4 &&
+                 (path[plen-4] == '.') &&
+                 ((path[plen-3] == 's') || (path[plen-3] == 'S')) &&
+                 ((path[plen-2] == 't') || (path[plen-2] == 'T')) &&
+                 ((path[plen-1] == 'r') || (path[plen-1] == 'R')));
+
     /* Open file */
     G->fil = (FIL *)pvPortMalloc(sizeof(FIL));
     if (!G->fil || f_open(G->fil, argv[1], FA_READ) != FR_OK) {
@@ -416,26 +509,81 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    /* Create pl_mpeg with FatFS streaming */
-    FSIZE_t file_size = f_size(G->fil);
-    plm_buffer_t *buf = plm_buffer_create_with_callbacks(
-        plm_load_cb, plm_seek_cb, plm_tell_cb,
-        (size_t)file_size, G->fil);
-    G->plm = plm_create_with_buffer(buf, TRUE);
-    if (!G->plm) {
-        dialog_show(HWND_NULL, "Video Player", "Not a valid MPEG-1 file.",
+    /* Allocate shared audio buffer (used by both paths) */
+    G->audio_buf = (int16_t *)pvPortMalloc(AUDIO_BUF_SAMPLES * 2 * sizeof(int16_t));
+    if (!G->audio_buf) {
+        dialog_show(HWND_NULL, "Video Player", "Not enough memory for audio.",
                     DLG_ICON_ERROR, DLG_BTN_OK);
         f_close(G->fil); vPortFree(G->fil); vPortFree(globals);
         return 1;
     }
 
-    G->video_w = plm_get_width(G->plm);
-    G->video_h = plm_get_height(G->plm);
-    if (G->video_w <= 0 || G->video_h <= 0) {
-        dialog_show(HWND_NULL, "Video Player", "Invalid video dimensions.",
-                    DLG_ICON_ERROR, DLG_BTN_OK);
-        plm_destroy(G->plm); vPortFree(globals);
-        return 1;
+    int samplerate = 0;
+
+    if (G->is_str) {
+        /* ---- PSX STR path ---- */
+        G->str = psx_str_create(str_read_cb, str_seek_cb, str_tell_cb, G->fil);
+        if (!G->str) {
+            dialog_show(HWND_NULL, "Video Player", "Cannot init STR decoder.",
+                        DLG_ICON_ERROR, DLG_BTN_OK);
+            f_close(G->fil); vPortFree(G->fil);
+            vPortFree(G->audio_buf); vPortFree(globals);
+            return 1;
+        }
+
+        /* Read first few sectors to discover dimensions */
+        for (int i = 0; i < 20 && psx_str_get_width(G->str) == 0; i++)
+            psx_str_decode_sector(G->str);
+
+        /* Rewind to start for actual playback */
+        f_lseek(G->fil, 0);
+
+        G->video_w = psx_str_get_width(G->str);
+        G->video_h = psx_str_get_height(G->str);
+        if (G->video_w <= 0 || G->video_h <= 0) {
+            dialog_show(HWND_NULL, "Video Player", "Invalid STR file.",
+                        DLG_ICON_ERROR, DLG_BTN_OK);
+            psx_str_destroy(G->str);
+            f_close(G->fil); vPortFree(G->fil);
+            vPortFree(G->audio_buf); vPortFree(globals);
+            return 1;
+        }
+
+        psx_str_set_video_callback(G->str, on_str_video, NULL);
+        psx_str_set_audio_callback(G->str, on_str_audio, NULL);
+
+        serial_printf("video: %dx%d STR @ %d fps\n",
+                      G->video_w, G->video_h,
+                      psx_str_get_fps(G->str));
+    } else {
+        /* ---- MPEG-1 path ---- */
+        FSIZE_t file_size = f_size(G->fil);
+        plm_buffer_t *buf = plm_buffer_create_with_callbacks(
+            plm_load_cb, plm_seek_cb, plm_tell_cb,
+            (size_t)file_size, G->fil);
+        G->plm = plm_create_with_buffer(buf, TRUE);
+        if (!G->plm) {
+            dialog_show(HWND_NULL, "Video Player", "Not a valid MPEG-1 file.",
+                        DLG_ICON_ERROR, DLG_BTN_OK);
+            f_close(G->fil); vPortFree(G->fil);
+            vPortFree(G->audio_buf); vPortFree(globals);
+            return 1;
+        }
+
+        G->video_w = plm_get_width(G->plm);
+        G->video_h = plm_get_height(G->plm);
+        if (G->video_w <= 0 || G->video_h <= 0) {
+            dialog_show(HWND_NULL, "Video Player", "Invalid video dimensions.",
+                        DLG_ICON_ERROR, DLG_BTN_OK);
+            plm_destroy(G->plm);
+            vPortFree(G->audio_buf); vPortFree(globals);
+            return 1;
+        }
+
+        samplerate = plm_get_samplerate(G->plm);
+        serial_printf("video: %dx%d @ %d fps, audio %d Hz\n",
+                      G->video_w, G->video_h,
+                      (int)plm_get_framerate(G->plm), samplerate);
     }
 
     /* Center on 320x240 display; account for 2× upscale if small */
@@ -448,36 +596,32 @@ int main(int argc, char **argv) {
     if (G->offset_x < 0) G->offset_x = 0;
     if (G->offset_y < 0) G->offset_y = 0;
 
-    serial_printf("video: %dx%d @ %d fps, audio %d Hz\n",
-                  G->video_w, G->video_h,
-                  (int)plm_get_framerate(G->plm),
-                  plm_get_samplerate(G->plm));
-
-    G->audio_buf = (int16_t *)pvPortMalloc(AUDIO_BUF_SAMPLES * 2 * sizeof(int16_t));
-    if (!G->audio_buf) {
-        dialog_show(HWND_NULL, "Video Player", "Not enough memory for audio.",
-                    DLG_ICON_ERROR, DLG_BTN_OK);
-        plm_destroy(G->plm); vPortFree(globals);
-        return 1;
-    }
-
     if (display_set_video_mode(VIDEO_MODE_320x240x256) != 0) {
         dialog_show(HWND_NULL, "Video Player", "Failed to switch video mode.",
                     DLG_ICON_ERROR, DLG_BTN_OK);
-        vPortFree(G->audio_buf); plm_destroy(G->plm); vPortFree(globals);
+        if (G->is_str) psx_str_destroy(G->str);
+        else plm_destroy(G->plm);
+        vPortFree(G->audio_buf); vPortFree(globals);
         return 1;
     }
 
     setup_palette();
     display_clear(0);
 
-    /* Audio */
-    int samplerate = plm_get_samplerate(G->plm);
-    if (samplerate > 0) {
-        pcm_init(samplerate, 2);
-        plm_set_audio_enabled(G->plm, TRUE);
-    } else {
-        plm_set_audio_enabled(G->plm, FALSE);
+    /* MPEG audio setup (STR audio inits lazily on first audio sector) */
+    if (!G->is_str) {
+        if (samplerate > 0) {
+            pcm_init(samplerate, 2);
+            plm_set_audio_enabled(G->plm, TRUE);
+            G->audio_inited = true;
+        } else {
+            plm_set_audio_enabled(G->plm, FALSE);
+        }
+        plm_set_video_decode_callback(G->plm, on_video, NULL);
+        if (samplerate > 0) {
+            plm_set_audio_decode_callback(G->plm, on_audio, NULL);
+            plm_set_audio_lead_time(G->plm, 0.2f);
+        }
     }
 
     {
@@ -485,50 +629,91 @@ int main(int argc, char **argv) {
         G->saved_volume = ((get_vol_t)_sys_table_ptrs[535])();
     }
 
-    /* Callbacks */
-    plm_set_video_decode_callback(G->plm, on_video, NULL);
-    if (samplerate > 0) {
-        plm_set_audio_decode_callback(G->plm, on_audio, NULL);
-        plm_set_audio_lead_time(G->plm, 0.2f);
-    }
-
-    /* Main loop — plm_decode handles A/V sync, on_video skips every 3rd */
+    /* ---- Main loop ---- */
     uint32_t last_tick = xTaskGetTickCount();
-    while (!G->closing) {
-        process_input();
-        if (G->closing) break;
 
-        if (G->paused) {
-            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(50));
-            last_tick = xTaskGetTickCount();
-            continue;
+    if (G->is_str) {
+        /* STR: sector-driven playback at ~150 sectors/sec (15fps × ~10 sectors/frame).
+         * We pace by time: each sector ≈ 6.67ms. Feed sectors to match elapsed time. */
+        uint32_t sectors_decoded = 0;
+        while (!G->closing) {
+            process_input();
+            if (G->closing) break;
+
+            if (G->paused) {
+                ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(50));
+                last_tick = xTaskGetTickCount();
+                continue;
+            }
+
+            uint32_t now = xTaskGetTickCount();
+            uint32_t elapsed_ms = now - last_tick;
+
+            /* How many sectors should have been decoded by now?
+             * 150 sectors/sec = 3 sectors per 20ms */
+            uint32_t target = (elapsed_ms * 150) / 1000;
+
+            /* Decode up to 10 sectors per iteration to stay responsive */
+            int batch = 0;
+            while (sectors_decoded < target && batch < 10) {
+                if (!psx_str_decode_sector(G->str)) {
+                    G->closing = true;
+                    break;
+                }
+                sectors_decoded++;
+                batch++;
+            }
+
+            /* If we're way behind, skip ahead */
+            if (sectors_decoded + 30 < target) {
+                sectors_decoded = target;
+                G->time_debt += 20;
+            }
+
+            /* Yield a tick if caught up to avoid busy-spinning */
+            if (sectors_decoded >= target)
+                ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1));
         }
+    } else {
+        /* MPEG-1: time-driven plm_decode */
+        while (!G->closing) {
+            process_input();
+            if (G->closing) break;
 
-        uint32_t now = xTaskGetTickCount();
-        uint32_t elapsed_ms = now - last_tick;
-        last_tick = now;
+            if (G->paused) {
+                ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(50));
+                last_tick = xTaskGetTickCount();
+                continue;
+            }
 
-        /* Cap per-call to keep ESC responsive, but accumulate
-         * lost time as debt and repay 20ms/frame to stay in sync */
-        uint32_t debt = G->time_debt;
-        uint32_t repay = (debt > 20) ? 20 : debt;
-        uint32_t feed = elapsed_ms + repay;
-        if (feed > 150) {
-            G->time_debt = debt - repay + (feed - 150);
-            feed = 150;
-        } else {
-            G->time_debt = debt - repay;
+            uint32_t now = xTaskGetTickCount();
+            uint32_t elapsed_ms = now - last_tick;
+            last_tick = now;
+
+            uint32_t debt = G->time_debt;
+            uint32_t repay = (debt > 20) ? 20 : debt;
+            uint32_t feed = elapsed_ms + repay;
+            if (feed > 150) {
+                G->time_debt = debt - repay + (feed - 150);
+                feed = 150;
+            } else {
+                G->time_debt = debt - repay;
+            }
+
+            plm_decode(G->plm, (float)feed * 0.001f);
+
+            if (plm_has_ended(G->plm)) break;
         }
-
-        plm_decode(G->plm, (float)feed * 0.001f);
-
-        if (plm_has_ended(G->plm)) break;
     }
 
     /* Cleanup */
-    if (samplerate > 0) pcm_cleanup();
+    if (G->audio_inited) pcm_cleanup();
 
-    plm_destroy(G->plm);
+    if (G->is_str)
+        psx_str_destroy(G->str);
+    else
+        plm_destroy(G->plm);
+
     f_close(G->fil);
     vPortFree(G->fil);
 
