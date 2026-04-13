@@ -739,6 +739,8 @@ unsigned long __in_systable() __aligned(4096) sys_table_ptrs[] = {
     netcard_wifi_quit,            // 546
     netcard_wifi_scan,            // 547
     netcard_set_wifi_callback,    // 548
+    netcard_resolve,              // 549
+    netcard_ping,                 // 550
     // TODO:
     0
 };

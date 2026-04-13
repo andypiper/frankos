@@ -149,6 +149,15 @@ void taskbar_tick(void) {
     uint32_t now_min = (xTaskGetTickCount() / configTICK_RATE_HZ) / 60;
     if (now_min != last_clock_minute)
         taskbar_invalidate();
+
+    /* Force one more repaint after network activity expires so the
+     * tray icon transitions from active back to idle. */
+    static bool prev_net_active = false;
+    bool net_active = netcard_wifi_connected() &&
+                      netcard_get_icon_state() != NET_ICON_NOACT;
+    if (prev_net_active && !net_active)
+        taskbar_invalidate();
+    prev_net_active = net_active;
 }
 
 void taskbar_draw(void) {

@@ -42,6 +42,12 @@ const char *netcard_wifi_ip(void);
 /* WiFi scan — calls cb for each network found, returns count or -1 on error */
 int  netcard_wifi_scan(nc_scan_cb_t cb);
 
+/* DNS resolve — returns true on success, writes IP to ip_out */
+bool netcard_resolve(const char *hostname, char *ip_out, int ip_out_size);
+
+/* TCP ping — returns connect latency in ms, or -1 on failure */
+int  netcard_ping(const char *host, uint16_t port);
+
 /* Sockets (ids 0-3) */
 bool netcard_socket_open(uint8_t id, bool tls, const char *host, uint16_t port);
 bool netcard_socket_send(uint8_t id, const uint8_t *data, uint16_t len);

@@ -112,6 +112,12 @@ static char          wifi_ip_str[16];
 /* Hardware availability */
 static volatile bool netcard_available_flag;
 
+/* DNS resolve result (filled by +RESOLVE: response) */
+static char resolve_result[16];
+
+/* Ping result (filled by +PING: response) */
+static volatile int ping_last_ms;
+
 /* Async callbacks */
 static nc_data_cb_t  cb_data;
 static nc_close_cb_t cb_close;
@@ -149,10 +155,15 @@ static unsigned int parse_uint(const char *s, const char **endp) {
 /* Low-level serial helpers                                                   */
 /* -------------------------------------------------------------------------- */
 
+/* Declared in taskbar.c — trigger tray icon repaint on network activity */
+extern void taskbar_invalidate(void);
+
 static void nc_send_cmd(const char *cmd) {
     serial_send_string(cmd);
     serial_send_string("\r\n");
     last_tx_tick = xTaskGetTickCount();
+    if (wifi_connected)
+        taskbar_invalidate();
 }
 
 /* -------------------------------------------------------------------------- */
@@ -255,6 +266,26 @@ static void nc_process_line(const char *line, uint16_t len) {
         return;
     }
 
+    /* +PING:seq,time_ms — individual ping result */
+    if (strncmp(line, "+PING:", 6) == 0) {
+        const char *p = line + 6;
+        parse_uint(p, &p);  /* skip seq */
+        if (*p == ',') p++;
+        ping_last_ms = atoi(p);
+        return;
+    }
+
+    /* +PINGSTAT:sent,received,avg_ms — ping summary (ignored, use per-ping) */
+    if (strncmp(line, "+PINGSTAT:", 10) == 0)
+        return;
+
+    /* +RESOLVE:ip — DNS resolution result */
+    if (strncmp(line, "+RESOLVE:", 9) == 0) {
+        strncpy(resolve_result, line + 9, sizeof(resolve_result) - 1);
+        resolve_result[sizeof(resolve_result) - 1] = '\0';
+        return;
+    }
+
     /* +WSCAN:ssid,rssi,enc,ch — scan result line */
     if (strncmp(line, "+WSCAN:", 7) == 0 && cb_scan) {
         char ssid[64];
@@ -326,6 +357,8 @@ static void netcard_poll(void) {
             data_remaining--;
             if (data_remaining == 0) {
                 last_rx_tick = xTaskGetTickCount();
+                if (wifi_connected)
+                    taskbar_invalidate();
                 if (cb_data)
                     cb_data(data_socket_id, srecv_buf, data_pos);
                 state = NCS_READLINE;
@@ -393,6 +426,39 @@ bool netcard_wifi_connected(void) {
 
 const char *netcard_wifi_ip(void) {
     return wifi_ip_str;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Public API — DNS Resolve                                                   */
+/* -------------------------------------------------------------------------- */
+
+bool netcard_resolve(const char *hostname, char *ip_out, int ip_out_size) {
+    char cmd[96];
+    snprintf(cmd, sizeof(cmd), "AT+RESOLVE=%s", hostname);
+    resolve_result[0] = '\0';
+    bool ok = nc_send_and_wait(cmd, NC_TIMEOUT_DEFAULT);
+    if (ok && resolve_result[0]) {
+        strncpy(ip_out, resolve_result, ip_out_size - 1);
+        ip_out[ip_out_size - 1] = '\0';
+        return true;
+    }
+    if (ip_out_size > 0) ip_out[0] = '\0';
+    return false;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Public API — ICMP Ping via AT+PING                                         */
+/* -------------------------------------------------------------------------- */
+
+int netcard_ping(const char *host, uint16_t port) {
+    (void)port;
+    char cmd[96];
+    snprintf(cmd, sizeof(cmd), "AT+PING=%s,1", host);
+    ping_last_ms = -1;
+    bool ok = nc_send_and_wait(cmd, NC_TIMEOUT_LONG);
+    if (ok)
+        return ping_last_ms;
+    return -1;
 }
 
 /* -------------------------------------------------------------------------- */
