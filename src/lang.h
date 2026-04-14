@@ -135,6 +135,43 @@ enum {
     /* Dialog buttons */
     STR_DLG_OK, STR_DLG_CANCEL, STR_DLG_YES, STR_DLG_NO,
 
+    /* Shared app menu items (used by external apps via L()) */
+    STR_APP_NEW, STR_APP_OPEN, STR_APP_SAVE, STR_APP_SAVE_AS,
+    STR_APP_UNDO, STR_APP_CUT, STR_APP_COPY, STR_APP_PASTE,
+    STR_APP_SELECT_ALL,
+
+    /* Notepad-specific */
+    STR_NP_NEW_MENU, STR_NP_OPEN_MENU, STR_NP_SAVE_MENU,
+    STR_NP_ABOUT,
+
+    /* Paintbrush-specific */
+    STR_PB_TOOLS, STR_PB_IMAGE, STR_PB_ABOUT,
+    STR_PB_SAVE_CHANGES,
+
+    /* Minesweeper */
+    STR_MS_GAME, STR_MS_NEW, STR_MS_BEGINNER, STR_MS_INTERMEDIATE,
+    STR_MS_EXPERT, STR_MS_ABOUT,
+
+    /* Solitaire */
+    STR_SOL_NEW_GAME, STR_SOL_DRAW_ONE, STR_SOL_DRAW_THREE,
+    STR_SOL_CONGRATS, STR_SOL_CONGRATS_MSG, STR_SOL_ABOUT,
+
+    /* Calculator */
+    STR_CALC_ABOUT,
+
+    /* FrankAmp */
+    STR_FA_MUSIC, STR_FA_PLAY, STR_FA_PAUSE, STR_FA_STOP,
+    STR_FA_NEXT_TRACK, STR_FA_PREV_TRACK, STR_FA_OPEN_AUDIO,
+    STR_FA_ABOUT,
+
+    /* Manul browser */
+    STR_MN_NAVIGATE, STR_MN_BACK, STR_MN_FORWARD, STR_MN_STOP,
+    STR_MN_RELOAD, STR_MN_NEXT_LINK, STR_MN_PREV_LINK,
+    STR_MN_ABOUT,
+
+    /* NetTools */
+    STR_NT_PING, STR_NT_DNS, STR_NT_HOST,
+
     STR_COUNT
 };
 

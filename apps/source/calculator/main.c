@@ -8,6 +8,7 @@
 
 #include "m-os-api.h"
 #include "frankos-app.h"
+#include "lang.h"
 
 #define dbg_printf(...) ((int(*)(const char*, ...))_sys_table_ptrs[438])(__VA_ARGS__)
 
@@ -376,25 +377,25 @@ static void setup_menu(hwnd_t hwnd) {
     bar.menu_count = 3;
 
     menu_def_t *file = &bar.menus[0];
-    strncpy(file->title, "File", sizeof(file->title) - 1);
+    strncpy(file->title, L(STR_FILE), sizeof(file->title) - 1);
     file->accel_key = 0x09;
     file->item_count = 1;
-    strncpy(file->items[0].text, "Exit", sizeof(file->items[0].text) - 1);
+    strncpy(file->items[0].text, L(STR_FM_EXIT), sizeof(file->items[0].text) - 1);
     file->items[0].command_id = CMD_EXIT;
 
     menu_def_t *edit = &bar.menus[1];
-    strncpy(edit->title, "Edit", sizeof(edit->title) - 1);
+    strncpy(edit->title, L(STR_EDIT), sizeof(edit->title) - 1);
     edit->accel_key = 0x08;
     edit->item_count = 1;
-    strncpy(edit->items[0].text, "Copy  Ctrl+C", sizeof(edit->items[0].text) - 1);
+    strncpy(edit->items[0].text, L(STR_FM_COPY_MENU), sizeof(edit->items[0].text) - 1);
     edit->items[0].command_id = CMD_COPY;
     edit->items[0].accel_key = 0x06;
 
     menu_def_t *help = &bar.menus[2];
-    strncpy(help->title, "Help", sizeof(help->title) - 1);
+    strncpy(help->title, L(STR_HELP), sizeof(help->title) - 1);
     help->accel_key = 0x0B;
     help->item_count = 1;
-    strncpy(help->items[0].text, "About      F1", sizeof(help->items[0].text) - 1);
+    strncpy(help->items[0].text, L(STR_FM_ABOUT_MENU), sizeof(help->items[0].text) - 1);
     help->items[0].command_id = CMD_ABOUT;
     help->items[0].accel_key = 0x3A;
 
@@ -494,7 +495,8 @@ static hwnd_t calc_create(void) {
     /* Copy const data to RAM (paint/event handlers in .text may not
      * see .rodata correctly due to ELF loader relocation issues) */
     memcpy(c->labels, labels_src, sizeof(c->labels));
-    snprintf(c->about_title, sizeof(c->about_title), "About Calculator");
+    strncpy(c->about_title, L(STR_CALC_ABOUT), sizeof(c->about_title) - 1);
+    c->about_title[sizeof(c->about_title) - 1] = '\0';
     snprintf(c->about_text, sizeof(c->about_text),
              "Calculator\n\nFRANK OS v" FRANK_VERSION_STR
              "\n(c) 2026 Mikhail Matveev\n"

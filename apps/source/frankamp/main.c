@@ -9,6 +9,7 @@
 
 #include "m-os-api.h"
 #include "frankos-app.h"
+#include "lang.h"
 
 /* UART debug printf */
 #define dbg_printf(...) ((int(*)(const char*, ...))_sys_table_ptrs[438])(__VA_ARGS__)
@@ -1110,7 +1111,7 @@ static void do_play(frankamp_t *fa) {
 }
 
 static void do_open(frankamp_t *fa) {
-    file_dialog_open(fa->hwnd, "Open Audio", "/", ".mp3;.mod;.mid;.midi");
+    file_dialog_open(fa->hwnd, L(STR_FA_OPEN_AUDIO), "/", ".mp3;.mod;.mid;.midi");
 }
 
 /*==========================================================================
@@ -1307,7 +1308,7 @@ static bool main_event(hwnd_t hwnd, const window_event_t *ev) {
         if (cmd == CMD_SHUFFLE) { fa->shuffle = !fa->shuffle; wm_invalidate(hwnd); return true; }
         if (cmd == CMD_REPEAT)  { fa->repeat = !fa->repeat; wm_invalidate(hwnd); return true; }
         if (cmd == CMD_ABOUT) {
-            dialog_show(hwnd, "About FrankAmp",
+            dialog_show(hwnd, L(STR_FA_ABOUT),
                         "FrankAmp\n\nFRANK OS v" FRANK_VERSION_STR
                         "\n(c) 2026 Mikhail Matveev\n"
                         "<xtreme@rh1.tech>\n"
@@ -1476,40 +1477,40 @@ static void setup_menu(hwnd_t hwnd) {
 
     /* File menu */
     menu_def_t *file = &bar.menus[0];
-    strncpy(file->title, "File", sizeof(file->title) - 1);
+    strncpy(file->title, L(STR_FILE), sizeof(file->title) - 1);
     file->accel_key = 0x09; /* HID 'F' */
     file->item_count = 3;
 
-    strncpy(file->items[0].text, "Open   Ctrl+O", sizeof(file->items[0].text) - 1);
+    strncpy(file->items[0].text, L(STR_NP_OPEN_MENU), sizeof(file->items[0].text) - 1);
     file->items[0].command_id = CMD_OPEN;
     file->items[0].accel_key = 0x12;
 
     file->items[1].flags = MIF_SEPARATOR;
 
-    strncpy(file->items[2].text, "Exit", sizeof(file->items[2].text) - 1);
+    strncpy(file->items[2].text, L(STR_FM_EXIT), sizeof(file->items[2].text) - 1);
     file->items[2].command_id = CMD_EXIT;
 
     /* Music menu */
     menu_def_t *music = &bar.menus[1];
-    strncpy(music->title, "Music", sizeof(music->title) - 1);
+    strncpy(music->title, L(STR_FA_MUSIC), sizeof(music->title) - 1);
     music->accel_key = 0x10; /* HID 'M' */
     music->item_count = 8;
 
-    strncpy(music->items[0].text, "Play", sizeof(music->items[0].text) - 1);
+    strncpy(music->items[0].text, L(STR_FA_PLAY), sizeof(music->items[0].text) - 1);
     music->items[0].command_id = CMD_PLAY;
 
-    strncpy(music->items[1].text, "Pause", sizeof(music->items[1].text) - 1);
+    strncpy(music->items[1].text, L(STR_FA_PAUSE), sizeof(music->items[1].text) - 1);
     music->items[1].command_id = CMD_PAUSE;
 
-    strncpy(music->items[2].text, "Stop", sizeof(music->items[2].text) - 1);
+    strncpy(music->items[2].text, L(STR_FA_STOP), sizeof(music->items[2].text) - 1);
     music->items[2].command_id = CMD_STOP;
 
     music->items[3].flags = MIF_SEPARATOR;
 
-    strncpy(music->items[4].text, "Next Track", sizeof(music->items[4].text) - 1);
+    strncpy(music->items[4].text, L(STR_FA_NEXT_TRACK), sizeof(music->items[4].text) - 1);
     music->items[4].command_id = CMD_NEXT;
 
-    strncpy(music->items[5].text, "Previous Track", sizeof(music->items[5].text) - 1);
+    strncpy(music->items[5].text, L(STR_FA_PREV_TRACK), sizeof(music->items[5].text) - 1);
     music->items[5].command_id = CMD_PREV;
 
     strncpy(music->items[6].text, "Shuffle", sizeof(music->items[6].text) - 1);
@@ -1520,10 +1521,10 @@ static void setup_menu(hwnd_t hwnd) {
 
     /* Help menu */
     menu_def_t *help = &bar.menus[2];
-    strncpy(help->title, "Help", sizeof(help->title) - 1);
+    strncpy(help->title, L(STR_HELP), sizeof(help->title) - 1);
     help->accel_key = 0x0B; /* HID 'H' */
     help->item_count = 1;
-    strncpy(help->items[0].text, "About      F1", sizeof(help->items[0].text) - 1);
+    strncpy(help->items[0].text, L(STR_FM_ABOUT_MENU), sizeof(help->items[0].text) - 1);
     help->items[0].command_id = CMD_ABOUT;
     help->items[0].accel_key = 0x3A;
 

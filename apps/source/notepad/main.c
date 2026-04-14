@@ -11,6 +11,7 @@
 
 #include "m-os-api.h"
 #include "frankos-app.h"
+#include "lang.h"
 
 /* UART debug printf */
 #define dbg_printf(...) ((int(*)(const char*, ...))_sys_table_ptrs[438])(__VA_ARGS__)
@@ -117,39 +118,39 @@ static void np_setup_menu(hwnd_t hwnd) {
 
     /* File menu */
     menu_def_t *file = &bar.menus[0];
-    strncpy(file->title, "File", sizeof(file->title) - 1);
+    strncpy(file->title, L(STR_FILE), sizeof(file->title) - 1);
     file->accel_key = 0x09; /* HID 'F' */
     file->item_count = 6;
-    strncpy(file->items[0].text, "New    Ctrl+N", sizeof(file->items[0].text) - 1);
+    strncpy(file->items[0].text, L(STR_NP_NEW_MENU), sizeof(file->items[0].text) - 1);
     file->items[0].command_id = CMD_NEW;
     file->items[0].accel_key = 0x11;
-    strncpy(file->items[1].text, "Open.. Ctrl+O", sizeof(file->items[1].text) - 1);
+    strncpy(file->items[1].text, L(STR_NP_OPEN_MENU), sizeof(file->items[1].text) - 1);
     file->items[1].command_id = CMD_OPEN;
     file->items[1].accel_key = 0x12;
-    strncpy(file->items[2].text, "Save   Ctrl+S", sizeof(file->items[2].text) - 1);
+    strncpy(file->items[2].text, L(STR_NP_SAVE_MENU), sizeof(file->items[2].text) - 1);
     file->items[2].command_id = CMD_SAVE;
     file->items[2].accel_key = 0x16;
-    strncpy(file->items[3].text, "Save As...", sizeof(file->items[3].text) - 1);
+    strncpy(file->items[3].text, L(STR_APP_SAVE_AS), sizeof(file->items[3].text) - 1);
     file->items[3].command_id = CMD_SAVE_AS;
     file->items[4].flags = MIF_SEPARATOR;
-    strncpy(file->items[5].text, "Exit",       sizeof(file->items[5].text) - 1);
+    strncpy(file->items[5].text, L(STR_FM_EXIT), sizeof(file->items[5].text) - 1);
     file->items[5].command_id = CMD_EXIT;
 
     /* Edit menu */
     menu_def_t *edit = &bar.menus[1];
-    strncpy(edit->title, "Edit", sizeof(edit->title) - 1);
+    strncpy(edit->title, L(STR_EDIT), sizeof(edit->title) - 1);
     edit->accel_key = 0x08; /* HID 'E' */
     edit->item_count = 7;
-    strncpy(edit->items[0].text, "Cut    Ctrl+X", sizeof(edit->items[0].text) - 1);
+    strncpy(edit->items[0].text, L(STR_FM_CUT_MENU), sizeof(edit->items[0].text) - 1);
     edit->items[0].command_id = CMD_CUT;
     edit->items[0].accel_key = 0x1B;
-    strncpy(edit->items[1].text, "Copy   Ctrl+C", sizeof(edit->items[1].text) - 1);
+    strncpy(edit->items[1].text, L(STR_FM_COPY_MENU), sizeof(edit->items[1].text) - 1);
     edit->items[1].command_id = CMD_COPY;
     edit->items[1].accel_key = 0x06;
-    strncpy(edit->items[2].text, "Paste  Ctrl+V", sizeof(edit->items[2].text) - 1);
+    strncpy(edit->items[2].text, L(STR_FM_PASTE_MENU), sizeof(edit->items[2].text) - 1);
     edit->items[2].command_id = CMD_PASTE;
     edit->items[2].accel_key = 0x19;
-    strncpy(edit->items[3].text, "SelAll Ctrl+A", sizeof(edit->items[3].text) - 1);
+    strncpy(edit->items[3].text, L(STR_FM_SELALL_MENU), sizeof(edit->items[3].text) - 1);
     edit->items[3].command_id = CMD_SELECT_ALL;
     edit->items[3].accel_key = 0x04;
     edit->items[4].flags = MIF_SEPARATOR;
@@ -206,10 +207,10 @@ static void np_setup_menu(hwnd_t hwnd) {
 
     /* Help menu */
     menu_def_t *help = &bar.menus[next_menu];
-    strncpy(help->title, "Help", sizeof(help->title) - 1);
+    strncpy(help->title, L(STR_HELP), sizeof(help->title) - 1);
     help->accel_key = 0x0B; /* HID 'H' */
     help->item_count = 1;
-    strncpy(help->items[0].text, "About       F1", sizeof(help->items[0].text) - 1);
+    strncpy(help->items[0].text, L(STR_FM_ABOUT_MENU), sizeof(help->items[0].text) - 1);
     help->items[0].command_id = CMD_ABOUT;
     help->items[0].accel_key = 0x3A;
 
@@ -406,7 +407,7 @@ static void np_do_new(void) {
 static void np_do_open(void) {
     char dir[NP_PATH_MAX];
     np_get_dir(dir, NP_PATH_MAX);
-    file_dialog_open(np.hwnd, "Open", dir, NULL);
+    file_dialog_open(np.hwnd, L(STR_APP_OPEN), dir, NULL);
 }
 
 static void np_do_save(void) {
@@ -421,7 +422,7 @@ static void np_do_save_as(void) {
     char dir[NP_PATH_MAX];
     np_get_dir(dir, NP_PATH_MAX);
     const char *fname = np_get_filename();
-    file_dialog_save(np.hwnd, "Save As", dir, NULL,
+    file_dialog_save(np.hwnd, L(STR_APP_SAVE_AS), dir, NULL,
                      fname ? fname : "untitled.txt");
 }
 
@@ -1183,6 +1184,7 @@ static bool np_event(hwnd_t hwnd, const window_event_t *event) {
         /* Restart cursor blink and repaint when focus returns */
         np.ta.cursor_visible = true;
         if (np.blink_timer) xTimerStart(np.blink_timer, 0);
+        np_setup_menu(np.hwnd);  /* rebuild menu for live language switching */
         wm_invalidate(np.hwnd);
         return true;
     }
@@ -1261,7 +1263,7 @@ static bool np_event(hwnd_t hwnd, const window_event_t *event) {
             return true;
         }
         else if (cmd == CMD_ABOUT) {
-            dialog_show(np.hwnd, "About Notepad",
+            dialog_show(np.hwnd, L(STR_NP_ABOUT),
                         "Notepad\n\nFRANK OS v" FRANK_VERSION_STR
                         "\n(c) 2026 Mikhail Matveev\n"
                         "<xtreme@rh1.tech>\n"

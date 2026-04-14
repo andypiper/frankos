@@ -8,6 +8,7 @@
 
 #include "m-os-api.h"
 #include "frankos-app.h"
+#include "lang.h"
 
 /* UART debug printf — sys_table[438] is the OS's printf (UART-backed).
  * The app's own printf goes to a pico SDK no-op (UART stdio disabled). */
@@ -846,7 +847,7 @@ static bool ms_event(hwnd_t hwnd, const window_event_t *ev) {
             return true;
         }
         if (ev->command.id == CMD_ABOUT) {
-            dialog_show(hwnd, "About Minesweeper",
+            dialog_show(hwnd, L(STR_MS_ABOUT),
                         "Minesweeper\n\nFRANK OS v" FRANK_VERSION_STR
                         "\n(c) 2026 Mikhail Matveev\n"
                         "<xtreme@rh1.tech>\n"
@@ -901,37 +902,37 @@ static void setup_menu(hwnd_t hwnd) {
 
     /* Game menu */
     menu_def_t *game = &bar.menus[0];
-    strncpy(game->title, "Game", sizeof(game->title) - 1);
+    strncpy(game->title, L(STR_MS_GAME), sizeof(game->title) - 1);
     game->accel_key = 0x0A; /* HID 'G' */
     game->item_count = 7;
 
-    strncpy(game->items[0].text, "New        F2", sizeof(game->items[0].text) - 1);
+    strncpy(game->items[0].text, L(STR_MS_NEW), sizeof(game->items[0].text) - 1);
     game->items[0].command_id = CMD_NEW;
     game->items[0].accel_key = 0x3B; /* F2 */
 
     game->items[1].flags = MIF_SEPARATOR;
 
-    strncpy(game->items[2].text, "Beginner", sizeof(game->items[2].text) - 1);
+    strncpy(game->items[2].text, L(STR_MS_BEGINNER), sizeof(game->items[2].text) - 1);
     game->items[2].command_id = CMD_BEGINNER;
 
-    strncpy(game->items[3].text, "Intermediate", sizeof(game->items[3].text) - 1);
+    strncpy(game->items[3].text, L(STR_MS_INTERMEDIATE), sizeof(game->items[3].text) - 1);
     game->items[3].command_id = CMD_INTERMEDIATE;
 
-    strncpy(game->items[4].text, "Expert", sizeof(game->items[4].text) - 1);
+    strncpy(game->items[4].text, L(STR_MS_EXPERT), sizeof(game->items[4].text) - 1);
     game->items[4].command_id = CMD_EXPERT;
 
     game->items[5].flags = MIF_SEPARATOR;
 
-    strncpy(game->items[6].text, "Exit", sizeof(game->items[6].text) - 1);
+    strncpy(game->items[6].text, L(STR_FM_EXIT), sizeof(game->items[6].text) - 1);
     game->items[6].command_id = CMD_EXIT;
 
     /* Help menu */
     menu_def_t *help = &bar.menus[1];
-    strncpy(help->title, "Help", sizeof(help->title) - 1);
+    strncpy(help->title, L(STR_HELP), sizeof(help->title) - 1);
     help->accel_key = 0x0B; /* HID 'H' */
     help->item_count = 1;
 
-    strncpy(help->items[0].text, "About      F1", sizeof(help->items[0].text) - 1);
+    strncpy(help->items[0].text, L(STR_FM_ABOUT_MENU), sizeof(help->items[0].text) - 1);
     help->items[0].command_id = CMD_ABOUT;
     help->items[0].accel_key = 0x3A;
 

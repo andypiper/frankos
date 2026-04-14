@@ -11,6 +11,7 @@
 
 #include "m-os-api.h"
 #include "frankos-app.h"
+#include "lang.h"
 #include <string.h>
 
 /* ========================================================================
@@ -133,17 +134,14 @@ static void app_paint(hwnd_t hwnd) {
     wd_clear(THEME_BUTTON_FACE);
 
     /* Tabs */
-    draw_tab(4, TAB_TOP, TAB_W, TAB_H, "Ping", app.tab == TAB_PING);
-    draw_tab(4 + TAB_W + 2, TAB_TOP, TAB_W, TAB_H, "DNS", app.tab == TAB_DNS);
+    draw_tab(4, TAB_TOP, TAB_W, TAB_H, L(STR_NT_PING), app.tab == TAB_PING);
+    draw_tab(4 + TAB_W + 2, TAB_TOP, TAB_W, TAB_H, L(STR_NT_DNS), app.tab == TAB_DNS);
 
     /* Tab content border */
     wd_hline(0, TAB_TOP + TAB_H, CLIENT_W, COLOR_WHITE);
 
     /* Label */
-    if (app.tab == TAB_PING)
-        wd_text_ui(INPUT_X, LABEL_Y, "Host:", COLOR_BLACK, THEME_BUTTON_FACE);
-    else
-        wd_text_ui(INPUT_X, LABEL_Y, "Domain:", COLOR_BLACK, THEME_BUTTON_FACE);
+    wd_text_ui(INPUT_X, LABEL_Y, L(STR_NT_HOST), COLOR_BLACK, THEME_BUTTON_FACE);
 
     /* Input field — sunken border + textarea */
     wd_bevel_rect(INPUT_X - 2, INPUT_Y - 2, INPUT_W + 4, INPUT_H + 4,
@@ -152,7 +150,7 @@ static void app_paint(hwnd_t hwnd) {
 
     /* Button */
     {
-        const char *btn_label = app.tab == TAB_PING ? "Ping" : "Resolve";
+        const char *btn_label = app.tab == TAB_PING ? L(STR_NT_PING) : L(STR_NT_DNS);
         bool enabled = !app.busy && textarea_get_length(&app.input_ta) > 0;
         bool pressed = app.btn_pressed == 0;
         wd_button(INPUT_X, BTN_Y, BTN_W, BTN_H, btn_label, false, pressed);

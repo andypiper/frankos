@@ -8,6 +8,7 @@
 
 #include "m-os-api.h"
 #include "frankos-app.h"
+#include "lang.h"
 
 /* UART debug printf */
 #define dbg_printf(...) ((int(*)(const char*, ...))_sys_table_ptrs[438])(__VA_ARGS__)
@@ -560,8 +561,8 @@ static void check_win(sol_state_t *st) {
         if (st->timer)
             xTimerStop(st->timer, 0);
         wm_invalidate(st->hwnd);
-        dialog_show(st->hwnd, "Congratulations!",
-                    "You won!\n\nStart a new game?",
+        dialog_show(st->hwnd, L(STR_SOL_CONGRATS),
+                    L(STR_SOL_CONGRATS_MSG),
                     DLG_ICON_INFO, DLG_BTN_OK);
     }
 }
@@ -1465,7 +1466,7 @@ static bool sol_event(hwnd_t hwnd, const window_event_t *ev) {
             return true;
         }
         if (ev->command.id == CMD_ABOUT) {
-            dialog_show(hwnd, "About Solitaire",
+            dialog_show(hwnd, L(STR_SOL_ABOUT),
                         "Solitaire\n\nFRANK OS v" FRANK_VERSION_STR
                         "\n(c) 2026 Mikhail Matveev\n"
                         "<xtreme@rh1.tech>\n"
@@ -1517,46 +1518,36 @@ static void setup_menu(hwnd_t hwnd, sol_state_t *st) {
 
     /* Game menu */
     menu_def_t *game = &bar.menus[0];
-    strncpy(game->title, "Game", sizeof(game->title) - 1);
+    strncpy(game->title, L(STR_MS_GAME), sizeof(game->title) - 1);
     game->accel_key = 0x0A; /* HID 'G' */
     game->item_count = 6;
 
-    strncpy(game->items[0].text, "New Game   F2", sizeof(game->items[0].text) - 1);
+    strncpy(game->items[0].text, L(STR_SOL_NEW_GAME), sizeof(game->items[0].text) - 1);
     game->items[0].command_id = CMD_NEW;
     game->items[0].accel_key = 0x3B; /* F2 */
 
     game->items[1].flags = MIF_SEPARATOR;
 
-    if (st->draw_mode == 1) {
-        strncpy(game->items[2].text, "* Draw One",
-                sizeof(game->items[2].text) - 1);
-    } else {
-        strncpy(game->items[2].text, "  Draw One",
-                sizeof(game->items[2].text) - 1);
-    }
+    snprintf(game->items[2].text, sizeof(game->items[2].text),
+             "%s %s", st->draw_mode == 1 ? "*" : " ", L(STR_SOL_DRAW_ONE));
     game->items[2].command_id = CMD_DRAW_ONE;
 
-    if (st->draw_mode == 3) {
-        strncpy(game->items[3].text, "* Draw Three",
-                sizeof(game->items[3].text) - 1);
-    } else {
-        strncpy(game->items[3].text, "  Draw Three",
-                sizeof(game->items[3].text) - 1);
-    }
+    snprintf(game->items[3].text, sizeof(game->items[3].text),
+             "%s %s", st->draw_mode == 3 ? "*" : " ", L(STR_SOL_DRAW_THREE));
     game->items[3].command_id = CMD_DRAW_THREE;
 
     game->items[4].flags = MIF_SEPARATOR;
 
-    strncpy(game->items[5].text, "Exit", sizeof(game->items[5].text) - 1);
+    strncpy(game->items[5].text, L(STR_FM_EXIT), sizeof(game->items[5].text) - 1);
     game->items[5].command_id = CMD_EXIT;
 
     /* Help menu */
     menu_def_t *help = &bar.menus[1];
-    strncpy(help->title, "Help", sizeof(help->title) - 1);
+    strncpy(help->title, L(STR_HELP), sizeof(help->title) - 1);
     help->accel_key = 0x0B; /* HID 'H' */
     help->item_count = 1;
 
-    strncpy(help->items[0].text, "About      F1", sizeof(help->items[0].text) - 1);
+    strncpy(help->items[0].text, L(STR_FM_ABOUT_MENU), sizeof(help->items[0].text) - 1);
     help->items[0].command_id = CMD_ABOUT;
     help->items[0].accel_key = 0x3A;
 
