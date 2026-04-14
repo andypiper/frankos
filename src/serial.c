@@ -23,6 +23,7 @@
 #include "hardware/irq.h"
 #include "board_config.h"
 #include "serial.h"
+#include "FreeRTOS.h"
 #include "uart_tx.pio.h"
 #include "uart_rx.pio.h"
 
@@ -36,14 +37,16 @@
 #define SERIAL_BAUD     NETCARD_BAUD
 
 /* Interrupt-driven RX ring buffer (must be power of 2).
- * 128 bytes is sufficient with ISR-driven fill and 1ms polling at 115200 baud. */
-#define RX_BUF_SIZE     128
+ * Web pages arrive as multi-KB +SRECV streams — the netcard task must
+ * be able to drain the FIFO without losing bytes even under scheduling
+ * jitter.  2KB comfortably holds several +SRECV events. */
+#define RX_BUF_SIZE     2048
 #define RX_BUF_MASK     (RX_BUF_SIZE - 1)
 
 static uint tx_offset, rx_offset;
 static uint tx_sm, rx_sm;
 
-static volatile uint8_t  rx_buf[RX_BUF_SIZE];
+static volatile uint8_t  *rx_buf;   /* heap-allocated in serial_init */
 static volatile uint16_t rx_head;   /* written by ISR */
 static volatile uint16_t rx_tail;   /* read by main loop */
 
@@ -64,6 +67,9 @@ static void pio1_rx_irq_handler(void) {
 }
 
 void serial_init(void) {
+    /* Allocate RX ring buffer from heap to keep BSS small */
+    rx_buf = (volatile uint8_t *)pvPortMalloc(RX_BUF_SIZE);
+
     tx_sm = pio_claim_unused_sm(SERIAL_PIO, true);
     rx_sm = pio_claim_unused_sm(SERIAL_PIO, true);
 
