@@ -7,6 +7,7 @@
  */
 
 #include "desktop.h"
+#include "lang.h"
 #include "file_assoc.h"
 #include "filemanager.h"
 #include "terminal.h"
@@ -352,12 +353,12 @@ static void dt_load(void) {
         if (sc->is_app) {
             if (path[0] == ':') {
                 if (strcmp(path, DESKTOP_BUILTIN_NAVIGATOR) == 0) {
-                    strncpy(sc->name, "Navigator", DESKTOP_NAME_MAX - 1);
+                    strncpy(sc->name, L(STR_NAVIGATOR), DESKTOP_NAME_MAX - 1);
                     extern const uint8_t *fn_icon32_navigator_get(void);
                     memcpy(sc->icon, fn_icon32_navigator_get(), DESKTOP_ICON32_SIZE);
                     sc->has_icon = true;
                 } else if (strcmp(path, DESKTOP_BUILTIN_TERMINAL) == 0) {
-                    strncpy(sc->name, "Terminal", DESKTOP_NAME_MAX - 1);
+                    strncpy(sc->name, L(STR_TERMINAL), DESKTOP_NAME_MAX - 1);
                     extern const uint8_t *fn_icon32_terminal_get(void);
                     memcpy(sc->icon, fn_icon32_terminal_get(), DESKTOP_ICON32_SIZE);
                     sc->has_icon = true;
@@ -484,12 +485,12 @@ bool desktop_add_shortcut(const char *path) {
         if (path[0] == ':') {
             /* Built-in app — set name and icon manually */
             if (strcmp(path, DESKTOP_BUILTIN_NAVIGATOR) == 0) {
-                strncpy(sc->name, "Navigator", DESKTOP_NAME_MAX - 1);
+                strncpy(sc->name, L(STR_NAVIGATOR), DESKTOP_NAME_MAX - 1);
                 extern const uint8_t *fn_icon32_navigator_get(void);
                 memcpy(sc->icon, fn_icon32_navigator_get(), DESKTOP_ICON32_SIZE);
                 sc->has_icon = true;
             } else if (strcmp(path, DESKTOP_BUILTIN_TERMINAL) == 0) {
-                strncpy(sc->name, "Terminal", DESKTOP_NAME_MAX - 1);
+                strncpy(sc->name, L(STR_TERMINAL), DESKTOP_NAME_MAX - 1);
                 extern const uint8_t *fn_icon32_terminal_get(void);
                 memcpy(sc->icon, fn_icon32_terminal_get(), DESKTOP_ICON32_SIZE);
                 sc->has_icon = true;
@@ -571,7 +572,7 @@ static void dt_show_context_menu(int16_t sx, int16_t sy, bool on_shortcut) {
     uint8_t count = 0;
 
     if (on_shortcut) {
-        strncpy(items[count].text, "Open", sizeof(items[0].text));
+        strncpy(items[count].text, L(STR_OPEN), sizeof(items[0].text) - 1);
         items[count].command_id = DT_CMD_OPEN;
         items[count].flags = 0;
         items[count].accel_key = 0;
@@ -580,19 +581,19 @@ static void dt_show_context_menu(int16_t sx, int16_t sy, bool on_shortcut) {
         items[count] = (menu_item_t){ "", 0, MIF_SEPARATOR, 0 };
         count++;
 
-        strncpy(items[count].text, "Remove", sizeof(items[0].text));
+        strncpy(items[count].text, L(STR_DT_REMOVE), sizeof(items[0].text) - 1);
         items[count].command_id = DT_CMD_REMOVE;
         items[count].flags = 0;
         items[count].accel_key = 0;
         count++;
     } else {
-        strncpy(items[count].text, "Sort by Name", sizeof(items[0].text));
+        strncpy(items[count].text, L(STR_DT_SORT_BY_NAME), sizeof(items[0].text) - 1);
         items[count].command_id = DT_CMD_SORT_NAME;
         items[count].flags = 0;
         items[count].accel_key = 0;
         count++;
 
-        strncpy(items[count].text, "Refresh", sizeof(items[0].text));
+        strncpy(items[count].text, L(STR_DT_REFRESH), sizeof(items[0].text) - 1);
         items[count].command_id = DT_CMD_REFRESH;
         items[count].flags = 0;
         items[count].accel_key = 0;

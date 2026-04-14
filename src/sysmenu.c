@@ -12,6 +12,7 @@
 #include "window_theme.h"
 #include "gfx.h"
 #include "font.h"
+#include "lang.h"
 #include <string.h>
 
 /*==========================================================================
@@ -56,27 +57,27 @@ static void build_items(void) {
     sys_item_count = 0;
 
     if (win->state == WS_MAXIMIZED && (win->flags & WF_RESIZABLE)) {
-        sys_items[sys_item_count++] = (sys_item_t){ "Restore", SYS_ID_RESTORE, false };
+        sys_items[sys_item_count++] = (sys_item_t){ L(STR_RESTORE), SYS_ID_RESTORE, false };
     }
     if ((win->flags & WF_MOVABLE) && win->state != WS_MAXIMIZED) {
-        sys_items[sys_item_count++] = (sys_item_t){ "Move", SYS_ID_MOVE, false };
+        sys_items[sys_item_count++] = (sys_item_t){ L(STR_MOVE), SYS_ID_MOVE, false };
     }
     if ((win->flags & WF_RESIZABLE) && win->state != WS_MAXIMIZED) {
-        sys_items[sys_item_count++] = (sys_item_t){ "Maximize", SYS_ID_MAXIMIZE, false };
+        sys_items[sys_item_count++] = (sys_item_t){ L(STR_MAXIMIZE), SYS_ID_MAXIMIZE, false };
     }
     /* Fullscreen toggle — only for windows that opt in */
     if (win->flags & WF_FULLSCREENABLE) {
         bool is_fs = wm_is_fullscreen(sys_hwnd);
         sys_items[sys_item_count++] = (sys_item_t){
-            is_fs ? "Exit Fullscreen" : "Enter Fullscreen",
+            is_fs ? L(STR_EXIT_FULLSCREEN) : L(STR_ENTER_FULLSCREEN),
             SYS_ID_FULLSCREEN, false };
     }
     /* Minimize available for all closable windows */
     if (win->flags & WF_CLOSABLE) {
-        sys_items[sys_item_count++] = (sys_item_t){ "Minimize", SYS_ID_MINIMIZE, false };
+        sys_items[sys_item_count++] = (sys_item_t){ L(STR_MINIMIZE), SYS_ID_MINIMIZE, false };
     }
     if (win->flags & WF_CLOSABLE) {
-        sys_items[sys_item_count++] = (sys_item_t){ "Close", SYS_ID_CLOSE, true };
+        sys_items[sys_item_count++] = (sys_item_t){ L(STR_CLOSE), SYS_ID_CLOSE, true };
     }
 }
 

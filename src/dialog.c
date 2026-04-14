@@ -15,6 +15,7 @@
 #include "gfx.h"
 #include "font.h"
 #include "taskbar.h"
+#include "lang.h"
 #include <string.h>
 #include "FreeRTOS.h"
 #include "timers.h"
@@ -102,10 +103,10 @@ static void dialog_draw_icon(hwnd_t hwnd, int x, int y, uint8_t icon_type) {
 
 static const char *btn_label(uint16_t result_id) {
     switch (result_id) {
-        case DLG_RESULT_OK:     return "OK";
-        case DLG_RESULT_CANCEL: return "Cancel";
-        case DLG_RESULT_YES:    return "Yes";
-        case DLG_RESULT_NO:     return "No";
+        case DLG_RESULT_OK:     return L(STR_DLG_OK);
+        case DLG_RESULT_CANCEL: return L(STR_DLG_CANCEL);
+        case DLG_RESULT_YES:    return L(STR_DLG_YES);
+        case DLG_RESULT_NO:     return L(STR_DLG_NO);
         default: return "";
     }
 }
@@ -537,11 +538,11 @@ static void input_dialog_paint(hwnd_t hwnd) {
     int bx = (dlg_client_w - total_btn_w) / 2;
     int by = dlg_client_h - DLG_BTN_H - DLG_BTN_BOTTOM;
 
-    wd_button(bx, by, DLG_BTN_W, DLG_BTN_H, "OK",
+    wd_button(bx, by, DLG_BTN_W, DLG_BTN_H, L(STR_DLG_OK),
               !inp_field_focus && dlg_btn_focus == 0,
               dlg_btn_pressed == 0);
     wd_button(bx + DLG_BTN_W + DLG_BTN_GAP, by, DLG_BTN_W,
-              DLG_BTN_H, "Cancel",
+              DLG_BTN_H, L(STR_DLG_CANCEL),
               !inp_field_focus && dlg_btn_focus == 1,
               dlg_btn_pressed == 1);
 }

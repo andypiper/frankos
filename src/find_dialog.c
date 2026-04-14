@@ -10,6 +10,7 @@
  */
 
 #include "find_dialog.h"
+#include "lang.h"
 #include "controls.h"
 #include "window.h"
 #include "window_event.h"
@@ -124,15 +125,15 @@ static int fnd_btn_count(void) {
 static const char *fnd_btn_label(int idx) {
     if (fnd_replace_mode) {
         switch (idx) {
-            case 0: return "Find Next";
-            case 1: return "Replace";
-            case 2: return "Replace All";
-            case 3: return "Cancel";
+            case 0: return L(STR_FIND_NEXT);
+            case 1: return L(STR_REPLACE);
+            case 2: return L(STR_REPLACE_ALL);
+            case 3: return L(STR_CANCEL);
         }
     } else {
         switch (idx) {
-            case 0: return "Find Next";
-            case 1: return "Cancel";
+            case 0: return L(STR_FIND_NEXT);
+            case 1: return L(STR_CANCEL);
         }
     }
     return "";
@@ -170,7 +171,7 @@ static void fnd_paint(hwnd_t hwnd) {
 
     /* "Find what:" field */
     wd_text_ui(FND_PAD, fnd_find_field_y() + (FND_FIELD_H - FONT_UI_HEIGHT) / 2,
-               "Find what:", COLOR_BLACK, THEME_BUTTON_FACE);
+               L(STR_FIND_WHAT), COLOR_BLACK, THEME_BUTTON_FACE);
     fnd_find_tf.focused = (fnd_focus == 0);
     textfield_paint(&fnd_find_tf);
 
@@ -178,7 +179,7 @@ static void fnd_paint(hwnd_t hwnd) {
     if (fnd_replace_mode) {
         wd_text_ui(FND_PAD,
                    fnd_repl_field_y() + (FND_FIELD_H - FONT_UI_HEIGHT) / 2,
-                   "Replace with:", COLOR_BLACK, THEME_BUTTON_FACE);
+                   L(STR_REPLACE_WITH), COLOR_BLACK, THEME_BUTTON_FACE);
         fnd_repl_tf.focused = (fnd_focus == 1);
         textfield_paint(&fnd_repl_tf);
     }
@@ -405,7 +406,7 @@ static hwnd_t fnd_open(hwnd_t parent, bool replace_mode) {
     fnd_btn_pressed = -1;
     {
         bool was_checked = fnd_checkbox.checked;
-        checkbox_init(&fnd_checkbox, FND_PAD, 0, "Match case");
+        checkbox_init(&fnd_checkbox, FND_PAD, 0, L(STR_MATCH_CASE));
         fnd_checkbox.checked = was_checked;
     }
 
@@ -433,7 +434,7 @@ static hwnd_t fnd_open(hwnd_t parent, bool replace_mode) {
     if (y + outer_h > work_h) y = work_h - outer_h;
     if (y < 0) y = 0;
 
-    const char *title = replace_mode ? "Replace" : "Find";
+    const char *title = replace_mode ? L(STR_REPLACE) : L(STR_FIND);
     fnd_hwnd = wm_create_window((int16_t)x, (int16_t)y,
                                   (int16_t)outer_w, (int16_t)outer_h,
                                   title, WSTYLE_DIALOG,

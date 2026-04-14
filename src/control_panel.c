@@ -18,6 +18,7 @@
 #include "display.h"
 #include "dialog.h"
 #include "taskbar.h"
+#include "lang.h"
 #include "board_config.h"
 #include "FreeRTOS.h"
 #include "task.h"
@@ -38,6 +39,7 @@ extern const uint8_t cp_disp_icon32[];
 extern const uint8_t cp_sys_icon32[];
 extern const uint8_t cp_mouse_icon32[];
 extern const uint8_t cp_freq_icon32[];
+extern const uint8_t cp_lang_icon32[];
 
 /* Folder icon for mouse double-click test */
 extern const uint8_t fn_icon32_folder[];
@@ -58,7 +60,7 @@ extern void desktop_set_bg_color(uint8_t color);
  * Control Panel main window
  *=========================================================================*/
 
-#define CP_ITEMS      4
+#define CP_ITEMS      5
 #define CP_CELL_W    76
 #define CP_CELL_H    56
 #define CP_ICON_SIZE 32
@@ -76,8 +78,9 @@ typedef struct {
 
 static cp_state_t cp_state;
 
-static const char *cp_labels[CP_ITEMS] = {
-    "Desktop", "System", "Mouse", "Frequencies"
+/* Label string IDs for each CP item */
+static const int cp_str_ids[CP_ITEMS] = {
+    STR_DESKTOP, STR_SYSTEM, STR_MOUSE, STR_FREQUENCIES, STR_LANGUAGE
 };
 
 static const uint8_t *cp_icons[CP_ITEMS];
@@ -87,12 +90,14 @@ static void cp_open_display(void);
 static void cp_open_system(void);
 static void cp_open_mouse(void);
 static void cp_open_freq(void);
+static void cp_open_lang(void);
 static void cp_open_applet(int idx) {
     switch (idx) {
     case 0: cp_open_display(); break;
     case 1: cp_open_system();  break;
     case 2: cp_open_mouse();   break;
     case 3: cp_open_freq();    break;
+    case 4: cp_open_lang();    break;
     }
 }
 
@@ -183,7 +188,7 @@ static void cp_paint(hwnd_t hwnd) {
             wd_icon_32(icon_x, icon_y, cp_icons[i]);
 
         /* Draw label centered below icon */
-        const char *label = cp_labels[i];
+        const char *label = L(cp_str_ids[i]);
         int tw = (int)strlen(label) * FONT_UI_WIDTH;
         int text_x = cx + (CP_CELL_W - tw) / 2;
         int text_y = icon_y + CP_ICON_SIZE + 2;
@@ -207,6 +212,7 @@ hwnd_t control_panel_create(void) {
     cp_icons[1] = cp_sys_icon32;
     cp_icons[2] = cp_mouse_icon32;
     cp_icons[3] = cp_freq_icon32;
+    cp_icons[4] = cp_lang_icon32;
 
     memset(&cp_state, 0, sizeof(cp_state));
     cp_state.selected = 0;
@@ -408,7 +414,7 @@ static void disp_paint(hwnd_t hwnd) {
     wd_begin(hwnd);
     wd_clear(THEME_BUTTON_FACE);
 
-    wd_text_ui(20, 10, "Background color:",
+    wd_text_ui(20, 10, L(STR_BG_COLOR),
                COLOR_BLACK, THEME_BUTTON_FACE);
 
     /* 8x2 color swatch grid */
@@ -438,14 +444,14 @@ static void disp_paint(hwnd_t hwnd) {
     }
 
     /* Preview */
-    wd_text_ui(20, DISP_PREVIEW_Y - 14, "Preview:",
+    wd_text_ui(20, DISP_PREVIEW_Y - 14, L(STR_PREVIEW),
                COLOR_BLACK, THEME_BUTTON_FACE);
     wd_bevel_rect(DISP_PREVIEW_X, DISP_PREVIEW_Y,
                   DISP_PREVIEW_W, DISP_PREVIEW_H,
                   COLOR_DARK_GRAY, COLOR_WHITE, d->color);
 
     /* Theme selector */
-    wd_text_ui(20, DISP_THEME_Y - 14, "Window theme:",
+    wd_text_ui(20, DISP_THEME_Y - 14, L(STR_WINDOW_THEME),
                COLOR_BLACK, THEME_BUTTON_FACE);
     radiogroup_paint(&d->theme_rg);
     if (d->focus == 1) {
@@ -458,9 +464,9 @@ static void disp_paint(hwnd_t hwnd) {
     int ok_x = client_w - APPLET_BTN_W * 2 - APPLET_BTN_GAP - 10;
     int cancel_x = ok_x + APPLET_BTN_W + APPLET_BTN_GAP;
     wd_button(ok_x, btn_y, APPLET_BTN_W, APPLET_BTN_H,
-              "OK", d->focus == 2, false);
+              L(STR_OK), d->focus == 2, false);
     wd_button(cancel_x, btn_y, APPLET_BTN_W, APPLET_BTN_H,
-              "Cancel", d->focus == 3, false);
+              L(STR_CANCEL), d->focus == 3, false);
 
     wd_end();
 }
@@ -485,7 +491,7 @@ static void cp_open_display(void) {
     wm_set_pending_icon(cp_icon16);
     hwnd_t hwnd = wm_create_window(
         110, 70, DISP_W, DISP_H,
-        "Desktop Properties", WSTYLE_DIALOG,
+        L(STR_DESKTOP_PROPS), WSTYLE_DIALOG,
         disp_event, disp_paint);
     if (hwnd == HWND_NULL) return;
     window_t *win = wm_get_window(hwnd);
@@ -597,7 +603,7 @@ static void sys_paint(hwnd_t hwnd) {
     /* OK button */
     int btn_y = client_h - APPLET_BTN_H - 8;
     int ok_x = client_w - APPLET_BTN_W - 10;
-    wd_button(ok_x, btn_y, APPLET_BTN_W, APPLET_BTN_H, "OK", true, false);
+    wd_button(ok_x, btn_y, APPLET_BTN_W, APPLET_BTN_H, L(STR_OK), true, false);
 
     wd_end();
 }
@@ -612,7 +618,7 @@ static void cp_open_system(void) {
     wm_set_pending_icon(cp_icon16);
     hwnd_t hwnd = wm_create_window(
         120, 60, SYS_W, SYS_H,
-        "System Properties", WSTYLE_DIALOG,
+        L(STR_SYSTEM_PROPS), WSTYLE_DIALOG,
         sys_event, sys_paint);
     if (hwnd == HWND_NULL) return;
     window_t *win = wm_get_window(hwnd);
@@ -763,23 +769,23 @@ static void mouse_paint(hwnd_t hwnd) {
     wd_clear(THEME_BUTTON_FACE);
 
     /* Speed label */
-    char buf[32];
-    snprintf(buf, sizeof(buf), "Double-click speed: %u ms",
-             mouse_slider_to_ms(m->slider.value));
+    char buf[48];
+    snprintf(buf, sizeof(buf), "%s %u ms",
+             L(STR_DBLCLICK_SPEED), mouse_slider_to_ms(m->slider.value));
     wd_text_ui(20, 10, buf, COLOR_BLACK, THEME_BUTTON_FACE);
 
     /* Labels */
-    wd_text_ui(MOUSE_TRACK_X, MOUSE_TRACK_Y - 14, "Slow",
+    wd_text_ui(MOUSE_TRACK_X, MOUSE_TRACK_Y - 14, L(STR_SLOW),
                COLOR_BLACK, THEME_BUTTON_FACE);
-    wd_text_ui(MOUSE_TRACK_X + MOUSE_TRACK_W - 4 * FONT_UI_WIDTH,
-               MOUSE_TRACK_Y - 14, "Fast",
+    wd_text_ui(MOUSE_TRACK_X + MOUSE_TRACK_W - (int)strlen(L(STR_FAST)) * FONT_UI_WIDTH,
+               MOUSE_TRACK_Y - 14, L(STR_FAST),
                COLOR_BLACK, THEME_BUTTON_FACE);
 
     /* Slider (track + thumb) */
     slider_paint(&m->slider);
 
     /* Test area */
-    wd_text_ui(MOUSE_TEST_X, MOUSE_TEST_Y - 14, "Test area:",
+    wd_text_ui(MOUSE_TEST_X, MOUSE_TEST_Y - 14, L(STR_TEST_AREA),
                COLOR_BLACK, THEME_BUTTON_FACE);
     wd_bevel_rect(MOUSE_TEST_X, MOUSE_TEST_Y,
                   MOUSE_TEST_W, MOUSE_TEST_H,
@@ -801,9 +807,9 @@ static void mouse_paint(hwnd_t hwnd) {
     int ok_x = client_w - APPLET_BTN_W * 2 - APPLET_BTN_GAP - 10;
     int cancel_x = ok_x + APPLET_BTN_W + APPLET_BTN_GAP;
     wd_button(ok_x, btn_y, APPLET_BTN_W, APPLET_BTN_H,
-              "OK", m->focus == 0, false);
+              L(STR_OK), m->focus == 0, false);
     wd_button(cancel_x, btn_y, APPLET_BTN_W, APPLET_BTN_H,
-              "Cancel", m->focus == 1, false);
+              L(STR_CANCEL), m->focus == 1, false);
 
     wd_end();
 }
@@ -824,7 +830,7 @@ static void cp_open_mouse(void) {
     wm_set_pending_icon(cp_icon16);
     hwnd_t hwnd = wm_create_window(
         90, 70, MOUSE_W, MOUSE_H,
-        "Mouse Properties", WSTYLE_DIALOG,
+        L(STR_MOUSE_PROPS), WSTYLE_DIALOG,
         mouse_event, mouse_paint);
     if (hwnd == HWND_NULL) return;
     window_t *win = wm_get_window(hwnd);
@@ -908,8 +914,8 @@ static bool freq_event(hwnd_t hwnd, const window_event_t *ev) {
             set->psram_freq_mhz = psram_freqs[f->psram_rg.selected];
             settings_save();
             /* Show info dialog */
-            dialog_show(hwnd, "Frequencies",
-                "Changes take effect after reboot.",
+            dialog_show(hwnd, L(STR_FREQUENCIES),
+                L(STR_REBOOT_NOTICE),
                 DLG_ICON_INFO, DLG_BTN_OK);
             wm_destroy_window(hwnd);
             memset(f, 0, sizeof(*f));
@@ -941,8 +947,8 @@ static bool freq_event(hwnd_t hwnd, const window_event_t *ev) {
                 set->cpu_freq_mhz = cpu_freqs[f->cpu_rg.selected];
                 set->psram_freq_mhz = psram_freqs[f->psram_rg.selected];
                 settings_save();
-                dialog_show(HWND_NULL, "Frequencies",
-                    "Changes take effect after reboot.",
+                dialog_show(HWND_NULL, L(STR_FREQUENCIES),
+                    L(STR_REBOOT_NOTICE),
                     DLG_ICON_INFO, DLG_BTN_OK);
                 wm_destroy_window(hwnd);
                 memset(f, 0, sizeof(*f));
@@ -993,7 +999,7 @@ static void freq_paint(hwnd_t hwnd) {
     wd_clear(THEME_BUTTON_FACE);
 
     /* CPU frequency group */
-    wd_text_ui(16, 14, "CPU Frequency:", COLOR_BLACK, THEME_BUTTON_FACE);
+    wd_text_ui(16, 14, L(STR_CPU_FREQ), COLOR_BLACK, THEME_BUTTON_FACE);
     radiogroup_paint(&f->cpu_rg);
     if (f->focus == 0) {
         wd_rect(FREQ_RADIO_X - 4, FREQ_CPU_Y - 2,
@@ -1001,7 +1007,7 @@ static void freq_paint(hwnd_t hwnd) {
     }
 
     /* PSRAM frequency group */
-    wd_text_ui(16, FREQ_PSRAM_Y - 16, "PSRAM Frequency:",
+    wd_text_ui(16, FREQ_PSRAM_Y - 16, L(STR_PSRAM_FREQ),
                COLOR_BLACK, THEME_BUTTON_FACE);
     radiogroup_paint(&f->psram_rg);
     if (f->focus == 1) {
@@ -1011,7 +1017,7 @@ static void freq_paint(hwnd_t hwnd) {
 
     /* Reboot notice */
     wd_text_ui(16, FREQ_PSRAM_Y + 3 * FREQ_RADIO_H + 4,
-               "Changes take effect after reboot.",
+               L(STR_REBOOT_NOTICE),
                COLOR_DARK_GRAY, THEME_BUTTON_FACE);
 
     /* Buttons */
@@ -1019,9 +1025,9 @@ static void freq_paint(hwnd_t hwnd) {
     int ok_x = client_w - APPLET_BTN_W * 2 - APPLET_BTN_GAP - 10;
     int cancel_x = ok_x + APPLET_BTN_W + APPLET_BTN_GAP;
     wd_button(ok_x, btn_y, APPLET_BTN_W, APPLET_BTN_H,
-              "OK", f->focus == 2, false);
+              L(STR_OK), f->focus == 2, false);
     wd_button(cancel_x, btn_y, APPLET_BTN_W, APPLET_BTN_H,
-              "Cancel", f->focus == 3, false);
+              L(STR_CANCEL), f->focus == 3, false);
 
     wd_end();
 }
@@ -1048,12 +1054,115 @@ static void cp_open_freq(void) {
     wm_set_pending_icon(cp_icon16);
     hwnd_t hwnd = wm_create_window(
         80, 50, FREQ_W, FREQ_H,
-        "Frequencies", WSTYLE_DIALOG,
+        L(STR_FREQUENCIES), WSTYLE_DIALOG,
         freq_event, freq_paint);
     if (hwnd == HWND_NULL) return;
     window_t *win = wm_get_window(hwnd);
     if (win) win->bg_color = THEME_BUTTON_FACE;
     freq_app.hwnd = hwnd;
+    wm_set_focus(hwnd);
+    taskbar_invalidate();
+}
+
+/*==========================================================================
+ * Language applet
+ *=========================================================================*/
+
+static struct {
+    hwnd_t hwnd;
+    uint8_t selected;  /* 0=English, 1=Russian */
+} lang_app;
+
+static bool lang_event(hwnd_t hwnd, const window_event_t *ev) {
+    if (ev->type == WM_CLOSE) {
+        wm_destroy_window(hwnd);
+        taskbar_invalidate();
+        return true;
+    }
+    if (ev->type == WM_COMMAND) {
+        if (ev->command.id == 1) { /* OK */
+            lang_set(lang_app.selected);
+            settings_save();
+            wm_destroy_window(hwnd);
+            taskbar_invalidate();
+            wm_force_full_repaint();
+            return true;
+        }
+        if (ev->command.id == 2) { /* Cancel */
+            wm_destroy_window(hwnd);
+            taskbar_invalidate();
+            return true;
+        }
+        if (ev->command.id == DLG_RESULT_OK ||
+            ev->command.id == DLG_RESULT_CANCEL) {
+            wm_invalidate(hwnd);
+            return true;
+        }
+    }
+    if (ev->type == WM_LBUTTONDOWN) {
+        int16_t mx = ev->mouse.x;
+        int16_t my = ev->mouse.y;
+        /* Radio buttons at y=30 and y=48 */
+        if (my >= 28 && my < 44) {
+            lang_app.selected = LANG_EN;
+            wm_invalidate(hwnd);
+            return true;
+        }
+        if (my >= 46 && my < 62) {
+            lang_app.selected = LANG_RU;
+            wm_invalidate(hwnd);
+            return true;
+        }
+        /* OK button */
+        if (mx >= 30 && mx < 90 && my >= 74 && my < 96) {
+            lang_set(lang_app.selected);
+            settings_save();
+            wm_destroy_window(hwnd);
+            taskbar_invalidate();
+            wm_force_full_repaint();
+            return true;
+        }
+        /* Cancel button */
+        if (mx >= 100 && mx < 160 && my >= 74 && my < 96) {
+            wm_destroy_window(hwnd);
+            taskbar_invalidate();
+            return true;
+        }
+    }
+    return false;
+}
+
+static void lang_paint(hwnd_t hwnd) {
+    (void)hwnd;
+    wd_begin(hwnd);
+    wd_clear(THEME_BUTTON_FACE);
+
+    /* Label */
+    wd_text_ui(12, 10, L(STR_SELECT_LANGUAGE), COLOR_BLACK, THEME_BUTTON_FACE);
+
+    /* Radio buttons */
+    wd_radio(12, 30, "English", lang_app.selected == LANG_EN);
+    wd_radio(12, 48, "\xD0\xF3\xF1\xF1\xEA\xE8\xE9", lang_app.selected == LANG_RU);
+
+    /* OK / Cancel buttons */
+    wd_button(30, 74, 60, 22, L(STR_OK), false, false);
+    wd_button(100, 74, 60, 22, L(STR_CANCEL), false, false);
+
+    wd_end();
+}
+
+static void cp_open_lang(void) {
+    lang_app.selected = lang_get();
+
+    int16_t w = 200 + 2 * THEME_BORDER_WIDTH;
+    int16_t h = 104 + THEME_TITLE_HEIGHT + 2 * THEME_BORDER_WIDTH;
+    hwnd_t hwnd = wm_create_window(
+        180, 120, w, h, L(STR_LANGUAGE_PROPS),
+        WSTYLE_DIALOG, lang_event, lang_paint);
+    if (hwnd == HWND_NULL) return;
+    window_t *win = wm_get_window(hwnd);
+    if (win) win->bg_color = THEME_BUTTON_FACE;
+    lang_app.hwnd = hwnd;
     wm_set_focus(hwnd);
     taskbar_invalidate();
 }

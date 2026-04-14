@@ -107,4 +107,8 @@ void wd_get_clip_size(int16_t *w, int16_t *h);
 void wd_button(int16_t x, int16_t y, int16_t w, int16_t h,
                const char *label, bool focused, bool pressed);
 
+/* Win95-style radio button: 12px circle + label text.
+ * selected - if true, draws filled dot in center. */
+void wd_radio(int16_t x, int16_t y, const char *label, bool selected);
+
 #endif /* WINDOW_DRAW_H */

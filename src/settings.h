@@ -24,7 +24,8 @@ typedef struct {
     uint16_t cpu_freq_mhz;     /* 252, 378, 504 */
     uint16_t psram_freq_mhz;   /* 0=compile default, 133, 166 */
     uint8_t  theme_id;         /* 0=Win95, 1=Simple */
-    uint8_t  reserved[17];     /* pad to 32 bytes */
+    uint8_t  language;         /* 0=English, 1=Russian */
+    uint8_t  reserved[16];     /* pad to 32 bytes */
 } settings_t;
 
 /* Read from /fos/settings.dat (safe if no SD card) */

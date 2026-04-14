@@ -773,12 +773,18 @@ static void input_task(void *params) {
             }
             prev_buttons = buttons;
 
-            /* Always dispatch mouse events so apps can track hover.
-             * The compositor handles selective repainting efficiently. */
-            g_video_dirty = true;
-            if (!changed && !buttons) {
-                /* Passive move — also update cursor overlay directly
-                 * for low-latency cursor rendering */
+            /* Button changes or held buttons need full composite.
+             * Passive moves only need composite if an app requested it
+             * (via wm_mark_dirty from the MOUSEMOVE event handler). */
+            if (changed || buttons) {
+                g_video_dirty = true;
+            } else {
+                /* Passive move: dispatch the queued event by poking
+                 * compositor_dirty (wm_post_event skips it for MOUSEMOVE).
+                 * The compositor will run, dispatch the event, and only
+                 * repaint if the app's handler invalidated a window. */
+                extern void wm_mark_dirty(void);
+                wm_mark_dirty();
                 if (!boot_cursor_hidden)
                     cursor_overlay_move(cur_x, cur_y);
             }

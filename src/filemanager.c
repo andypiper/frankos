@@ -14,6 +14,7 @@
 #include "menu.h"
 #include "dialog.h"
 #include "gfx.h"
+#include "lang.h"
 #include "font.h"
 #include "display.h"
 #include "taskbar.h"
@@ -78,11 +79,19 @@ static filemanager_t *fm_from_hwnd(hwnd_t hwnd) {
     return win ? (filemanager_t *)win->user_data : NULL;
 }
 
+/* Forward declaration — menu rebuild on language change */
+static void fm_setup_menu(filemanager_t *fm);
+
 /* Mark specific regions dirty and request a repaint.
  * Only the flagged parts will be redrawn in fm_paint(). */
 static void fm_invalidate(filemanager_t *fm, uint8_t flags) {
     fm->dirty |= flags;
-    wm_invalidate(fm->hwnd);
+    /* Toolbar-only changes (hover/tooltip) don't need a compositor
+     * repaint — the tooltip is drawn as an overlay by the compositor,
+     * and hover state is handled in the paint callback when the next
+     * real repaint happens.  Skip invalidation to prevent scrollbar flicker. */
+    if (flags & ~FM_DIRTY_TOOLBAR)
+        wm_invalidate(fm->hwnd);
 }
 
 /*==========================================================================
@@ -541,12 +550,12 @@ static const uint8_t *tb_get_icon(int index) {
 
 static const char *tb_get_label(int index) {
     switch (index) {
-    case TB_BACK:   return "Back";
-    case TB_UP:     return "Up";
-    case TB_CUT:    return "Cut";
-    case TB_COPY:   return "Copy";
-    case TB_PASTE:  return "Paste";
-    case TB_DELETE: return "Delete";
+    case TB_BACK:   return L(STR_FM_BACK);
+    case TB_UP:     return L(STR_FM_UP);
+    case TB_CUT:    return L(STR_FM_CUT);
+    case TB_COPY:   return L(STR_FM_COPY);
+    case TB_PASTE:  return L(STR_FM_PASTE);
+    case TB_DELETE: return L(STR_FM_DELETE);
     default:        return NULL;
     }
 }
@@ -655,7 +664,7 @@ static void fm_paint_statusbar(filemanager_t *fm, int16_t cw, int16_t ch) {
 
     /* ---- Left panel: object count (stretchy — fills remaining width) ---- */
     char left[48];
-    snprintf(left, sizeof(left), "%u object(s)", (unsigned)fm->entry_count);
+    snprintf(left, sizeof(left), "%u %s", (unsigned)fm->entry_count, L(STR_FM_OBJECTS));
 
     int lp_x = 2;
     int lp_w = (rp_w > 0) ? (rp_x - lp_x - 2) : (cw - lp_x - 2);
@@ -819,7 +828,7 @@ static void fm_paint_list(filemanager_t *fm, int16_t cw, int16_t ch) {
     wd_bevel_rect(0, hy, name_w, LIST_HDR_H,
                    COLOR_WHITE, COLOR_DARK_GRAY, THEME_BUTTON_FACE);
     wd_text_ui(4, hy + (LIST_HDR_H - FONT_UI_HEIGHT) / 2,
-               "Name", COLOR_BLACK, THEME_BUTTON_FACE);
+               L(STR_FM_NAME), COLOR_BLACK, THEME_BUTTON_FACE);
     if (fm->sort_column == 0)
         fm_draw_sort_arrow(name_w - 14, hy + (LIST_HDR_H - 4) / 2,
                            fm->sort_ascending);
@@ -827,7 +836,7 @@ static void fm_paint_list(filemanager_t *fm, int16_t cw, int16_t ch) {
     wd_bevel_rect(name_w, hy, size_w, LIST_HDR_H,
                    COLOR_WHITE, COLOR_DARK_GRAY, THEME_BUTTON_FACE);
     wd_text_ui(name_w + 4, hy + (LIST_HDR_H - FONT_UI_HEIGHT) / 2,
-               "Size", COLOR_BLACK, THEME_BUTTON_FACE);
+               L(STR_FM_SIZE), COLOR_BLACK, THEME_BUTTON_FACE);
     if (fm->sort_column == 1)
         fm_draw_sort_arrow(name_w + size_w - 14, hy + (LIST_HDR_H - 4) / 2,
                            fm->sort_ascending);
@@ -835,7 +844,7 @@ static void fm_paint_list(filemanager_t *fm, int16_t cw, int16_t ch) {
     wd_bevel_rect(name_w + size_w, hy, type_w, LIST_HDR_H,
                    COLOR_WHITE, COLOR_DARK_GRAY, THEME_BUTTON_FACE);
     wd_text_ui(name_w + size_w + 4, hy + (LIST_HDR_H - FONT_UI_HEIGHT) / 2,
-               "Type", COLOR_BLACK, THEME_BUTTON_FACE);
+               L(STR_FM_TYPE), COLOR_BLACK, THEME_BUTTON_FACE);
     if (fm->sort_column == 2)
         fm_draw_sort_arrow(name_w + size_w + type_w - 14,
                            hy + (LIST_HDR_H - 4) / 2, fm->sort_ascending);
@@ -881,8 +890,8 @@ static void fm_paint_list(filemanager_t *fm, int16_t cw, int16_t ch) {
         }
 
         /* Type */
-        const char *type_str = (e->attrib & AM_DIR) ? "Folder" :
-                               e->is_executable ? "Application" : "File";
+        const char *type_str = (e->attrib & AM_DIR) ? L(STR_FM_FOLDER) :
+                               e->is_executable ? L(STR_FM_APPLICATION) : L(STR_FM_FILE_TYPE);
         wd_text_ui(name_w + size_w + 4, ry + (LIST_ROW_H - FONT_UI_HEIGHT) / 2,
                    type_str, fg, bg);
     }
@@ -914,8 +923,11 @@ static void fm_paint(hwnd_t hwnd) {
      * still set at this point — the WM clears it after paint returns. */
     {
         window_t *win = wm_get_window(hwnd);
-        if (win && (win->flags & WF_FRAME_DIRTY))
+        if (win && (win->flags & WF_FRAME_DIRTY)) {
             dirty = FM_DIRTY_ALL;
+            /* Rebuild menu bar so language changes take effect */
+            fm_setup_menu(fm);
+        }
     }
 
     /* Determine whether scrollbar is needed */
@@ -946,7 +958,8 @@ static void fm_paint(hwnd_t hwnd) {
     if (dirty & FM_DIRTY_TOOLBAR)
         fm_paint_toolbar(fm, cw);
 
-    /* Scrollbar — update geometry and paint via API control */
+    /* Scrollbar — always repaint (cheap, and the compositor may clear
+     * the client area on any WF_DIRTY repaint). */
     {
         int16_t fah_sb = fm_file_area_height(ch);
         fm->vscroll.x = cw - FN_SCROLLBAR_W;
@@ -1016,8 +1029,8 @@ static int      copy_done_files;
 
 static void fm_delete_selected(filemanager_t *fm) {
     if (fm->selection_count == 0) return;
-    dialog_show(fm->hwnd, "Confirm Delete",
-                "Delete selected item(s)?",
+    dialog_show(fm->hwnd, L(STR_CONFIRM_DELETE),
+                L(STR_FM_DELETE_ITEMS),
                 DLG_ICON_WARNING, DLG_BTN_YES | DLG_BTN_NO);
 }
 
@@ -1056,7 +1069,7 @@ static void fm_do_delete(filemanager_t *fm) {
     copy_total_files = 0;  /* clear so progress doesn't show file counts */
     copy_done_files = 0;
     if (total > 1)
-        fm_show_progress("Deleting", 0);
+        fm_show_progress(L(STR_FM_DELETING), 0);
 
     for (int i = 0; i < (int)fm->entry_count; i++) {
         if (!(fm->entries[i].sel_flags & FN_SEL_SELECTED)) continue;
@@ -1077,7 +1090,7 @@ static void fm_do_delete(filemanager_t *fm) {
         }
         done++;
         if (total > 1)
-            fm_show_progress("Deleting", done * 100 / total);
+            fm_show_progress(L(STR_FM_DELETING), done * 100 / total);
     }
     cursor_set_type(CURSOR_ARROW);
     fm_refresh(fm);
@@ -1086,14 +1099,14 @@ static void fm_do_delete(filemanager_t *fm) {
 
 static void fm_new_folder(filemanager_t *fm) {
     fm->pending_rename = 0;
-    dialog_input_show(fm->hwnd, "New Folder", "Name:", NULL, 60);
+    dialog_input_show(fm->hwnd, L(STR_FM_NEW_FOLDER_DLG), L(STR_FM_ENTER_NAME), NULL, 60);
 }
 
 static void fm_rename_selected(filemanager_t *fm) {
     if (fm->focus_index < 0 || fm->focus_index >= (int)fm->entry_count) return;
     fm->pending_rename = 1;
-    dialog_input_show(fm->hwnd, "Rename",
-                      "New name:", fm->entries[fm->focus_index].name, 60);
+    dialog_input_show(fm->hwnd, L(STR_FM_RENAME_DLG),
+                      L(STR_FM_NEW_NAME), fm->entries[fm->focus_index].name, 60);
 }
 
 static void fm_open_item(filemanager_t *fm, int idx) {
@@ -1160,9 +1173,8 @@ static void fm_open_item(filemanager_t *fm, int idx) {
     } else {
         /* Regular file — try file association */
         if (!file_assoc_open(full)) {
-            dialog_show(fm->hwnd, "Open",
-                        "No application is registered\n"
-                        "for this file type.",
+            dialog_show(fm->hwnd, L(STR_OPEN),
+                        L(STR_FM_NO_APP_REGISTERED),
                         DLG_ICON_INFO, DLG_BTN_OK);
         }
     }
@@ -1334,7 +1346,7 @@ static void fm_copy_recursive(const char *src, const char *dst) {
                         int pct = copy_total_bytes > 0
                             ? (int)((uint64_t)copy_done_bytes * 100 / copy_total_bytes)
                             : -1;
-                        fm_show_progress("Copying", pct);
+                        fm_show_progress(L(STR_FM_COPYING), pct);
                     }
                 }
                 f_close(&df);
@@ -1362,7 +1374,7 @@ static void fm_clip_paste(filemanager_t *fm) {
             copy_total_bytes += fm_calc_copy_size(fn_clipboard.paths[i]);
             copy_total_files += fm_count_files(fn_clipboard.paths[i]);
         }
-        fm_show_progress("Copying", 0);
+        fm_show_progress(L(STR_FM_COPYING), 0);
     }
 
     for (int i = 0; i < fn_clipboard.count; i++) {
@@ -1419,7 +1431,7 @@ static void fm_show_context_menu(filemanager_t *fm, int16_t sx, int16_t sy,
         }
 
         /* "Open" — always present */
-        strncpy(items[count].text, "Open", sizeof(items[0].text));
+        strncpy(items[count].text, L(STR_OPEN), sizeof(items[0].text) - 1);
         items[count].command_id = FN_CMD_CTX_OPEN;
         items[count].flags = 0;
         items[count].accel_key = 0;
@@ -1429,8 +1441,8 @@ static void fm_show_context_menu(filemanager_t *fm, int16_t sx, int16_t sy,
         if (ext) {
             ow_nmatches = file_assoc_find_all(ext, ow_apps, 4);
             if (ow_nmatches > 0) {
-                strncpy(items[count].text, "Open with",
-                        sizeof(items[0].text));
+                strncpy(items[count].text, L(STR_FM_OPEN_WITH),
+                        sizeof(items[0].text) - 1);
                 items[count].command_id = 0;
                 items[count].flags = MIF_SUBMENU;
                 items[count].accel_key = 0;
@@ -1442,13 +1454,13 @@ static void fm_show_context_menu(filemanager_t *fm, int16_t sx, int16_t sy,
         items[count] = (menu_item_t){ "", 0, MIF_SEPARATOR, 0 };
         count++;
 
-        strncpy(items[count].text, "Cut", sizeof(items[0].text));
+        strncpy(items[count].text, L(STR_FM_CUT), sizeof(items[0].text) - 1);
         items[count].command_id = FN_CMD_CTX_CUT;
         items[count].flags = 0;
         items[count].accel_key = 0;
         count++;
 
-        strncpy(items[count].text, "Copy", sizeof(items[0].text));
+        strncpy(items[count].text, L(STR_FM_COPY), sizeof(items[0].text) - 1);
         items[count].command_id = FN_CMD_CTX_COPY;
         items[count].flags = 0;
         items[count].accel_key = 0;
@@ -1457,7 +1469,7 @@ static void fm_show_context_menu(filemanager_t *fm, int16_t sx, int16_t sy,
         items[count] = (menu_item_t){ "", 0, MIF_SEPARATOR, 0 };
         count++;
 
-        strncpy(items[count].text, "Send to Desktop", sizeof(items[0].text));
+        strncpy(items[count].text, L(STR_SEND_TO_DESKTOP), sizeof(items[0].text) - 1);
         items[count].command_id = FN_CMD_CTX_SEND_DESKTOP;
         items[count].flags = 0;
         items[count].accel_key = 0;
@@ -1466,21 +1478,21 @@ static void fm_show_context_menu(filemanager_t *fm, int16_t sx, int16_t sy,
         items[count] = (menu_item_t){ "", 0, MIF_SEPARATOR, 0 };
         count++;
 
-        strncpy(items[count].text, "Delete", sizeof(items[0].text));
+        strncpy(items[count].text, L(STR_FM_DELETE), sizeof(items[0].text) - 1);
         items[count].command_id = FN_CMD_CTX_DELETE;
         items[count].flags = 0;
         items[count].accel_key = 0;
         count++;
 
         if (count < MENU_POPUP_MAX) {
-            strncpy(items[count].text, "Rename", sizeof(items[0].text));
+            strncpy(items[count].text, L(STR_FM_RENAME), sizeof(items[0].text) - 1);
             items[count].command_id = FN_CMD_CTX_RENAME;
             items[count].flags = 0;
             items[count].accel_key = 0;
             count++;
         }
     } else {
-        strncpy(items[count].text, "Paste", sizeof(items[0].text));
+        strncpy(items[count].text, L(STR_FM_PASTE), sizeof(items[0].text) - 1);
         items[count].command_id = FN_CMD_CTX_PASTE;
         items[count].flags = (fn_clipboard.count == 0) ? MIF_DISABLED : 0;
         items[count].accel_key = 0;
@@ -1489,7 +1501,7 @@ static void fm_show_context_menu(filemanager_t *fm, int16_t sx, int16_t sy,
         items[count] = (menu_item_t){ "", 0, MIF_SEPARATOR, 0 };
         count++;
 
-        strncpy(items[count].text, "New Folder", sizeof(items[0].text));
+        strncpy(items[count].text, L(STR_FM_NEW_FOLDER), sizeof(items[0].text) - 1);
         items[count].command_id = FN_CMD_CTX_NEW_FOLDER;
         items[count].flags = 0;
         items[count].accel_key = 0;
@@ -1498,7 +1510,7 @@ static void fm_show_context_menu(filemanager_t *fm, int16_t sx, int16_t sy,
         items[count] = (menu_item_t){ "", 0, MIF_SEPARATOR, 0 };
         count++;
 
-        strncpy(items[count].text, "Refresh", sizeof(items[0].text));
+        strncpy(items[count].text, L(STR_FM_REFRESH), sizeof(items[0].text) - 1);
         items[count].command_id = FN_CMD_CTX_REFRESH;
         items[count].flags = 0;
         items[count].accel_key = 0;
@@ -1864,7 +1876,9 @@ static bool fm_event(hwnd_t hwnd, const window_event_t *event) {
             if (new_tip != fm->tooltip_btn) {
                 fm->tooltip_btn = new_tip;
                 fm->tooltip_hover_tick = xTaskGetTickCount();
-                fm_invalidate(fm, FM_DIRTY_TOOLBAR);
+                /* Don't invalidate here — tooltip appears after a delay
+                 * and is drawn as a compositor overlay.  Invalidating
+                 * causes scrollbar flicker from full window repaint. */
             }
         }
         return true;
@@ -2160,7 +2174,7 @@ static bool fm_event(hwnd_t hwnd, const window_event_t *event) {
 
         /* Help menu */
         case FN_CMD_ABOUT:
-            dialog_show(hwnd, "About Navigator",
+            dialog_show(hwnd, L(STR_ABOUT_NAVIGATOR),
                         "FRANK Navigator\n\nFRANK OS v" FRANK_VERSION_STR
                         "\n(c) 2026 Mikhail Matveev\n"
                         "<xtreme@rh1.tech>\n"
@@ -2184,6 +2198,75 @@ static bool fm_event(hwnd_t hwnd, const window_event_t *event) {
 /*==========================================================================
  * Window creation
  *=========================================================================*/
+
+/* Set up (or rebuild) menu bar with localized strings.
+ * Heap-allocated to avoid ~800 byte stack frame. */
+static void fm_setup_menu(filemanager_t *fm) {
+    menu_bar_t *bar = (menu_bar_t *)pvPortMalloc(sizeof(menu_bar_t));
+    if (!bar) return;
+    memset(bar, 0, sizeof(*bar));
+    bar->menu_count = 4;
+
+    /* File menu */
+    strncpy(bar->menus[0].title, L(STR_FILE), sizeof(bar->menus[0].title) - 1);
+    bar->menus[0].accel_key = 0x09; /* HID F */
+    bar->menus[0].item_count = 6;
+    strncpy(bar->menus[0].items[0].text, L(STR_FM_NEW_FOLDER_MENU), sizeof(bar->menus[0].items[0].text) - 1);
+    bar->menus[0].items[0].command_id = FN_CMD_NEW_FOLDER;
+    bar->menus[0].items[1].flags = MIF_SEPARATOR;
+    strncpy(bar->menus[0].items[2].text, L(STR_FM_DELETE_MENU), sizeof(bar->menus[0].items[2].text) - 1);
+    bar->menus[0].items[2].command_id = FN_CMD_DELETE;
+    strncpy(bar->menus[0].items[3].text, L(STR_FM_RENAME_MENU), sizeof(bar->menus[0].items[3].text) - 1);
+    bar->menus[0].items[3].command_id = FN_CMD_RENAME;
+    bar->menus[0].items[3].accel_key = 0x3B;
+    bar->menus[0].items[4].flags = MIF_SEPARATOR;
+    strncpy(bar->menus[0].items[5].text, L(STR_FM_CLOSE_MENU), sizeof(bar->menus[0].items[5].text) - 1);
+    bar->menus[0].items[5].command_id = FN_CMD_CLOSE;
+
+    /* Edit menu */
+    strncpy(bar->menus[1].title, L(STR_EDIT), sizeof(bar->menus[1].title) - 1);
+    bar->menus[1].accel_key = 0x08; /* HID E */
+    bar->menus[1].item_count = 5;
+    strncpy(bar->menus[1].items[0].text, L(STR_FM_CUT_MENU), sizeof(bar->menus[1].items[0].text) - 1);
+    bar->menus[1].items[0].command_id = FN_CMD_CUT;
+    bar->menus[1].items[0].accel_key = 0x1B;
+    strncpy(bar->menus[1].items[1].text, L(STR_FM_COPY_MENU), sizeof(bar->menus[1].items[1].text) - 1);
+    bar->menus[1].items[1].command_id = FN_CMD_COPY;
+    bar->menus[1].items[1].accel_key = 0x06;
+    strncpy(bar->menus[1].items[2].text, L(STR_FM_PASTE_MENU), sizeof(bar->menus[1].items[2].text) - 1);
+    bar->menus[1].items[2].command_id = FN_CMD_PASTE;
+    bar->menus[1].items[2].accel_key = 0x19;
+    bar->menus[1].items[3].flags = MIF_SEPARATOR;
+    strncpy(bar->menus[1].items[4].text, L(STR_FM_SELALL_MENU), sizeof(bar->menus[1].items[4].text) - 1);
+    bar->menus[1].items[4].command_id = FN_CMD_SELECT_ALL;
+    bar->menus[1].items[4].accel_key = 0x04;
+
+    /* View menu */
+    strncpy(bar->menus[2].title, L(STR_VIEW), sizeof(bar->menus[2].title) - 1);
+    bar->menus[2].accel_key = 0x19; /* HID V */
+    bar->menus[2].item_count = 5;
+    strncpy(bar->menus[2].items[0].text, L(STR_FM_LARGE_ICONS), sizeof(bar->menus[2].items[0].text) - 1);
+    bar->menus[2].items[0].command_id = FN_CMD_LARGE_ICONS;
+    strncpy(bar->menus[2].items[1].text, L(STR_FM_SMALL_ICONS), sizeof(bar->menus[2].items[1].text) - 1);
+    bar->menus[2].items[1].command_id = FN_CMD_SMALL_ICONS;
+    strncpy(bar->menus[2].items[2].text, L(STR_FM_LIST), sizeof(bar->menus[2].items[2].text) - 1);
+    bar->menus[2].items[2].command_id = FN_CMD_LIST;
+    bar->menus[2].items[3].flags = MIF_SEPARATOR;
+    strncpy(bar->menus[2].items[4].text, L(STR_FM_REFRESH_MENU), sizeof(bar->menus[2].items[4].text) - 1);
+    bar->menus[2].items[4].command_id = FN_CMD_REFRESH;
+    bar->menus[2].items[4].accel_key = 0x3E;
+
+    /* Help menu */
+    strncpy(bar->menus[3].title, L(STR_HELP), sizeof(bar->menus[3].title) - 1);
+    bar->menus[3].accel_key = 0x0B; /* HID H */
+    bar->menus[3].item_count = 1;
+    strncpy(bar->menus[3].items[0].text, L(STR_FM_ABOUT_MENU), sizeof(bar->menus[3].items[0].text) - 1);
+    bar->menus[3].items[0].command_id = FN_CMD_ABOUT;
+    bar->menus[3].items[0].accel_key = 0x3A;
+
+    menu_set(fm->hwnd, bar);
+    vPortFree(bar);
+}
 
 hwnd_t filemanager_create(const char *initial_path) {
     filemanager_t *fm = (filemanager_t *)pvPortMalloc(sizeof(filemanager_t));
@@ -2230,72 +2313,7 @@ hwnd_t filemanager_create(const char *initial_path) {
         win->user_data = fm;
     }
 
-    /* Set up menu bar — heap-allocated to avoid ~800 byte stack frame */
-    menu_bar_t *bar = (menu_bar_t *)pvPortMalloc(sizeof(menu_bar_t));
-    if (bar) {
-        memset(bar, 0, sizeof(*bar));
-        bar->menu_count = 4;
-
-        /* File menu */
-        strncpy(bar->menus[0].title, "File", sizeof(bar->menus[0].title));
-        bar->menus[0].accel_key = 0x09; /* HID F */
-        bar->menus[0].item_count = 6;
-        strncpy(bar->menus[0].items[0].text, "New Folder", 20);
-        bar->menus[0].items[0].command_id = FN_CMD_NEW_FOLDER;
-        bar->menus[0].items[1].flags = MIF_SEPARATOR;
-        strncpy(bar->menus[0].items[2].text, "Delete     Del", 20);
-        bar->menus[0].items[2].command_id = FN_CMD_DELETE;
-        strncpy(bar->menus[0].items[3].text, "Rename      F2", 20);
-        bar->menus[0].items[3].command_id = FN_CMD_RENAME;
-        bar->menus[0].items[3].accel_key = 0x3B;
-        bar->menus[0].items[4].flags = MIF_SEPARATOR;
-        strncpy(bar->menus[0].items[5].text, "Close", 20);
-        bar->menus[0].items[5].command_id = FN_CMD_CLOSE;
-
-        /* Edit menu */
-        strncpy(bar->menus[1].title, "Edit", sizeof(bar->menus[1].title));
-        bar->menus[1].accel_key = 0x08; /* HID E */
-        bar->menus[1].item_count = 5;
-        strncpy(bar->menus[1].items[0].text, "Cut    Ctrl+X", 20);
-        bar->menus[1].items[0].command_id = FN_CMD_CUT;
-        bar->menus[1].items[0].accel_key = 0x1B;
-        strncpy(bar->menus[1].items[1].text, "Copy   Ctrl+C", 20);
-        bar->menus[1].items[1].command_id = FN_CMD_COPY;
-        bar->menus[1].items[1].accel_key = 0x06;
-        strncpy(bar->menus[1].items[2].text, "Paste  Ctrl+V", 20);
-        bar->menus[1].items[2].command_id = FN_CMD_PASTE;
-        bar->menus[1].items[2].accel_key = 0x19;
-        bar->menus[1].items[3].flags = MIF_SEPARATOR;
-        strncpy(bar->menus[1].items[4].text, "SelAll Ctrl+A", 20);
-        bar->menus[1].items[4].command_id = FN_CMD_SELECT_ALL;
-        bar->menus[1].items[4].accel_key = 0x04;
-
-        /* View menu */
-        strncpy(bar->menus[2].title, "View", sizeof(bar->menus[2].title));
-        bar->menus[2].accel_key = 0x19; /* HID V */
-        bar->menus[2].item_count = 5;
-        strncpy(bar->menus[2].items[0].text, "Large Icons", 20);
-        bar->menus[2].items[0].command_id = FN_CMD_LARGE_ICONS;
-        strncpy(bar->menus[2].items[1].text, "Small Icons", 20);
-        bar->menus[2].items[1].command_id = FN_CMD_SMALL_ICONS;
-        strncpy(bar->menus[2].items[2].text, "List", 20);
-        bar->menus[2].items[2].command_id = FN_CMD_LIST;
-        bar->menus[2].items[3].flags = MIF_SEPARATOR;
-        strncpy(bar->menus[2].items[4].text, "Refresh     F5", 20);
-        bar->menus[2].items[4].command_id = FN_CMD_REFRESH;
-        bar->menus[2].items[4].accel_key = 0x3E;
-
-        /* Help menu */
-        strncpy(bar->menus[3].title, "Help", sizeof(bar->menus[3].title));
-        bar->menus[3].accel_key = 0x0B; /* HID H */
-        bar->menus[3].item_count = 1;
-        strncpy(bar->menus[3].items[0].text, "About      F1", 20);
-        bar->menus[3].items[0].command_id = FN_CMD_ABOUT;
-        bar->menus[3].items[0].accel_key = 0x3A;
-
-        menu_set(fm->hwnd, bar);
-        vPortFree(bar);
-    }
+    fm_setup_menu(fm);
 
     /* Read initial directory */
     fm_refresh(fm);
@@ -2309,9 +2327,8 @@ hwnd_t filemanager_create(const char *initial_path) {
 
 void spawn_filemanager_window(void) {
     if (!sdcard_is_mounted()) {
-        dialog_show(wm_get_focus(), "Navigator",
-                    "No SD card detected.\n\n"
-                    "Please insert an SD card and restart.",
+        dialog_show(wm_get_focus(), L(STR_NAVIGATOR),
+                    L(STR_ERR_NO_SDCARD),
                     DLG_ICON_ERROR, DLG_BTN_OK);
         return;
     }

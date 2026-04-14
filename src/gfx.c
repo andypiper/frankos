@@ -219,7 +219,7 @@ void gfx_char_ui_bold(int x, int y, char c, uint8_t fg, uint8_t bg) {
 void gfx_text_ui_bold(int x, int y, const char *str, uint8_t fg, uint8_t bg) {
     while (*str) {
         gfx_char_ui_bold(x, y, *str, fg, bg);
-        x += FONT_UI_WIDTH;
+        x += FONT_UI_WIDTH + 1;   /* +1px letter spacing for bold */
         str++;
     }
 }
@@ -244,7 +244,7 @@ void gfx_text_ui_bold_clipped(int x, int y, const char *str,
                 }
             }
         }
-        x += FONT_UI_WIDTH;
+        x += FONT_UI_WIDTH + 1;   /* +1px letter spacing for bold */
         str++;
     }
 }

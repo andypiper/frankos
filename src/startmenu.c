@@ -27,6 +27,7 @@
 #include "ff.h"
 #include "run_dialog.h"
 #include "control_panel.h"
+#include "lang.h"
 #include "hardware/watchdog.h"
 #include "FreeRTOS.h"
 #include <string.h>
@@ -64,12 +65,12 @@ typedef struct {
     bool        hidden;     /* skip in rendering and input */
 } sm_item_t;
 
-static const sm_item_t sm_items[] = {
-    { "Programs",  0,               false, true,  false },
-    { "Settings",  SM_ID_SETTINGS,  false, true,  false },
-    { "Firmware",  SM_ID_FIRMWARE,  true,  true,  true  },
-    { "Run...",    SM_ID_RUN,       true,  false, false },
-    { "Reboot",    SM_ID_REBOOT,    true,  false, false },
+static sm_item_t sm_items[] = {
+    { NULL,        0,               false, true,  false },
+    { NULL,        SM_ID_SETTINGS,  false, true,  false },
+    { NULL,        SM_ID_FIRMWARE,  true,  true,  true  },
+    { NULL,        SM_ID_RUN,       true,  false, false },
+    { NULL,        SM_ID_REBOOT,    true,  false, false },
 };
 #define SM_ITEM_COUNT  (sizeof(sm_items) / sizeof(sm_items[0]))
 #define SM_IDX_PROGRAMS  0
@@ -367,7 +368,17 @@ static void compute_set_rect(void) {
  * Public API
  *=========================================================================*/
 
+/* Refresh text pointers from L() — called on init and language change */
+static void sm_refresh_text(void) {
+    sm_items[0].text = L(STR_PROGRAMS);
+    sm_items[1].text = L(STR_SETTINGS);
+    sm_items[2].text = L(STR_FIRMWARE);
+    sm_items[3].text = L(STR_RUN_DOTS);
+    sm_items[4].text = L(STR_REBOOT);
+}
+
 void startmenu_init(void) {
+    sm_refresh_text();
     fos_scan();
     uf2_scan();
 }
@@ -475,7 +486,7 @@ static void do_flash_firmware(int index) {
     gfx_fill_rect(160, 200, 320, 80, THEME_BUTTON_FACE);
     gfx_rect(160, 200, 320, 80, COLOR_DARK_GRAY);
     gfx_rect(161, 201, 318, 78, COLOR_WHITE);
-    gfx_text_ui(190, 230, "Flashing firmware...", COLOR_BLACK, THEME_BUTTON_FACE);
+    gfx_text_ui(190, 230, L(STR_FLASHING_FW), COLOR_BLACK, THEME_BUTTON_FACE);
     display_swap_buffers();
 
     load_firmware(uf2_files[index].path);
@@ -489,17 +500,12 @@ static void execute_fw_item(int index) {
 
     /* Build confirmation dialog text */
     snprintf(pending_fw_text, sizeof(pending_fw_text),
-             "Launch \"%s\"?\n\n"
-             "Screen will turn off during\n"
-             "flashing. Please wait.\n\n"
-             "To return to FRANK OS,\n"
-             "hold Space and press Reset.\n"
-             "If it fails, re-flash FOS.",
+             L(STR_LAUNCH_FW_MSG),
              uf2_files[index].name);
 
     pending_action = PENDING_FIRMWARE;
     pending_fw_index = index;
-    dialog_show(HWND_NULL, "Launch Firmware", pending_fw_text,
+    dialog_show(HWND_NULL, L(STR_LAUNCH_FIRMWARE), pending_fw_text,
                 DLG_ICON_WARNING, DLG_BTN_OK | DLG_BTN_CANCEL);
 }
 
@@ -514,8 +520,8 @@ static void execute_item(uint8_t id) {
         break;
     case SM_ID_REBOOT:
         pending_action = PENDING_REBOOT;
-        dialog_show(HWND_NULL, "Reboot",
-                    "Are you sure you want to\nreboot the system?",
+        dialog_show(HWND_NULL, L(STR_REBOOT),
+                    L(STR_REBOOT_CONFIRM),
                     DLG_ICON_WARNING, DLG_BTN_OK | DLG_BTN_CANCEL);
         break;
     }
@@ -640,6 +646,8 @@ static void draw_sidebar_logo(int sx, int sy, int bar_w, int bar_h) {
 
 void startmenu_draw(void) {
     if (!sm_open) return;
+    /* Refresh text pointers on every draw so language changes take effect */
+    sm_refresh_text();
 
     /* --- Save-under management for submenus ---
      * Track which submenu is open by identity (not just rect) so that
@@ -764,10 +772,10 @@ void startmenu_draw(void) {
                 label = fos_apps[i].name;
             } else if (i == fos_app_count) {
                 icon = fn_icon16_open_folder;
-                label = "Navigator";
+                label = L(STR_NAVIGATOR);
             } else {
                 icon = fn_icon16_terminal_get();
-                label = "Terminal";
+                label = L(STR_TERMINAL);
             }
             gfx_draw_icon_16(sub_x + 4, sy + 4, icon);
             gfx_text_ui(sub_x + 24, sy + (SM_ITEM_HEIGHT - FONT_UI_HEIGHT) / 2,
@@ -787,7 +795,7 @@ void startmenu_draw(void) {
         int fy = fw_y + 2;
         if (uf2_file_count == 0) {
             gfx_text_ui(fw_x + 6, fy + (SM_ITEM_HEIGHT - FONT_UI_HEIGHT) / 2,
-                        "(no .uf2 files)", COLOR_DARK_GRAY, THEME_BUTTON_FACE);
+                        L(STR_NO_UF2), COLOR_DARK_GRAY, THEME_BUTTON_FACE);
         } else {
             for (int i = 0; i < uf2_file_count; i++) {
                 bool hovered = (i == fw_hover);
@@ -819,7 +827,7 @@ void startmenu_draw(void) {
             gfx_fill_rect(set_x + 2, sy, set_w - 4, SM_ITEM_HEIGHT, bg);
             gfx_draw_icon_16(set_x + 4, sy + 4, cp_get_icon16());
             gfx_text_ui(set_x + 24, sy + (SM_ITEM_HEIGHT - FONT_UI_HEIGHT) / 2,
-                        "Control Panel", fg, bg);
+                        L(STR_CONTROL_PANEL), fg, bg);
         }
 
         /* Network item */
@@ -831,7 +839,7 @@ void startmenu_draw(void) {
             gfx_fill_rect(set_x + 2, sy, set_w - 4, SM_ITEM_HEIGHT, bg);
             gfx_draw_icon_16(set_x + 4, sy + 4, net_icon16_connect_get());
             gfx_text_ui(set_x + 24, sy + (SM_ITEM_HEIGHT - FONT_UI_HEIGHT) / 2,
-                        "Network", fg, bg);
+                        L(STR_NETWORK), fg, bg);
         }
     }
 
@@ -853,7 +861,7 @@ void startmenu_draw(void) {
                        sm_ctx_w - 4, SM_CTX_ITEM_H, bg);
         gfx_text_ui(sm_ctx_x + 6,
                     sm_ctx_y + 2 + (SM_CTX_ITEM_H - FONT_UI_HEIGHT) / 2,
-                    "Send to Desktop", fg, bg);
+                    L(STR_SEND_TO_DESKTOP), fg, bg);
     }
 }
 

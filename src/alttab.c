@@ -10,6 +10,7 @@
  */
 
 #include "alttab.h"
+#include "lang.h"
 #include "window.h"
 #include "swap.h"
 #include "gfx.h"
@@ -122,7 +123,7 @@ static void build_list(void) {
         at_entry_t *e = &at_entries[at_count];
         e->hwnd = HWND_NULL;  /* sentinel: means "desktop" */
         e->icon = desktop_get_icon32();
-        strncpy(e->title, "Desktop", sizeof(e->title) - 1);
+        strncpy(e->title, L(STR_ALTTAB_DESKTOP), sizeof(e->title) - 1);
         e->title[sizeof(e->title) - 1] = '\0';
         at_count++;
     }

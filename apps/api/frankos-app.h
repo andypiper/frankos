@@ -1058,6 +1058,38 @@ static inline void midi_opl_free(midi_opl_t *ctx) {
     ((fn_t)_sys_table_ptrs[511])(ctx);
 }
 
+/* 554: wd_radio — Win95-style radio button */
+static inline void wd_radio(int16_t x, int16_t y, const char *label,
+                             bool selected) {
+    typedef void (*fn_t)(int16_t, int16_t, const char*, bool);
+    ((fn_t)_sys_table_ptrs[554])(x, y, label, selected);
+}
+
+/* ========================================================================
+ * Localization API (indices 551–553)
+ * ======================================================================== */
+
+#define LANG_EN  0
+#define LANG_RU  1
+
+/* 551: lang_get */
+static inline uint8_t lang_get(void) {
+    typedef uint8_t (*fn_t)(void);
+    return ((fn_t)_sys_table_ptrs[551])();
+}
+
+/* 552: L — get localized string by ID */
+static inline const char *L(int str_id) {
+    typedef const char *(*fn_t)(int);
+    return ((fn_t)_sys_table_ptrs[552])(str_id);
+}
+
+/* 553: lang_set */
+static inline void lang_set(uint8_t lang) {
+    typedef void (*fn_t)(uint8_t);
+    ((fn_t)_sys_table_ptrs[553])(lang);
+}
+
 #ifdef __cplusplus
 }
 #endif

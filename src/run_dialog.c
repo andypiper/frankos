@@ -10,6 +10,7 @@
  */
 
 #include "run_dialog.h"
+#include "lang.h"
 #include "controls.h"
 #include "window.h"
 #include "window_event.h"
@@ -64,14 +65,21 @@ extern const uint8_t icon_info_32x32[1024];
 /* "Open:" label and text field */
 #define RD_LABEL_X       8
 #define RD_LABEL_Y      42          /* vertically centred with field */
-#define RD_FIELD_X      46
+#define RD_FIELD_X_BASE 46
 #define RD_FIELD_Y      38
-#define RD_FIELD_W     240
 #define RD_FIELD_H      20
-
-/* Dropdown toggle button (immediately right of field) */
-#define RD_DROP_BTN_X   (RD_FIELD_X + RD_FIELD_W + 2)
 #define RD_DROP_BTN_W   14
+#define RD_FIELD_RIGHT  (RD_CLIENT_W - 8)  /* right edge of field + dropdown */
+/* Compute field X at runtime to accommodate longer labels */
+static inline int rd_field_x(void) {
+    int lw = (int)strlen(L(STR_OPEN_LABEL)) * FONT_UI_WIDTH + 4;
+    int fx = RD_LABEL_X + lw;
+    if (fx < RD_FIELD_X_BASE) fx = RD_FIELD_X_BASE;
+    return fx;
+}
+#define RD_FIELD_X      rd_field_x()
+#define RD_FIELD_W      (RD_FIELD_RIGHT - RD_FIELD_X - RD_DROP_BTN_W - 2)
+#define RD_DROP_BTN_X   (RD_FIELD_X + RD_FIELD_W + 2)
 
 /* Separator above buttons */
 #define RD_SEP_Y        67
@@ -311,10 +319,8 @@ static void rd_execute(void) {
     char path[RD_CMD_MAX];
 
     if (!sdcard_is_mounted()) {
-        dialog_show(HWND_NULL, "Run",
-                    "No SD card mounted.\n"
-                    "Please insert an SD card\n"
-                    "and try again.",
+        dialog_show(HWND_NULL, L(STR_RUN),
+                    L(STR_ERR_NO_SDCARD),
                     DLG_ICON_ERROR, DLG_BTN_OK);
         rd_err_pending = true;
         return;
@@ -322,12 +328,8 @@ static void rd_execute(void) {
 
     if (!rd_resolve_path(rd_buf, path)) {
         char msg[128];
-        snprintf(msg, sizeof(msg),
-                 "Cannot find '%s'.\n\n"
-                 "Make sure the name is correct,\n"
-                 "then try again.",
-                 rd_buf);
-        dialog_show(HWND_NULL, "Run", msg, DLG_ICON_ERROR, DLG_BTN_OK);
+        snprintf(msg, sizeof(msg), L(STR_ERR_FILE_NOT_FOUND), rd_buf);
+        dialog_show(HWND_NULL, L(STR_RUN), msg, DLG_ICON_ERROR, DLG_BTN_OK);
         rd_err_pending = true;
         return;
     }
@@ -391,18 +393,31 @@ static void rd_paint(hwnd_t hwnd) {
     /* ------------------------------------------------------------------ */
     /* Description text (two lines, right of icon)                        */
     /* ------------------------------------------------------------------ */
-    wd_text_ui(RD_TEXT_X, RD_TEXT_Y,
-               "Type the name of a program, folder,",
-               COLOR_BLACK, THEME_BUTTON_FACE);
-    wd_text_ui(RD_TEXT_X, RD_TEXT_Y + FONT_UI_HEIGHT,
-               "document, and FRANK OS will open it.",
-               COLOR_BLACK, THEME_BUTTON_FACE);
+    /* Draw description multi-line (split on \n) */
+    {
+        const char *desc = L(STR_RUN_DESC);
+        int dy = RD_TEXT_Y;
+        while (*desc) {
+            /* Find end of line */
+            const char *nl = desc;
+            while (*nl && *nl != '\n') nl++;
+            /* Draw this line */
+            char line[64];
+            int len = (int)(nl - desc);
+            if (len >= (int)sizeof(line)) len = sizeof(line) - 1;
+            memcpy(line, desc, len);
+            line[len] = '\0';
+            wd_text_ui(RD_TEXT_X, dy, line, COLOR_BLACK, THEME_BUTTON_FACE);
+            dy += FONT_UI_HEIGHT;
+            desc = *nl ? nl + 1 : nl;
+        }
+    }
 
     /* ------------------------------------------------------------------ */
     /* "Open:" label                                                       */
     /* ------------------------------------------------------------------ */
     wd_text_ui(RD_LABEL_X, RD_LABEL_Y,
-               "Open:", COLOR_BLACK, THEME_BUTTON_FACE);
+               L(STR_OPEN_LABEL), COLOR_BLACK, THEME_BUTTON_FACE);
 
     /* ------------------------------------------------------------------ */
     /* Combined combobox: single sunken border, text area left, arrow btn */
@@ -502,13 +517,13 @@ static void rd_paint(hwnd_t hwnd) {
 
         /* Buttons */
         wd_button(RD_BTN_OK_X,     RD_BTN_Y, RD_BTN_W, RD_BTN_H,
-                  "OK",
+                  L(STR_OK),
                   rd_focus == RD_FOCUS_OK,     rd_btn_pressed == 0);
         wd_button(RD_BTN_CANCEL_X, RD_BTN_Y, RD_BTN_W, RD_BTN_H,
-                  "Cancel",
+                  L(STR_CANCEL),
                   rd_focus == RD_FOCUS_CANCEL, rd_btn_pressed == 1);
         wd_button(RD_BTN_BROWSE_X, RD_BTN_Y, RD_BTN_W, RD_BTN_H,
-                  "Browse...",
+                  L(STR_BROWSE),
                   rd_focus == RD_FOCUS_BROWSE, rd_btn_pressed == 2);
     }
 }
@@ -867,7 +882,7 @@ do_browse:
                 /* Release modal so the file dialog can take over */
                 wm_clear_modal();
                 rd_waiting_browse = true;
-                file_dialog_open(rd_hwnd, "Browse",
+                file_dialog_open(rd_hwnd, L(STR_BROWSE),
                                  "/fos", NULL);
             } else {
                 wm_invalidate(rd_hwnd);
@@ -934,7 +949,7 @@ void run_dialog_open(void) {
 
     rd_hwnd = wm_create_window(px, py,
                                 (int16_t)outer_w, (int16_t)outer_h,
-                                "Run",
+                                L(STR_RUN),
                                 WSTYLE_DIALOG,
                                 rd_event, rd_paint);
     if (rd_hwnd == HWND_NULL) return;

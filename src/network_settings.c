@@ -10,6 +10,7 @@
  */
 
 #include "network_settings.h"
+#include "lang.h"
 #include "netcard.h"
 #include "wifi_config.h"
 #include "window.h"
@@ -64,6 +65,7 @@ typedef struct {
     uint8_t conn_dots;          /* animation: 0-3 dots */
     TimerHandle_t conn_timer;   /* 500ms timer for dot animation */
     scrollbar_t vscroll;        /* vertical scrollbar for network list */
+    int8_t  btn_pressed;        /* -1=none, 0..2=which button pressed */
 } ns_state_t;
 
 /* Heap-allocated to save BSS — allocated on create, freed on close */
@@ -130,9 +132,8 @@ static void ns_join_done(bool success) {
         taskbar_invalidate();
     } else {
         /* Show error dialog */
-        dialog_show(ns.hwnd, "Network",
-                    "Connection failed.\n\n"
-                    "Check the password and try again.",
+        dialog_show(ns.hwnd, L(STR_NETWORK),
+                    L(STR_NET_CONN_FAILED),
                     DLG_ICON_ERROR, DLG_BTN_OK);
     }
 }
@@ -279,10 +280,18 @@ static bool ns_event(hwnd_t hwnd, const window_event_t *ev) {
             ns.selected = row;
             wm_invalidate(hwnd);
         }
+        /* Button press animation */
+        int btn_down = ns_btn_hit(ev->mouse.x, ev->mouse.y);
+        if (btn_down >= 0) {
+            nsp->btn_pressed = (int8_t)btn_down;
+            wm_invalidate(hwnd);
+        }
         return true;
     }
 
     case WM_LBUTTONUP: {
+        nsp->btn_pressed = -1;
+        wm_invalidate(hwnd);
         int btn = ns_btn_hit(ev->mouse.x, ev->mouse.y);
         if (btn == BTN_SCAN && !ns.scanning && !ns.connecting) {
             ns_start_scan();
@@ -300,8 +309,8 @@ static bool ns_event(hwnd_t hwnd, const window_event_t *ev) {
             } else {
                 /* Need password */
                 dialog_input_set_mask(true);
-                dialog_input_show(hwnd, "WiFi Password",
-                                  "Enter password:", NULL, 64);
+                dialog_input_show(hwnd, L(STR_WIFI_PASSWORD),
+                                  L(STR_ENTER_PASSWORD), NULL, 64);
             }
         } else if (btn == BTN_DISCONNECT && netcard_wifi_connected()) {
             netcard_request_quit(ns_quit_done);
@@ -357,22 +366,14 @@ static bool ns_event(hwnd_t hwnd, const window_event_t *ev) {
 static void ns_draw_button(int btn, int cw, const char *label, bool enabled) {
     int bx, by, bw, bh;
     ns_btn_rect(btn, cw, &bx, &by, &bw, &bh);
-
-    /* Raised button style */
-    wd_fill_rect(bx, by, bw, bh, THEME_BUTTON_FACE);
-    wd_hline(bx, by, bw, COLOR_WHITE);
-    wd_vline(bx, by, bh, COLOR_WHITE);
-    wd_hline(bx, by + bh - 1, bw, COLOR_BLACK);
-    wd_vline(bx + bw - 1, by, bh, COLOR_BLACK);
-    wd_hline(bx + 1, by + bh - 2, bw - 2, COLOR_DARK_GRAY);
-    wd_vline(bx + bw - 2, by + 1, bh - 2, COLOR_DARK_GRAY);
-
-    int tw = (int)strlen(label) * FONT_UI_WIDTH;
-    int tx = bx + (bw - tw) / 2;
-    int ty = by + (bh - FONT_UI_HEIGHT) / 2;
-    wd_text_ui(tx, ty, label,
-               enabled ? COLOR_BLACK : COLOR_DARK_GRAY,
-               THEME_BUTTON_FACE);
+    bool pressed = (nsp->btn_pressed == btn);
+    wd_button(bx, by, bw, bh, label, false, pressed);
+    if (!enabled && !pressed) {
+        int tw = (int)strlen(label) * FONT_UI_WIDTH;
+        int tx = bx + (bw - tw) / 2;
+        int ty = by + (bh - FONT_UI_HEIGHT) / 2;
+        wd_text_ui(tx, ty, label, COLOR_DARK_GRAY, THEME_BUTTON_FACE);
+    }
 }
 
 static void ns_paint(hwnd_t hwnd) {
@@ -389,20 +390,20 @@ static void ns_paint(hwnd_t hwnd) {
         char status[64];
         const char *dots = &"..."[3 - ns.conn_dots]; /* "", ".", "..", "..." */
         if (ns.selected >= 0 && ns.selected < ns.net_count)
-            snprintf(status, sizeof(status), "Connecting to %s%s",
+            snprintf(status, sizeof(status), L(STR_CONNECTING_TO),
                      ns.networks[ns.selected].ssid, dots);
         else
-            snprintf(status, sizeof(status), "Connecting%s", dots);
+            snprintf(status, sizeof(status), "%s%s", L(STR_CONNECTING), dots);
         wd_text_ui(8, 6, status, COLOR_BLACK, THEME_BUTTON_FACE);
     } else if (netcard_wifi_connected()) {
         char status[80];
-        snprintf(status, sizeof(status), "Connected to: %s (%s)",
+        snprintf(status, sizeof(status), L(STR_CONNECTED_TO),
                  wifi_config_get()->ssid, netcard_wifi_ip());
         wd_text_ui(8, 6, status, COLOR_BLACK, THEME_BUTTON_FACE);
     } else if (!netcard_is_available()) {
-        wd_text_ui(8, 6, "No network adapter detected", COLOR_DARK_GRAY, THEME_BUTTON_FACE);
+        wd_text_ui(8, 6, L(STR_NO_ADAPTER), COLOR_DARK_GRAY, THEME_BUTTON_FACE);
     } else {
-        wd_text_ui(8, 6, "Not connected", COLOR_BLACK, THEME_BUTTON_FACE);
+        wd_text_ui(8, 6, L(STR_NOT_CONNECTED), COLOR_BLACK, THEME_BUTTON_FACE);
     }
 
     /* Separator */
@@ -410,9 +411,9 @@ static void ns_paint(hwnd_t hwnd) {
     wd_hline(4, 19, cw - 8, COLOR_WHITE);
 
     /* Column headers */
-    wd_text_ui(8, 22, "Network", COLOR_BLACK, THEME_BUTTON_FACE);
-    wd_text_ui(5 + list_content_w - 90, 22, "Signal", COLOR_BLACK, THEME_BUTTON_FACE);
-    wd_text_ui(5 + list_content_w - 40, 22, "Type", COLOR_BLACK, THEME_BUTTON_FACE);
+    wd_text_ui(8, 22, L(STR_HDR_NETWORK), COLOR_BLACK, THEME_BUTTON_FACE);
+    wd_text_ui(5 + list_content_w - 90, 22, L(STR_HDR_SIGNAL), COLOR_BLACK, THEME_BUTTON_FACE);
+    wd_text_ui(5 + list_content_w - 40, 22, L(STR_HDR_TYPE), COLOR_BLACK, THEME_BUTTON_FACE);
 
     /* Network list (sunken well) */
     int list_h = NS_VISIBLE_ROWS * NS_LIST_ROW_H;
@@ -425,10 +426,10 @@ static void ns_paint(hwnd_t hwnd) {
 
     if (ns.scanning) {
         wd_text_ui(8, NS_LIST_Y + list_h / 2 - FONT_UI_HEIGHT / 2,
-                   "Scanning...", COLOR_DARK_GRAY, COLOR_WHITE);
+                   L(STR_SCANNING), COLOR_DARK_GRAY, COLOR_WHITE);
     } else if (ns.net_count == 0) {
         wd_text_ui(8, NS_LIST_Y + list_h / 2 - FONT_UI_HEIGHT / 2,
-                   "No networks found. Click Scan.", COLOR_DARK_GRAY, COLOR_WHITE);
+                   L(STR_NO_NETWORKS), COLOR_DARK_GRAY, COLOR_WHITE);
     } else {
         for (int i = 0; i < NS_VISIBLE_ROWS && (i + ns.scroll_top) < ns.net_count; i++) {
             int ni = i + ns.scroll_top;
@@ -465,16 +466,16 @@ static void ns_paint(hwnd_t hwnd) {
 
     /* Buttons */
     bool can_act = netcard_is_available() && !ns.scanning && !ns.connecting;
-    ns_draw_button(BTN_SCAN, cw, "Scan", can_act);
+    ns_draw_button(BTN_SCAN, cw, L(STR_SCAN), can_act);
     if (ns.connecting) {
-        ns_draw_button(BTN_CONNECT, cw, "Cancel", true);
+        ns_draw_button(BTN_CONNECT, cw, L(STR_CANCEL), true);
     } else {
-        ns_draw_button(BTN_CONNECT, cw, "Connect",
+        ns_draw_button(BTN_CONNECT, cw, L(STR_CONNECT),
                        can_act && ns.selected >= 0 && ns.selected < ns.net_count);
     }
-    ns_draw_button(BTN_DISCONNECT, cw, "Disconnect",
+    ns_draw_button(BTN_DISCONNECT, cw, L(STR_DISCONNECT),
                    can_act && netcard_wifi_connected());
-    ns_draw_button(BTN_CLOSE, cw, "Close", true);
+    ns_draw_button(BTN_CLOSE, cw, L(STR_CLOSE), true);
 
     wd_end();
 }
@@ -487,10 +488,8 @@ hwnd_t network_settings_create(void) {
     extern void *pvPortMalloc(unsigned int);
 
     if (!netcard_is_available()) {
-        dialog_show(HWND_NULL, "Network",
-                    "No network adapter detected.\n\n"
-                    "Please insert a network adapter\n"
-                    "into your FRANK and reboot.",
+        dialog_show(HWND_NULL, L(STR_NETWORK),
+                    L(STR_ERR_NO_NET_ADAPTER),
                     DLG_ICON_ERROR, DLG_BTN_OK);
         return HWND_NULL;
     }
@@ -500,6 +499,7 @@ hwnd_t network_settings_create(void) {
     if (!nsp) return HWND_NULL;
     memset(&ns, 0, sizeof(ns));
     ns.selected = -1;
+    nsp->btn_pressed = -1;
 
     scrollbar_init(&ns.vscroll, false);
 
@@ -508,7 +508,7 @@ hwnd_t network_settings_create(void) {
 
     hwnd_t hwnd = wm_create_window(
         80, 40, w, h,
-        "Network", WSTYLE_DIALOG,
+        L(STR_NETWORK), WSTYLE_DIALOG,
         ns_event, ns_paint);
 
     if (hwnd == HWND_NULL) return HWND_NULL;

@@ -55,6 +55,7 @@
 #include "desktop.h"
 #include "ico.h"
 #include "netcard.h"
+#include "lang.h"
 #include <math.h>
 
 #include "sys/fcntl.h"
@@ -741,6 +742,9 @@ unsigned long __in_systable() __aligned(4096) sys_table_ptrs[] = {
     netcard_set_wifi_callback,    // 548
     netcard_resolve,              // 549
     netcard_ping,                 // 550
-    // TODO:
+    lang_get,                     // 551
+    L,                            // 552
+    lang_set,                     // 553
+    wd_radio,                     // 554
     0
 };

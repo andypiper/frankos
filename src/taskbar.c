@@ -14,6 +14,7 @@
 #include "swap.h"
 #include "snd.h"
 #include "netcard.h"
+#include "lang.h"
 #include "gfx.h"
 #include "font.h"
 #include "display.h"
@@ -190,11 +191,11 @@ void taskbar_draw(void) {
     if (start_open) {
         draw_sunken_button(start_x, BUTTON_Y, TASKBAR_START_W, BUTTON_HEIGHT);
         gfx_text_ui_bold(start_x + 12 + 1, BUTTON_Y + (BUTTON_HEIGHT - FONT_UI_HEIGHT) / 2 + 1,
-                         "Start", COLOR_BLACK, THEME_BUTTON_FACE);
+                         L(STR_START), COLOR_BLACK, THEME_BUTTON_FACE);
     } else {
         draw_raised_button(start_x, BUTTON_Y, TASKBAR_START_W, BUTTON_HEIGHT);
         gfx_text_ui_bold(start_x + 12, BUTTON_Y + (BUTTON_HEIGHT - FONT_UI_HEIGHT) / 2,
-                         "Start", COLOR_BLACK, THEME_BUTTON_FACE);
+                         L(STR_START), COLOR_BLACK, THEME_BUTTON_FACE);
     }
 
     /* Per-window task buttons */
@@ -413,11 +414,11 @@ bool taskbar_mouse_rclick(int16_t x, int16_t y) {
             tb_item_count = 0;
 
             if (win->state == WS_MINIMIZED) {
-                tb_items[tb_item_count++] = (tb_popup_item_t){ "Restore", TB_ID_RESTORE };
+                tb_items[tb_item_count++] = (tb_popup_item_t){ L(STR_RESTORE), TB_ID_RESTORE };
             } else {
-                tb_items[tb_item_count++] = (tb_popup_item_t){ "Minimize", TB_ID_MINIMIZE };
+                tb_items[tb_item_count++] = (tb_popup_item_t){ L(STR_MINIMIZE), TB_ID_MINIMIZE };
             }
-            tb_items[tb_item_count++] = (tb_popup_item_t){ "Close", TB_ID_CLOSE };
+            tb_items[tb_item_count++] = (tb_popup_item_t){ L(STR_CLOSE), TB_ID_CLOSE };
 
             /* Position popup above the clicked button */
             int menu_h = 4 + tb_item_count * TB_ITEM_HEIGHT;
@@ -632,7 +633,7 @@ void vol_popup_draw(void) {
     gfx_vline(px + pw - 2, py + 1, ph - 2, COLOR_DARK_GRAY);
 
     /* "Volume" label */
-    gfx_text_ui(px + (pw - 6 * 6) / 2, py + 4, "Volume",
+    gfx_text_ui(px + (pw - 6 * 6) / 2, py + 4, L(STR_VOLUME),
                 COLOR_BLACK, THEME_BUTTON_FACE);
 
     /* Sunken track */
@@ -675,7 +676,7 @@ void vol_popup_draw(void) {
     }
 
     gfx_text_ui(cx + VP_CHECK_SZ + 3, cy + (VP_CHECK_SZ - FONT_UI_HEIGHT) / 2,
-                "Mute", COLOR_BLACK, THEME_BUTTON_FACE);
+                L(STR_MUTE), COLOR_BLACK, THEME_BUTTON_FACE);
 }
 
 bool vol_popup_mouse(uint8_t type, int16_t x, int16_t y) {
@@ -798,7 +799,7 @@ static void net_popup_execute(uint8_t id) {
 void net_popup_draw(void) {
     if (!net_popup_open_flag) return;
 
-    static const char *labels[] = { "Settings", "Disconnect" };
+    const char *labels[] = { L(STR_SETTINGS), L(STR_DISCONNECT) };
     static const uint8_t ids[] = { NET_ID_SETTINGS, NET_ID_DISCONNECT };
     int menu_h = 4 + NET_POPUP_ITEMS * NET_ITEM_HEIGHT;
 

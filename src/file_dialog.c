@@ -10,6 +10,7 @@
  */
 
 #include "file_dialog.h"
+#include "lang.h"
 #include "window.h"
 #include "window_event.h"
 #include "window_draw.h"
@@ -418,7 +419,7 @@ static void fd_paint(hwnd_t hwnd) {
     (void)hwnd;
 
     /* === "Look in:" row === */
-    wd_text_ui(FD_PAD, FD_LOOKIN_Y, "Look in:",
+    wd_text_ui(FD_PAD, FD_LOOKIN_Y, L(STR_LOOK_IN),
                COLOR_BLACK, THEME_BUTTON_FACE);
 
     /* Sunken path field */
@@ -541,7 +542,7 @@ static void fd_paint(hwnd_t hwnd) {
 
     /* === "File name:" row === */
     wd_text_ui(FD_PAD, FD_FNAME_Y + (FD_FIELD_H - FONT_UI_HEIGHT) / 2,
-               "File name:", COLOR_BLACK, THEME_BUTTON_FACE);
+               L(STR_FILE_NAME), COLOR_BLACK, THEME_BUTTON_FACE);
     fd_draw_sunken(FD_FIELD_X, FD_FNAME_Y, FD_FIELD_W, FD_FIELD_H);
 
     if (fd_save_mode) {
@@ -584,12 +585,12 @@ static void fd_paint(hwnd_t hwnd) {
     }
 
     wd_button(FD_BTN_X, FD_FNAME_Y, FD_BTN_W, FD_BTN_H,
-              fd_save_mode ? "Save" : "Open",
+              fd_save_mode ? L(STR_SAVE) : L(STR_OPEN),
               fd_btn_focus == 1, fd_btn_pressed == 0);
 
     /* === "Files of type:" row === */
     wd_text_ui(FD_PAD, FD_FTYPE_Y + (FD_FIELD_H - FONT_UI_HEIGHT) / 2,
-               "Files of type:", COLOR_BLACK, THEME_BUTTON_FACE);
+               L(STR_FILES_OF_TYPE), COLOR_BLACK, THEME_BUTTON_FACE);
     fd_draw_sunken(FD_FIELD_X, FD_FTYPE_Y, FD_FIELD_W, FD_FIELD_H);
     {
         char ft[48];
@@ -606,13 +607,13 @@ static void fd_paint(hwnd_t hwnd) {
             }
             *o = '\0';
         } else {
-            snprintf(ft, sizeof(ft), "All Files (*.*)");
+            snprintf(ft, sizeof(ft), "%s", L(STR_FM_ALL_FILES));
         }
         wd_text_ui(FD_FIELD_X + 4,
                    FD_FTYPE_Y + (FD_FIELD_H - FONT_UI_HEIGHT) / 2,
                    ft, COLOR_BLACK, COLOR_WHITE);
     }
-    wd_button(FD_BTN_X, FD_FTYPE_Y, FD_BTN_W, FD_BTN_H, "Cancel",
+    wd_button(FD_BTN_X, FD_FTYPE_Y, FD_BTN_W, FD_BTN_H, L(STR_DLG_CANCEL),
               fd_btn_focus == 2, fd_btn_pressed == 1);
 }
 
@@ -666,7 +667,7 @@ static void fd_select_current(void) {
         FILINFO fno;
         if (f_stat(fd_result, &fno) == FR_OK) {
             fd_overwrite_pending = true;
-            dialog_show(fd_hwnd, "Confirm Save As",
+            dialog_show(fd_hwnd, L(STR_CONFIRM_SAVE_AS),
                         "File already exists.\nDo you want to replace it?",
                         DLG_ICON_WARNING,
                         DLG_BTN_YES | DLG_BTN_NO);

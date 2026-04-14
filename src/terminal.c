@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "psram.h"
+#include "lang.h"
 #include "cmd.h"
 #include "pico/platform.h"
 
@@ -280,7 +281,7 @@ static bool terminal_event(hwnd_t hwnd, const window_event_t *event) {
             terminal_force_close(t, hwnd);
             return true;
         case TCMD_HELP_ABOUT:
-            dialog_show(hwnd, "About Terminal",
+            dialog_show(hwnd, L(STR_ABOUT_TERMINAL),
                         "Terminal\n\nFRANK OS v" FRANK_VERSION_STR
                         "\n(c) 2026 Mikhail Matveev\n"
                         "<xtreme@rh1.tech>\n"
@@ -290,6 +291,11 @@ static bool terminal_event(hwnd_t hwnd, const window_event_t *event) {
         }
         return false;
 
+    case WM_SETFOCUS:
+        /* Rebuild menu so language changes take effect immediately */
+        terminal_setup_menu(t);
+        return false;  /* let default handling continue */
+
     case WM_CLOSE:
         terminal_force_close(t, hwnd);
         return true;
@@ -297,6 +303,33 @@ static bool terminal_event(hwnd_t hwnd, const window_event_t *event) {
     default:
         return false;
     }
+}
+
+/*==========================================================================
+ * Menu setup — called on create and language change
+ *=========================================================================*/
+
+void terminal_setup_menu(terminal_t *t) {
+    menu_bar_t bar;
+    memset(&bar, 0, sizeof(bar));
+    bar.menu_count = 2;
+
+    menu_def_t *file = &bar.menus[0];
+    strncpy(file->title, L(STR_FILE), sizeof(file->title) - 1);
+    file->accel_key = 0x09;
+    file->item_count = 1;
+    strncpy(file->items[0].text, L(STR_FM_EXIT), sizeof(file->items[0].text) - 1);
+    file->items[0].command_id = TCMD_FILE_EXIT;
+
+    menu_def_t *help = &bar.menus[1];
+    strncpy(help->title, L(STR_HELP), sizeof(help->title) - 1);
+    help->accel_key = 0x0B;
+    help->item_count = 1;
+    strncpy(help->items[0].text, L(STR_FM_ABOUT_MENU), sizeof(help->items[0].text) - 1);
+    help->items[0].command_id = TCMD_HELP_ABOUT;
+    help->items[0].accel_key = 0x3A;
+
+    menu_set(t->hwnd, &bar);
 }
 
 /*==========================================================================
@@ -363,6 +396,9 @@ hwnd_t terminal_create(void) {
     /* Create input semaphore */
     t->input_sem = xSemaphoreCreateCounting(64, 0);
 
+    /* Forward-declared below — sets up the menu bar with L() strings */
+    extern void terminal_setup_menu(terminal_t *t);
+
     /* Compute outer window size:
      * client = 560 x 320 (70 cols * 8px, 20 rows * 16px)
      * + title bar + menu bar + borders */
@@ -374,7 +410,7 @@ hwnd_t terminal_create(void) {
 
     t->hwnd = wm_create_window(
         10, 10, outer_w, outer_h,
-        "Terminal",
+        L(STR_TERMINAL),
         WF_CLOSABLE | WF_MOVABLE | WF_RESIZABLE | WF_BORDER | WF_MENUBAR | WF_FULLSCREENABLE,
         terminal_event,
         terminal_paint
@@ -394,31 +430,8 @@ hwnd_t terminal_create(void) {
         win->user_data = t;
     }
 
-    /* Attach menu bar: File (Exit), Help (About) */
-    {
-        menu_bar_t bar;
-        memset(&bar, 0, sizeof(bar));
-        bar.menu_count = 2;
-
-        /* File menu — Alt+F (HID 'F' = 0x09) */
-        menu_def_t *file = &bar.menus[0];
-        strncpy(file->title, "File", sizeof(file->title) - 1);
-        file->accel_key = 0x09;  /* HID_KEY_F */
-        file->item_count = 1;
-        strncpy(file->items[0].text, "Exit", sizeof(file->items[0].text) - 1);
-        file->items[0].command_id = TCMD_FILE_EXIT;
-
-        /* Help menu — Alt+H (HID 'H' = 0x0B) */
-        menu_def_t *help = &bar.menus[1];
-        strncpy(help->title, "Help", sizeof(help->title) - 1);
-        help->accel_key = 0x0B;  /* HID_KEY_H */
-        help->item_count = 1;
-        strncpy(help->items[0].text, "About      F1", sizeof(help->items[0].text) - 1);
-        help->items[0].command_id = TCMD_HELP_ABOUT;
-        help->items[0].accel_key = 0x3A;
-
-        menu_set(t->hwnd, &bar);
-    }
+    /* Attach menu bar */
+    terminal_setup_menu(t);
 
     /* Start cursor blink timer (500ms) — pass terminal_t* as timer ID */
     t->blink_timer = xTimerCreate("tblink", pdMS_TO_TICKS(500),

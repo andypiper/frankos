@@ -294,3 +294,47 @@ void wd_button(int16_t x, int16_t y, int16_t w, int16_t h,
         }
     }
 }
+
+/* Win95-style radio button: 12px circle + label */
+void wd_radio(int16_t x, int16_t y, const char *label, bool selected) {
+    if (!draw_ctx.active) return;
+
+    /* 12x12 radio button circle (Win95 style) */
+    int16_t cx = x, cy = y;
+    /* Outer ring: dark gray top-left, white bottom-right */
+    wd_hline(cx + 4, cy, 4, COLOR_DARK_GRAY);
+    wd_pixel(cx + 3, cy + 1, COLOR_DARK_GRAY);
+    wd_pixel(cx + 2, cy + 2, COLOR_DARK_GRAY);
+    wd_pixel(cx + 1, cy + 3, COLOR_DARK_GRAY);
+    wd_vline(cx, cy + 4, 4, COLOR_DARK_GRAY);
+    /* Inner ring: black top-left */
+    wd_hline(cx + 4, cy + 1, 4, COLOR_BLACK);
+    wd_pixel(cx + 3, cy + 2, COLOR_BLACK);
+    wd_pixel(cx + 2, cy + 3, COLOR_BLACK);
+    wd_vline(cx + 1, cy + 4, 4, COLOR_BLACK);
+    /* Outer ring bottom-right: white */
+    wd_hline(cx + 4, cy + 11, 4, COLOR_WHITE);
+    wd_pixel(cx + 8, cy + 10, COLOR_WHITE);
+    wd_pixel(cx + 9, cy + 9, COLOR_WHITE);
+    wd_pixel(cx + 10, cy + 8, COLOR_WHITE);
+    wd_vline(cx + 11, cy + 4, 4, COLOR_WHITE);
+    /* Inner ring bottom-right: light gray */
+    wd_hline(cx + 4, cy + 10, 4, COLOR_LIGHT_GRAY);
+    wd_pixel(cx + 8, cy + 9, COLOR_LIGHT_GRAY);
+    wd_pixel(cx + 9, cy + 8, COLOR_LIGHT_GRAY);
+    wd_vline(cx + 10, cy + 4, 4, COLOR_LIGHT_GRAY);
+    /* White fill inside */
+    wd_fill_rect(cx + 3, cy + 4, 6, 4, COLOR_WHITE);
+    wd_fill_rect(cx + 4, cy + 2, 4, 8, COLOR_WHITE);
+    wd_pixel(cx + 3, cy + 3, COLOR_WHITE);
+    wd_pixel(cx + 8, cy + 3, COLOR_WHITE);
+    wd_pixel(cx + 3, cy + 8, COLOR_WHITE);
+    wd_pixel(cx + 8, cy + 8, COLOR_WHITE);
+    /* Selected: black dot in center */
+    if (selected) {
+        wd_fill_rect(cx + 4, cy + 5, 4, 2, COLOR_BLACK);
+        wd_fill_rect(cx + 5, cy + 4, 2, 4, COLOR_BLACK);
+    }
+    /* Label text to the right */
+    wd_text_ui(x + 16, y, label, COLOR_BLACK, THEME_BUTTON_FACE);
+}
