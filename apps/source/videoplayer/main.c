@@ -15,6 +15,7 @@
 
 #include "m-os-api.h"
 #include "frankos-app.h"
+#include "lang.h"
 
 #undef switch
 #undef inline
@@ -459,9 +460,7 @@ static void process_input(void) {
 int main(int argc, char **argv) {
     if (argc < 2 || !argv[1] || !argv[1][0]) {
         dialog_show(HWND_NULL, "Video Player",
-                    "Open a .mpg or .str video\n"
-                    "file from Navigator to play.\n\n"
-                    "Space = Pause, Esc = Exit",
+                    L(STR_VP_OPEN_VIDEO),
                     DLG_ICON_INFO, DLG_BTN_OK);
         return 0;
     }
@@ -480,7 +479,7 @@ int main(int argc, char **argv) {
 
     app_globals_t *globals = (app_globals_t *)pvPortMalloc(sizeof(app_globals_t));
     if (!globals) {
-        dialog_show(HWND_NULL, "Video Player", "Not enough memory.",
+        dialog_show(HWND_NULL, "Video Player", L(STR_VP_NO_MEMORY),
                     DLG_ICON_ERROR, DLG_BTN_OK);
         return 1;
     }
@@ -502,7 +501,7 @@ int main(int argc, char **argv) {
     /* Open file */
     G->fil = (FIL *)pvPortMalloc(sizeof(FIL));
     if (!G->fil || f_open(G->fil, argv[1], FA_READ) != FR_OK) {
-        dialog_show(HWND_NULL, "Video Player", "Cannot open file.",
+        dialog_show(HWND_NULL, "Video Player", L(STR_VP_CANNOT_OPEN),
                     DLG_ICON_ERROR, DLG_BTN_OK);
         if (G->fil) vPortFree(G->fil);
         vPortFree(globals);
@@ -512,7 +511,7 @@ int main(int argc, char **argv) {
     /* Allocate shared audio buffer (used by both paths) */
     G->audio_buf = (int16_t *)pvPortMalloc(AUDIO_BUF_SAMPLES * 2 * sizeof(int16_t));
     if (!G->audio_buf) {
-        dialog_show(HWND_NULL, "Video Player", "Not enough memory for audio.",
+        dialog_show(HWND_NULL, "Video Player", L(STR_VP_NO_MEMORY),
                     DLG_ICON_ERROR, DLG_BTN_OK);
         f_close(G->fil); vPortFree(G->fil); vPortFree(globals);
         return 1;

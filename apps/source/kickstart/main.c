@@ -10,6 +10,7 @@
 #include "m-os-api.h"
 #include "frankos-app.h"
 #include "m-os-api-ff.h"
+#include "lang.h"
 
 /* ========================================================================
  * Local string helpers (not provided by the ELF runtime)
@@ -702,7 +703,7 @@ static void show_flash_dialog(hwnd_t hwnd, const char *name) {
                  "Already flashed, will reboot.", name);
         ks.flash_pending = true;
         ks.flash_index = ks.selected;
-        dialog_show(hwnd, "Launch Firmware", dlg_text,
+        dialog_show(hwnd, L(STR_KS_LAUNCH_FW), dlg_text,
                     DLG_ICON_INFO, DLG_BTN_OK | DLG_BTN_CANCEL);
     } else {
         snprintf(dlg_text, sizeof(dlg_text),
@@ -711,7 +712,7 @@ static void show_flash_dialog(hwnd_t hwnd, const char *name) {
                  "flashing. Please wait.", name);
         ks.flash_pending = true;
         ks.flash_index = ks.selected;
-        dialog_show(hwnd, "Flash Firmware", dlg_text,
+        dialog_show(hwnd, L(STR_KS_FLASH_FW), dlg_text,
                     DLG_ICON_WARNING, DLG_BTN_OK | DLG_BTN_CANCEL);
     }
 }
@@ -759,7 +760,7 @@ static bool event_handler(hwnd_t hwnd, const window_event_t *event) {
             return true;
         }
         if (id == CMD_ABOUT) {
-            dialog_show(hwnd, "About Kickstart",
+            dialog_show(hwnd, L(STR_KS_ABOUT),
                         "Kickstart\n\nFRANK OS v" FRANK_VERSION_STR
                         "\nUF2 Firmware Launcher\n"
                         "(c) 2026 Mikhail Matveev\n"
@@ -894,28 +895,30 @@ static bool event_handler(hwnd_t hwnd, const window_event_t *event) {
  * Menu definition
  * ======================================================================== */
 
-static const menu_bar_t menu_bar = {
-    .menu_count = 2,
-    .menus = {
-        {
-            .title = "File",
-            .accel_key = 0x09, /* HID 'F' — Alt+F */
-            .item_count = 2,
-            .items = {
-                { "Unload firmware", CMD_UNLOAD, 0, 0 },
-                { "Exit",            CMD_EXIT,   0, 0 },
-            }
-        },
-        {
-            .title = "Help",
-            .accel_key = 0x0B, /* HID 'H' — Alt+H */
-            .item_count = 1,
-            .items = {
-                { "About...  F1", CMD_ABOUT, 0, 0x3A },
-            }
-        },
-    }
-};
+static void setup_menu(hwnd_t hwnd) {
+    menu_bar_t bar;
+    memset(&bar, 0, sizeof(bar));
+    bar.menu_count = 2;
+
+    menu_def_t *file = &bar.menus[0];
+    strncpy(file->title, L(STR_FILE), sizeof(file->title) - 1);
+    file->accel_key = 0x09; /* HID 'F' — Alt+F */
+    file->item_count = 2;
+    strncpy(file->items[0].text, "Unload firmware", sizeof(file->items[0].text) - 1);
+    file->items[0].command_id = CMD_UNLOAD;
+    strncpy(file->items[1].text, L(STR_FM_EXIT), sizeof(file->items[1].text) - 1);
+    file->items[1].command_id = CMD_EXIT;
+
+    menu_def_t *help = &bar.menus[1];
+    strncpy(help->title, L(STR_HELP), sizeof(help->title) - 1);
+    help->accel_key = 0x0B; /* HID 'H' — Alt+H */
+    help->item_count = 1;
+    strncpy(help->items[0].text, L(STR_FM_ABOUT_MENU), sizeof(help->items[0].text) - 1);
+    help->items[0].command_id = CMD_ABOUT;
+    help->items[0].accel_key = 0x3A;
+
+    menu_set(hwnd, &bar);
+}
 
 /* ========================================================================
  * Entry point
@@ -1020,14 +1023,14 @@ static int run_direct(const char *path) {
         snprintf(dlg_text, sizeof(dlg_text),
                  "Launch \"%s\"?\n\n"
                  "Already flashed, will reboot.", name);
-        dialog_show(ks.hwnd, "Launch Firmware", dlg_text,
+        dialog_show(ks.hwnd, L(STR_KS_LAUNCH_FW), dlg_text,
                     DLG_ICON_INFO, DLG_BTN_OK | DLG_BTN_CANCEL);
     } else {
         snprintf(dlg_text, sizeof(dlg_text),
                  "Flash \"%s\"?\n\n"
                  "Screen will turn off during\n"
                  "flashing. Please wait.", name);
-        dialog_show(ks.hwnd, "Flash Firmware", dlg_text,
+        dialog_show(ks.hwnd, L(STR_KS_FLASH_FW), dlg_text,
                     DLG_ICON_WARNING, DLG_BTN_OK | DLG_BTN_CANCEL);
     }
 
@@ -1066,7 +1069,7 @@ int main(int argc, char **argv) {
                                 event_handler, paint);
     if (ks.hwnd == HWND_NULL) return 1;
 
-    menu_set(ks.hwnd, &menu_bar);
+    setup_menu(ks.hwnd);
     wm_show_window(ks.hwnd);
     wm_set_focus(ks.hwnd);
 

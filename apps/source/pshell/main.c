@@ -11,6 +11,7 @@
 #include "m-os-api.h"
 #undef switch
 #include "frankos-app.h"
+#include "lang.h"
 #include "pshell_vt100.h"
 #include "cc/cc.h"
 
@@ -48,18 +49,18 @@ static void setup_menu(hwnd_t hwnd) {
 
     /* File menu */
     menu_def_t *file = &bar.menus[0];
-    strncpy(file->title, "File", sizeof(file->title) - 1);
+    strncpy(file->title, L(STR_FILE), sizeof(file->title) - 1);
     file->accel_key = 0x09; /* Alt+F */
     file->item_count = 1;
-    strncpy(file->items[0].text, "Exit", sizeof(file->items[0].text) - 1);
+    strncpy(file->items[0].text, L(STR_FM_EXIT), sizeof(file->items[0].text) - 1);
     file->items[0].command_id = CMD_EXIT;
 
     /* Help menu */
     menu_def_t *help = &bar.menus[1];
-    strncpy(help->title, "Help", sizeof(help->title) - 1);
+    strncpy(help->title, L(STR_HELP), sizeof(help->title) - 1);
     help->accel_key = 0x0B; /* Alt+H */
     help->item_count = 1;
-    strncpy(help->items[0].text, "About      F1", sizeof(help->items[0].text) - 1);
+    strncpy(help->items[0].text, L(STR_FM_ABOUT_MENU), sizeof(help->items[0].text) - 1);
     help->items[0].command_id = CMD_ABOUT;
     help->items[0].accel_key = 0x3A;
 
@@ -95,7 +96,7 @@ static bool pshell_event(hwnd_t hwnd, const window_event_t *event) {
             return true;
         }
         if (event->command.id == CMD_ABOUT) {
-            dialog_show(hwnd, "About PShell",
+            dialog_show(hwnd, L(STR_PS_ABOUT),
                         "PShell\n\nFRANK OS v" FRANK_VERSION_STR
                         "\nPico Shell: shell, vi, C compiler\n"
                         "Based on pshell by Thomas Edison\n"

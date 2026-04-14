@@ -16,6 +16,7 @@
 
 #include "m-os-api.h"
 #include "frankos-app.h"
+#include "lang.h"
 
 #undef switch
 #undef inline
@@ -268,8 +269,7 @@ int main(int argc, char **argv) {
     /* Check for ROM path argument — show dialog if launched without one */
     if (argc < 2 || !argv[1] || !argv[1][0]) {
         dialog_show(HWND_NULL, "Dendy",
-                    "Open a .nes ROM file from\n"
-                    "the Navigator to play.",
+                    L(STR_DENDY_OPEN_ROM),
                     DLG_ICON_INFO, DLG_BTN_OK);
         return 0;
     }

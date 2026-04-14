@@ -17,6 +17,7 @@
 
 #include "m-os-api.h"
 #include "frankos-app.h"
+#include "lang.h"
 
 /*
  * m-os-api.h defines:
@@ -604,7 +605,7 @@ static void setup_menu(hwnd_t hwnd) {
     bar.menu_count = 2;
 
     menu_def_t *file = &bar.menus[0];
-    strncpy(file->title, "File", sizeof(file->title) - 1);
+    strncpy(file->title, L(STR_FILE), sizeof(file->title) - 1);
     file->accel_key = 0x09; /* HID 'F' — underlines F, enables Alt+F */
     file->item_count = 4;
 
@@ -617,15 +618,15 @@ static void setup_menu(hwnd_t hwnd) {
 
     file->items[2].flags = MIF_SEPARATOR;
 
-    strncpy(file->items[3].text, "Exit", 19);
+    strncpy(file->items[3].text, L(STR_FM_EXIT), 19);
     file->items[3].command_id = CMD_EXIT;
 
     /* Help menu */
     menu_def_t *help = &bar.menus[1];
-    strncpy(help->title, "Help", sizeof(help->title) - 1);
+    strncpy(help->title, L(STR_HELP), sizeof(help->title) - 1);
     help->accel_key = 0x0B; /* HID 'H' */
     help->item_count = 1;
-    strncpy(help->items[0].text, "About      F1", 19);
+    strncpy(help->items[0].text, L(STR_FM_ABOUT_MENU), 19);
     help->items[0].command_id = CMD_ABOUT;
     help->items[0].accel_key = 0x3A;
 
@@ -655,7 +656,7 @@ static bool handle_menu_command(hwnd_t hwnd, app_globals_t *g, int command_id) {
         return true;
     }
     if (command_id == CMD_ABOUT) {
-        dialog_show(hwnd, "About ZX Spectrum",
+        dialog_show(hwnd, L(STR_ZX_ABOUT),
                     "ZX Spectrum\n\nFRANK OS v" FRANK_VERSION_STR
                     "\n(c) 2026 Mikhail Matveev\n"
                     "<xtreme@rh1.tech>\n"

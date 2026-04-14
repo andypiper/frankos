@@ -12,6 +12,7 @@
 
 #include "m-os-api.h"
 #include "frankos-app.h"
+#include "lang.h"
 
 #undef switch
 #undef inline
@@ -82,7 +83,7 @@ void digger_setup_menu(void) {
 
     /* Game menu */
     menu_def_t *game = &bar.menus[0];
-    strncpy(game->title, "Game", sizeof(game->title) - 1);
+    strncpy(game->title, L(STR_MS_GAME), sizeof(game->title) - 1);
     game->accel_key = 0x0A; /* Alt+G */
     game->item_count = 6;
 
@@ -106,17 +107,17 @@ void digger_setup_menu(void) {
 
     game->items[4].flags = MIF_SEPARATOR;
 
-    strncpy(game->items[5].text, "Exit", sizeof(game->items[5].text) - 1);
+    strncpy(game->items[5].text, L(STR_FM_EXIT), sizeof(game->items[5].text) - 1);
     game->items[5].command_id = CMD_EXIT;
     game->items[5].accel_key = 0x43; /* F10 */
 
     /* Help menu */
     menu_def_t *help = &bar.menus[1];
-    strncpy(help->title, "Help", sizeof(help->title) - 1);
+    strncpy(help->title, L(STR_HELP), sizeof(help->title) - 1);
     help->accel_key = 0x0B; /* Alt+H */
     help->item_count = 1;
 
-    strncpy(help->items[0].text, "About      F1", sizeof(help->items[0].text) - 1);
+    strncpy(help->items[0].text, L(STR_FM_ABOUT_MENU), sizeof(help->items[0].text) - 1);
     help->items[0].command_id = CMD_ABOUT;
     help->items[0].accel_key = 0x3A;
 

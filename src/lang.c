@@ -274,6 +274,21 @@ static const char *str_en[] = {
     [STR_NT_PING]          = "Ping",
     [STR_NT_DNS]           = "DNS",
     [STR_NT_HOST]          = "Host:",
+
+    /* Kickstart */
+    [STR_KS_LAUNCH_FW]    = "Launch Firmware",
+    [STR_KS_FLASH_FW]     = "Flash Firmware",
+    [STR_KS_ABOUT]        = "About Kickstart",
+
+    /* Video Player */
+    [STR_VP_OPEN_VIDEO]    = "Open a .mpg or .str video\nfile from the SD card.",
+    [STR_VP_NO_MEMORY]     = "Not enough memory.",
+    [STR_VP_CANNOT_OPEN]   = "Cannot open file.",
+
+    /* ZX Spectrum / Dendy / PShell */
+    [STR_ZX_ABOUT]         = "About ZX Spectrum",
+    [STR_DENDY_OPEN_ROM]   = "Open a .nes ROM file from\nthe SD card.",
+    [STR_PS_ABOUT]         = "About PShell",
 };
 
 /* Russian string table (Win1251 encoded) */
@@ -541,6 +556,21 @@ static const char *str_ru[] = {
     [STR_NT_PING]          = "Пинг",
     [STR_NT_DNS]           = "DNS",
     [STR_NT_HOST]          = "Хост:",
+
+    /* Kickstart */
+    [STR_KS_LAUNCH_FW]    = "Запуск прошивки",
+    [STR_KS_FLASH_FW]     = "Прошить",
+    [STR_KS_ABOUT]        = "О Kickstart",
+
+    /* Video Player */
+    [STR_VP_OPEN_VIDEO]    = "Откройте файл .mpg или .str\nс SD-карты.",
+    [STR_VP_NO_MEMORY]     = "Недостаточно памяти.",
+    [STR_VP_CANNOT_OPEN]   = "Не удалось открыть файл.",
+
+    /* ZX Spectrum / Dendy / PShell */
+    [STR_ZX_ABOUT]         = "О ZX Spectrum",
+    [STR_DENDY_OPEN_ROM]   = "Откройте файл .nes ROM\nс SD-карты.",
+    [STR_PS_ABOUT]         = "О PShell",
 };
 
 uint8_t lang_get(void) {

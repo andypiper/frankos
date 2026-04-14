@@ -172,6 +172,15 @@ enum {
     /* NetTools */
     STR_NT_PING, STR_NT_DNS, STR_NT_HOST,
 
+    /* Kickstart */
+    STR_KS_LAUNCH_FW, STR_KS_FLASH_FW, STR_KS_ABOUT,
+
+    /* Video Player */
+    STR_VP_OPEN_VIDEO, STR_VP_NO_MEMORY, STR_VP_CANNOT_OPEN,
+
+    /* ZX Spectrum / Dendy / PShell */
+    STR_ZX_ABOUT, STR_DENDY_OPEN_ROM, STR_PS_ABOUT,
+
     STR_COUNT
 };
 
