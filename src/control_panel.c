@@ -1080,6 +1080,13 @@ static void lang_apply(void) {
     lang_set(lang_app.selected);
     settings_get()->input_toggle = lang_app.toggle;
     settings_save();
+    /* Update CP window title for new language */
+    window_t *cpw = wm_get_window(cp_state.hwnd);
+    if (cpw) {
+        strncpy(cpw->title, L(STR_CONTROL_PANEL), sizeof(cpw->title) - 1);
+        cpw->title[sizeof(cpw->title) - 1] = '\0';
+        cpw->flags |= WF_DIRTY | WF_FRAME_DIRTY;
+    }
     wm_destroy_window(lang_app.hwnd);
     taskbar_invalidate();
     wm_force_full_repaint();
@@ -1134,7 +1141,7 @@ static void lang_paint(hwnd_t hwnd) {
     /* Language label + radios */
     wd_text_ui(12, 10, L(STR_SELECT_LANGUAGE), COLOR_BLACK, THEME_BUTTON_FACE);
     wd_radio(12, 30, "English", lang_app.selected == LANG_EN);
-    wd_radio(12, 48, "\xD0\xF3\xF1\xF1\xEA\xE8\xE9", lang_app.selected == LANG_RU);
+    wd_radio(12, 48, "Русский", lang_app.selected == LANG_RU);
 
     /* Input toggle label + radios */
     wd_text_ui(12, 68, L(STR_INPUT_TOGGLE), COLOR_BLACK, THEME_BUTTON_FACE);

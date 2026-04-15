@@ -173,7 +173,7 @@ struct window {
     rect_t           restore_rect;
     uint8_t          bg_color;
     uint8_t          z_order;
-    char             title[24];
+    char             title[48];
     event_handler_t  event_handler;
     paint_handler_t  paint_handler;
     void            *user_data;

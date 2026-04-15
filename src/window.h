@@ -115,7 +115,7 @@ struct window {
     rect_t           restore_rect;    /* saved rect before maximize */
     uint8_t          bg_color;        /* client area background color */
     uint8_t          z_order;         /* position in z-stack (0=bottom) */
-    char             title[24];       /* null-terminated title string */
+    char             title[48];       /* null-terminated title string (UTF-8) */
     event_handler_t  event_handler;   /* event callback (may be NULL) */
     paint_handler_t  paint_handler;   /* paint callback (may be NULL) */
     void            *user_data;       /* opaque per-window data (e.g. terminal_t*) */
@@ -126,7 +126,7 @@ struct window {
 /* Size check — only meaningful on the 32-bit ARM target.
  * On 64-bit hosts (where clangd runs) pointers are 8 bytes. */
 #if defined(__arm__) || defined(__thumb__)
-_Static_assert(sizeof(window_t) <= 72, "window_t exceeds 72 bytes");
+_Static_assert(sizeof(window_t) <= 96, "window_t exceeds 96 bytes");
 #endif
 
 /*==========================================================================

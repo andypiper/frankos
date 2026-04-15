@@ -12,7 +12,7 @@
 #include "lang.h"
 
 /* App-local translations */
-enum { AL_MUSIC, AL_PLAY, AL_PAUSE, AL_STOP, AL_NEXT, AL_PREV, AL_SHUFFLE, AL_REPEAT, AL_ADD, AL_REMOVE, AL_OPEN_AUDIO, AL_ABOUT, AL_OPEN_MENU, AL_COUNT };
+enum { AL_MUSIC, AL_PLAY, AL_PAUSE, AL_STOP, AL_NEXT, AL_PREV, AL_SHUFFLE, AL_REPEAT, AL_ADD, AL_REMOVE, AL_OPEN_AUDIO, AL_ABOUT, AL_OPEN_MENU, AL_NO_TRACK, AL_PLAYING, AL_PAUSED, AL_STOPPED, AL_TRACKS, AL_COUNT };
 static const char *al_en[] = {
     [AL_MUSIC]      = "Music",
     [AL_PLAY]       = "Play",
@@ -27,21 +27,31 @@ static const char *al_en[] = {
     [AL_OPEN_AUDIO] = "Open Audio",
     [AL_ABOUT]      = "About FrankAmp",
     [AL_OPEN_MENU]  = "Open.. Ctrl+O",
+    [AL_NO_TRACK]   = "No track loaded",
+    [AL_PLAYING]    = "> Playing",
+    [AL_PAUSED]     = "|| Paused",
+    [AL_STOPPED]    = "  Stopped",
+    [AL_TRACKS]     = "tracks",
 };
 static const char *al_ru[] = {
-    [AL_MUSIC]      = "\xD0\x9C\xD1\x83\xD0\xB7\xD1\x8B\xD0\xBA\xD0\xB0",
-    [AL_PLAY]       = "\xD0\x92\xD0\xBE\xD1\x81\xD0\xBF\xD1\x80\xD0\xBE\xD0\xB8\xD0\xB7\xD0\xB2\xD0\xB5\xD1\x81\xD1\x82\xD0\xB8",
-    [AL_PAUSE]      = "\xD0\x9F\xD0\xB0\xD1\x83\xD0\xB7\xD0\xB0",
-    [AL_STOP]       = "\xD0\xA1\xD1\x82\xD0\xBE\xD0\xBF",
-    [AL_NEXT]       = "\xD0\xA1\xD0\xBB\xD0\xB5\xD0\xB4\xD1\x83\xD1\x8E\xD1\x89\xD0\xB8\xD0\xB9 \xD1\x82\xD1\x80\xD0\xB5\xD0\xBA",
-    [AL_PREV]       = "\xD0\x9F\xD1\x80\xD0\xB5\xD0\xB4\xD1\x8B\xD0\xB4\xD1\x83\xD1\x89\xD0\xB8\xD0\xB9 \xD1\x82\xD1\x80\xD0\xB5\xD0\xBA",
-    [AL_SHUFFLE]    = "\xD0\x9F\xD0\xB5\xD1\x80\xD0\xB5\xD0\xBC\xD0\xB5\xD1\x88\xD0\xB0\xD1\x82\xD1\x8C",
-    [AL_REPEAT]     = "\xD0\x9F\xD0\xBE\xD0\xB2\xD1\x82\xD0\xBE\xD1\x80\xD1\x8F\xD1\x82\xD1\x8C",
-    [AL_ADD]        = "+\xD0\x94\xD0\xBE\xD0\xB1\xD0\xB0\xD0\xB2\xD0\xB8\xD1\x82\xD1\x8C",
-    [AL_REMOVE]     = "-\xD0\xA3\xD0\xB4\xD0\xB0\xD0\xBB\xD0\xB8\xD1\x82\xD1\x8C",
-    [AL_OPEN_AUDIO] = "\xD0\x9E\xD1\x82\xD0\xBA\xD1\x80\xD1\x8B\xD1\x82\xD1\x8C \xD0\xB0\xD1\x83\xD0\xB4\xD0\xB8\xD0\xBE",
-    [AL_ABOUT]      = "\xD0\x9E FrankAmp",
-    [AL_OPEN_MENU]  = "\xD0\x9E\xD1\x82\xD0\xBA\xD1\x80\xD1\x8B\xD1\x82\xD1\x8C  Ctrl+O",
+    [AL_MUSIC]      = "Музыка",
+    [AL_PLAY]       = "Воспроизвести",
+    [AL_PAUSE]      = "Пауза",
+    [AL_STOP]       = "Стоп",
+    [AL_NEXT]       = "Следующий трек",
+    [AL_PREV]       = "Предыдущий трек",
+    [AL_SHUFFLE]    = "Перемешать",
+    [AL_REPEAT]     = "Повторять",
+    [AL_ADD]        = "+Добавить",
+    [AL_REMOVE]     = "-Удалить",
+    [AL_OPEN_AUDIO] = "Открыть аудио",
+    [AL_ABOUT]      = "О FrankAmp",
+    [AL_OPEN_MENU]  = "Открыть  Ctrl+O",
+    [AL_NO_TRACK]   = "Трек не загружен",
+    [AL_PLAYING]    = "> Воспроизведение",
+    [AL_PAUSED]     = "|| Пауза",
+    [AL_STOPPED]    = "  Остановлено",
+    [AL_TRACKS]     = "треков",
 };
 static const char *AL(int id) { return lang_get() == LANG_RU ? al_ru[id] : al_en[id]; }
 
@@ -900,7 +910,7 @@ static void main_paint(hwnd_t hwnd) {
             wd_text_ui(75, 6, scroll_buf, COLOR_BLACK, COLOR_WHITE);
         }
     } else {
-        wd_text_ui(75, 6, "No track loaded", COLOR_DARK_GRAY, COLOR_WHITE);
+        wd_text_ui(75, 6, AL(AL_NO_TRACK), COLOR_DARK_GRAY, COLOR_WHITE);
     }
 
     /* Bitrate info line (dark gray on white) */
@@ -926,11 +936,11 @@ static void main_paint(hwnd_t hwnd) {
 
     /* Play state indicator (green on white for active, gray for stopped) */
     if (fa->play_state == PS_PLAYING)
-        wd_text_ui(8, 32, "> Playing", COLOR_GREEN, COLOR_WHITE);
+        wd_text_ui(8, 32, AL(AL_PLAYING), COLOR_GREEN, COLOR_WHITE);
     else if (fa->play_state == PS_PAUSED)
-        wd_text_ui(8, 32, "|| Paused", COLOR_GREEN, COLOR_WHITE);
+        wd_text_ui(8, 32, AL(AL_PAUSED), COLOR_GREEN, COLOR_WHITE);
     else
-        wd_text_ui(8, 32, "  Stopped", COLOR_DARK_GRAY, COLOR_WHITE);
+        wd_text_ui(8, 32, AL(AL_STOPPED), COLOR_DARK_GRAY, COLOR_WHITE);
 
     /* Track N/M (dark gray on white) */
     if (fa->pl_count > 0) {
@@ -1063,7 +1073,7 @@ static void main_paint(hwnd_t hwnd) {
 
     /* Track count (black on gray) */
     char count_str[20];
-    snprintf(count_str, sizeof(count_str), "%d tracks", fa->pl_count);
+    snprintf(count_str, sizeof(count_str), "%d %s", fa->pl_count, AL(AL_TRACKS));
     int16_t count_x = CLIENT_W - (int16_t)(gfx_utf8_charcount(count_str) * FONT_UI_WIDTH) - 8;
     wd_text_ui(count_x, 231, count_str, COLOR_BLACK, COLOR_LIGHT_GRAY);
 
