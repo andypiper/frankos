@@ -1,6 +1,14 @@
 cmake_minimum_required(VERSION 3.13)
 
-set(PICO_BOARD frank_m2)
+# Board selection: frank_m2 (default) or fruit_jam
+set(BOARD_TARGET "frank_m2" CACHE STRING "Target board: frank_m2 or fruit_jam")
+
+if(BOARD_TARGET STREQUAL "fruit_jam")
+    set(PICO_BOARD fruit_jam)
+else()
+    set(PICO_BOARD frank_m2)
+endif()
+
 set(PICO_BOARD_HEADER_DIRS ${CMAKE_CURRENT_LIST_DIR}/boards)
 set(PICO_PLATFORM rp2350-arm-s)
 
@@ -22,8 +30,12 @@ set(FREERTOS_CONFIG_FILE_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}/src CACHE STRING ""
 # DispHSTX display driver (DVI via HSTX peripheral)
 add_subdirectory(lib/DispHSTX DispHSTX)
 
-# Unified PS/2 driver (keyboard + mouse)
-add_subdirectory(drivers/ps2)
+# Input driver: PS/2 (M2) or USB HID host (Fruit Jam)
+if(BOARD_TARGET STREQUAL "fruit_jam")
+    add_subdirectory(drivers/usb_hid)
+else()
+    add_subdirectory(drivers/ps2)
+endif()
 
 # FatFS filesystem library
 add_subdirectory(drivers/fatfs)
@@ -121,16 +133,41 @@ add_subdirectory(lib/opl)
 
 # I2S audio PIO program (generates audio_i2s.pio.h)
 add_subdirectory(drivers/audio)
-target_include_directories(frankos PRIVATE
-    ${CMAKE_CURRENT_LIST_DIR}/src
-    ${CMAKE_CURRENT_LIST_DIR}/drivers/ps2
-    ${CMAKE_CURRENT_LIST_DIR}/drivers/fatfs
-    ${CMAKE_CURRENT_LIST_DIR}/drivers/psram
-    ${CMAKE_CURRENT_LIST_DIR}/src/posix.1/include
-    ${CMAKE_CURRENT_LIST_DIR}/src/musl/include
-    ${CMAKE_CURRENT_LIST_DIR}/src/musl/internal
-    ${CMAKE_CURRENT_LIST_DIR}/src/obsd/include
-)
+
+# Fruit Jam: TLV320DAC3100 I2C DAC driver + ESP32-C6 WiFi driver
+if(BOARD_TARGET STREQUAL "fruit_jam")
+    target_sources(frankos PRIVATE
+        drivers/audio/tlv320dac3100.c
+        drivers/wifi/wifi_esp32.c
+        src/wifi.c
+    )
+endif()
+
+if(BOARD_TARGET STREQUAL "fruit_jam")
+    target_include_directories(frankos PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}/src
+        ${CMAKE_CURRENT_LIST_DIR}/drivers/usb_hid
+        ${CMAKE_CURRENT_LIST_DIR}/drivers/fatfs
+        ${CMAKE_CURRENT_LIST_DIR}/drivers/psram
+        ${CMAKE_CURRENT_LIST_DIR}/drivers/audio
+        ${CMAKE_CURRENT_LIST_DIR}/drivers/wifi
+        ${CMAKE_CURRENT_LIST_DIR}/src/posix.1/include
+        ${CMAKE_CURRENT_LIST_DIR}/src/musl/include
+        ${CMAKE_CURRENT_LIST_DIR}/src/musl/internal
+        ${CMAKE_CURRENT_LIST_DIR}/src/obsd/include
+    )
+else()
+    target_include_directories(frankos PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}/src
+        ${CMAKE_CURRENT_LIST_DIR}/drivers/ps2
+        ${CMAKE_CURRENT_LIST_DIR}/drivers/fatfs
+        ${CMAKE_CURRENT_LIST_DIR}/drivers/psram
+        ${CMAKE_CURRENT_LIST_DIR}/src/posix.1/include
+        ${CMAKE_CURRENT_LIST_DIR}/src/musl/include
+        ${CMAKE_CURRENT_LIST_DIR}/src/musl/internal
+        ${CMAKE_CURRENT_LIST_DIR}/src/obsd/include
+    )
+endif()
 
 # PSRAM HW init (only when PSRAM_SPEED is set)
 if(PSRAM_SPEED)
@@ -167,6 +204,13 @@ else()
     set(FRANK_VERSION_STR "${FRANK_VER_MAJOR}.${FRANK_VER_MINOR}")
 endif()
 
+# Board identity compile definition
+if(BOARD_TARGET STREQUAL "fruit_jam")
+    target_compile_definitions(frankos PRIVATE BOARD_FRUIT_JAM)
+else()
+    target_compile_definitions(frankos PRIVATE BOARD_M2)
+endif()
+
 # MOS2 compile definitions
 target_compile_definitions(frankos PRIVATE
     FRANK_VERSION_STR="${FRANK_VERSION_STR}"
@@ -179,24 +223,48 @@ target_compile_definitions(frankos PRIVATE
     I2S_SOUND=1
 )
 
-target_link_libraries(frankos
-    DispHSTX
-    ps2_driver
-    sdcard
-    helix
-    hxcmod
-    opl
-    pico_stdlib
-    pico_multicore
-    hardware_clocks
-    hardware_gpio
-    hardware_spi
-    hardware_pio
-    hardware_dma
-    hardware_flash
-    hardware_watchdog
-    FreeRTOS-Kernel-Heap4
-)
+if(BOARD_TARGET STREQUAL "fruit_jam")
+    target_link_libraries(frankos
+        DispHSTX
+        usb_hid_driver
+        sdcard
+        helix
+        hxcmod
+        opl
+        pico_stdlib
+        pico_multicore
+        hardware_clocks
+        hardware_gpio
+        hardware_spi
+        hardware_i2c
+        hardware_pio
+        hardware_dma
+        hardware_flash
+        hardware_watchdog
+        tinyusb_host
+        tinyusb_board
+        FreeRTOS-Kernel-Heap4
+    )
+else()
+    target_link_libraries(frankos
+        DispHSTX
+        ps2_driver
+        sdcard
+        helix
+        hxcmod
+        opl
+        pico_stdlib
+        pico_multicore
+        hardware_clocks
+        hardware_gpio
+        hardware_spi
+        hardware_pio
+        hardware_dma
+        hardware_flash
+        hardware_watchdog
+        FreeRTOS-Kernel-Heap4
+    )
+endif()
 
 # Custom linker script: OS code at top of 16MB flash (0x10F00000),
 # sys_table at 0x10FFF000, ZERO_BLOCK at 0x10EFF000.
@@ -206,8 +274,14 @@ target_link_options(frankos PRIVATE
     -Wl,--undefined=sys_table_ptrs
 )
 
-# USB output for printf, no UART
-pico_enable_stdio_usb(frankos 1)
-pico_enable_stdio_uart(frankos 0)
+# Fruit Jam: USB port is in host mode so can't be used for stdio.
+# Use UART on GPIO 8/9 instead.
+if(BOARD_TARGET STREQUAL "fruit_jam")
+    pico_enable_stdio_usb(frankos 0)
+    pico_enable_stdio_uart(frankos 1)
+else()
+    pico_enable_stdio_usb(frankos 1)
+    pico_enable_stdio_uart(frankos 0)
+endif()
 
 pico_add_extra_outputs(frankos)

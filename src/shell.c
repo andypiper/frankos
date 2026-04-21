@@ -15,6 +15,9 @@
 #include "task.h"
 #include "sdcard_init.h"
 #include "ff.h"
+#ifdef BOARD_FRUIT_JAM
+#include "wifi.h"
+#endif
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -62,6 +65,9 @@ static void cmd_help(int argc, char **argv) {
     terminal_puts(t, "  mount      - retry SD card mount\n");
     terminal_puts(t, "  help       - this message\n");
     terminal_puts(t, "  reboot     - reboot system\n");
+#ifdef BOARD_FRUIT_JAM
+    terminal_puts(t, "  wifi       - WiFi: join/status/get/disconnect\n");
+#endif
     terminal_puts(t, "\nOther commands run as ELF apps from SD card.\n");
 }
 
@@ -450,6 +456,10 @@ static void shell_task(void *pv) {
             cmd_mount(argc, argv);
         } else if (strcmp(argv[0], "reboot") == 0) {
             cmd_reboot(argc, argv);
+#ifdef BOARD_FRUIT_JAM
+        } else if (strcmp(argv[0], "wifi") == 0) {
+            wifi_shell_cmd(argc, argv);
+#endif
         } else {
             /* Try to run as ELF from SD card */
             shell_run_elf(t, argc, argv);

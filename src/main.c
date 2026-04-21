@@ -23,7 +23,14 @@
 #include "display.h"
 #include "window.h"
 #include "window_event.h"
+#ifdef BOARD_FRUIT_JAM
+#include "usb_hid.h"
+#include "tlv320dac3100.h"
+#include "wifi.h"
+#include "wifi_esp32.h"
+#else
 #include "ps2.h"
+#endif
 #include "keyboard.h"
 #include "sdcard_init.h"
 #include "terminal.h"
@@ -95,8 +102,9 @@ static void before_main(void) {
     /* Clear SRAM magic so we don't loop */
     *SRAM_MAGIC_ADDR = 0;
 
-    /* Check if Space key is held — raw PS/2 GPIO polling.
-     * If Space detected, fall through to FRANK OS. */
+    /* Check if Space key is held — raw PS/2 GPIO polling (M2 only).
+     * Fruit Jam uses GPIO 2/3 for USB host, so skip this check there. */
+#ifndef BOARD_FRUIT_JAM
     {
         /* Configure GPIO 2 (CLK) and GPIO 3 (DATA) as SIO inputs with pull-ups */
         *(volatile uint32_t *)(BM_IO_BANK0_BASE + 4 + BM_PS2_CLK_PIN * 8) = 5;
@@ -148,6 +156,7 @@ static void before_main(void) {
     }
 
     /* No Space key — check ZERO_BLOCK magic and jump to firmware */
+#endif /* !BOARD_FRUIT_JAM */
     if (((volatile uint32_t *)ZERO_BLOCK_ADDRESS)[1023] == FLASH_MAGIC_OVER) {
         __asm volatile (
             "ldr r0, =%[zb_addr]\n"
@@ -357,7 +366,11 @@ void __attribute__((used)) hardfault_c_handler(uint32_t *stack, uint32_t lr_val)
 static void usb_service_task(void *params) {
     (void)params;
     for (;;) {
-        tud_task();
+#ifdef BOARD_FRUIT_JAM
+        tuh_task();   /* USB host — poll HID keyboard/mouse */
+#else
+        tud_task();   /* USB device — CDC serial */
+#endif
         vTaskDelay(1);
     }
 }
@@ -494,13 +507,19 @@ static void input_task(void *params) {
 
     for (;;) {
         /* Poll keyboard */
+#ifndef BOARD_FRUIT_JAM
         keyboard_poll();
+#endif
 
         key_event_t kev;
         /* Track Win key: only toggle start menu if released with no combo */
         static bool win_combo_used = false;
 
+#ifdef BOARD_FRUIT_JAM
+        while (usb_hid_get_key_event(&kev)) {
+#else
         while (keyboard_get_event(&kev)) {
+#endif
             /* Intercept Win+T: spawn a new terminal window (deferred).
              * Heavy WM/alloc calls run on compositor task, not here. */
             if (kev.pressed &&
@@ -691,15 +710,23 @@ static void input_task(void *params) {
         int16_t dx, dy;
         int8_t wheel;
         uint8_t buttons;
+#ifdef BOARD_FRUIT_JAM
+        if (usb_hid_get_mouse_delta(&dx, &dy, &wheel, &buttons)) {
+#else
         if (ps2_mouse_get_state(&dx, &dy, &wheel, &buttons)) {
+#endif
             /* First mouse movement after boot: show the arrow cursor */
             if (boot_cursor_hidden) {
                 boot_cursor_hidden = false;
             }
 
-            /* Convert deltas to absolute — PS/2 Y is inverted */
+            /* PS/2 Y is inverted (positive = up); USB HID Y is screen-native */
             cur_x += dx;
+#ifdef BOARD_FRUIT_JAM
+            cur_y += dy;
+#else
             cur_y -= dy;
+#endif
 
             /* Clamp to screen bounds */
             if (cur_x < 0) cur_x = 0;
@@ -852,6 +879,26 @@ int main(void) {
     printf("PSRAM: %u KB\n", psram_detected_bytes() / 1024);
     stdio_flush();
 
+#ifdef BOARD_FRUIT_JAM
+    /* Fruit Jam: initialise TLV320DAC3100 audio DAC before I2S starts */
+    printf("Initializing TLV320DAC3100 audio DAC...\n"); stdio_flush();
+    tlv320_init(TLV320_I2C_INST, TLV320_I2C_SDA, TLV320_I2C_SCL, TLV320_I2C_ADDR);
+
+    /* Fruit Jam: initialise USB HID host (TinyUSB host mode) */
+    printf("Initializing USB HID host...\n"); stdio_flush();
+    usb_hid_init();
+    tusb_init();
+    printf("USB HID host ready\n"); stdio_flush();
+
+    /* Fruit Jam: initialise WiFi (ESP32-C6 over SPI) */
+    printf("Initializing WiFi (ESP32-C6)...\n"); stdio_flush();
+    if (wifi_init()) {
+        printf("WiFi ready\n");
+    } else {
+        printf("WiFi ESP32-C6 not responding (continuing without WiFi)\n");
+    }
+    stdio_flush();
+#else
     printf("Initializing PS/2 (unified driver)...\n"); stdio_flush();
     if (ps2_init(pio0, PS2_PIN_CLK, PS2_MOUSE_CLK)) {
         printf("PS/2 PIO initialized (kbd CLK=%d, mouse CLK=%d)\n",
@@ -873,6 +920,7 @@ int main(void) {
         printf("PS/2 PIO init failed\n");
     }
     stdio_flush();
+#endif
 
     wm_init();
 
@@ -912,6 +960,9 @@ int main(void) {
     xTaskCreate(usb_service_task, "usb", 256, NULL, configMAX_PRIORITIES - 1, NULL);
     xTaskCreate(input_task, "input", 1024, NULL, 3, NULL);
     xTaskCreate(compositor_task, "compositor", 4096, NULL, 2, NULL);
+#ifdef BOARD_FRUIT_JAM
+    xTaskCreate(wifi_esp32_task, "wifi", 512, NULL, 1, NULL);
+#endif
 
     // xTaskCreate leaves BASEPRI raised (ulCriticalNesting = 0xaaaaaaaa by design).
     // Clear it so printf works before the scheduler starts.
