@@ -153,17 +153,3 @@ for variant in "${VARIANTS[@]}"; do
 done
 echo ""
 echo -e "Version: ${CYAN}${VERSION_DOT}${NC}"
-
-# Create GitHub release and upload both UF2 files
-TAG="v${VERSION_DOT}"
-HDMI_UF2="$RELEASE_DIR/frankos_m2_${VERSION}_hdmi.uf2"
-VGA_UF2="$RELEASE_DIR/frankos_m2_${VERSION}_vga.uf2"
-echo ""
-echo -e "${CYAN}Creating GitHub release: ${TAG}${NC}"
-if gh release create "$TAG" "$HDMI_UF2" "$VGA_UF2" \
-    --title "Version ${VERSION_DOT}" \
-    --generate-notes; then
-    echo -e "${GREEN}✓ GitHub release created: ${TAG}${NC}"
-else
-    echo -e "${YELLOW}⚠ GitHub release failed (you can upload manually)${NC}"
-fi
