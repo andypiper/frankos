@@ -6,7 +6,7 @@
 # Usage: ./release.sh [VERSION]
 #   VERSION  - version string (e.g. "1.01"), prompted interactively if omitted
 #
-# Output format: frankos_m2_A_BB.uf2
+# Output: frankos_m2_A_BB_hdmi.uf2  and  frankos_m2_A_BB_vga.uf2
 #   A  = Major version
 #   BB = Minor version (zero-padded)
 #
@@ -97,38 +97,46 @@ echo "$MAJOR $MINOR" > "$VERSION_FILE"
 RELEASE_DIR="$SCRIPT_DIR/release"
 mkdir -p "$RELEASE_DIR"
 
-# Output filename
-OUTPUT_NAME="frankos_m2_${VERSION}.uf2"
+# Build both HDMI and VGA variants
+VARIANTS=("DVI:hdmi" "VGA:vga")
 
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo -e "${CYAN}Building: $OUTPUT_NAME${NC}"
-echo ""
+for variant in "${VARIANTS[@]}"; do
+    CMAKE_VAL="${variant%%:*}"
+    SUFFIX="${variant##*:}"
+    OUTPUT_NAME="frankos_m2_${VERSION}_${SUFFIX}.uf2"
 
-# Clean and create build directory
-rm -rf build
-mkdir build
-cd build
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo -e "${CYAN}Building: $OUTPUT_NAME (${CMAKE_VAL})${NC}"
+    echo ""
 
-# Configure with CMake
-cmake .. > /dev/null 2>&1
+    # Clean and create build directory
+    rm -rf build
+    mkdir build
+    cd build
 
-# Build
-if make -j$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4) > /dev/null 2>&1; then
-    # Copy UF2 to release directory
-    if [[ -f "frankos.uf2" ]]; then
-        cp "frankos.uf2" "$RELEASE_DIR/$OUTPUT_NAME"
-        echo -e "  ${GREEN}✓ Success${NC} → release/$OUTPUT_NAME"
+    # Configure with CMake
+    cmake .. -DFRANK_DISPLAY="$CMAKE_VAL" -DUSB_HID_ENABLED=1 > /dev/null 2>&1
+
+    # Build
+    if make -j$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4) > /dev/null 2>&1; then
+        # Copy UF2 to release directory
+        if [[ -f "frankos.uf2" ]]; then
+            cp "frankos.uf2" "$RELEASE_DIR/$OUTPUT_NAME"
+            echo -e "  ${GREEN}✓ Success${NC} → release/$OUTPUT_NAME"
+        else
+            echo -e "  ${RED}✗ UF2 not found${NC}"
+            cd "$SCRIPT_DIR"
+            exit 1
+        fi
     else
-        echo -e "  ${RED}✗ UF2 not found${NC}"
+        echo -e "  ${RED}✗ Build failed${NC}"
+        cd "$SCRIPT_DIR"
         exit 1
     fi
-else
-    echo -e "  ${RED}✗ Build failed${NC}"
-    exit 1
-fi
 
-cd "$SCRIPT_DIR"
+    cd "$SCRIPT_DIR"
+done
 
 # Clean up build directory
 rm -rf build
@@ -137,17 +145,22 @@ echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo -e "${GREEN}Release build complete!${NC}"
 echo ""
-echo "Release file: $RELEASE_DIR/$OUTPUT_NAME"
-echo ""
-ls -la "$RELEASE_DIR/$OUTPUT_NAME" 2>/dev/null | awk '{print "  " $9 " (" $5 " bytes)"}'
+echo "Release files:"
+for variant in "${VARIANTS[@]}"; do
+    SUFFIX="${variant##*:}"
+    OUTPUT_NAME="frankos_m2_${VERSION}_${SUFFIX}.uf2"
+    ls -la "$RELEASE_DIR/$OUTPUT_NAME" 2>/dev/null | awk '{print "  " $9 " (" $5 " bytes)"}'
+done
 echo ""
 echo -e "Version: ${CYAN}${VERSION_DOT}${NC}"
 
-# Create GitHub release and upload UF2
+# Create GitHub release and upload both UF2 files
 TAG="v${VERSION_DOT}"
+HDMI_UF2="$RELEASE_DIR/frankos_m2_${VERSION}_hdmi.uf2"
+VGA_UF2="$RELEASE_DIR/frankos_m2_${VERSION}_vga.uf2"
 echo ""
 echo -e "${CYAN}Creating GitHub release: ${TAG}${NC}"
-if gh release create "$TAG" "$RELEASE_DIR/$OUTPUT_NAME" \
+if gh release create "$TAG" "$HDMI_UF2" "$VGA_UF2" \
     --title "Version ${VERSION_DOT}" \
     --generate-notes; then
     echo -e "${GREEN}✓ GitHub release created: ${TAG}${NC}"

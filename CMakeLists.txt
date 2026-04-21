@@ -6,7 +6,7 @@ else()
 endif()
 set(sdkVersion 2.2.0)
 set(toolchainVersion 14_2_Rel1)
-set(picotoolVersion 2.2.0-a4)
+set(picotoolVersion 2.2.0)
 set(picoVscode ${USERHOME}/.pico-sdk/cmake/pico-vscode.cmake)
 if (EXISTS ${picoVscode})
     include(${picoVscode})
@@ -146,6 +146,9 @@ add_subdirectory(drivers/audio)
 
 # PIO UART for ESP-01 netcard (generates uart_tx.pio.h, uart_rx.pio.h)
 add_subdirectory(drivers/uart_pio)
+
+# USB HID Host driver (keyboard + mouse via USB)
+add_subdirectory(drivers/usbhid)
 target_include_directories(frankos PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/src
     ${CMAKE_CURRENT_LIST_DIR}/drivers/ps2
@@ -193,9 +196,16 @@ else()
     set(FRANK_VERSION_STR "${FRANK_VER_MAJOR}.${FRANK_VER_MINOR}")
 endif()
 
+# Display output: DVI (default) or VGA
+set(FRANK_DISPLAY "DVI" CACHE STRING "Display output: DVI or VGA")
+if(FRANK_DISPLAY STREQUAL "VGA")
+    set(FRANK_DISPLAY_DEFS FRANK_DISPLAY_VGA=1)
+endif()
+
 # MOS2 compile definitions
 target_compile_definitions(frankos PRIVATE
     FRANK_VERSION_STR="${FRANK_VERSION_STR}"
+    ${FRANK_DISPLAY_DEFS}
     FIRMWARE_OFFSET=256
     M_API_VERSION=28
     MIN_API_VERSION=14
@@ -210,6 +220,7 @@ target_link_libraries(frankos
     DispHSTX
     ps2_driver
     sdcard
+    usbhid
     helix
     hxcmod
     opl
@@ -233,8 +244,13 @@ target_link_options(frankos PRIVATE
     -Wl,--undefined=sys_table_ptrs
 )
 
-# USB output for printf, no UART
-pico_enable_stdio_usb(frankos 1)
-pico_enable_stdio_uart(frankos 0)
+# USB HID Host uses the USB port — disable CDC stdio, use UART instead
+if(USB_HID_ENABLED)
+    pico_enable_stdio_usb(frankos 0)
+    pico_enable_stdio_uart(frankos 1)
+else()
+    pico_enable_stdio_usb(frankos 1)
+    pico_enable_stdio_uart(frankos 0)
+endif()
 
 pico_add_extra_outputs(frankos)

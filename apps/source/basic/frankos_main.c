@@ -508,7 +508,7 @@ int main(int argc, char **argv)
     printf("[basic] wm_create_window %dx%d at (%d,%d)\n", fw, fh, x, y);
 
     g_hwnd = wm_create_window(x, y, fw, fh, "MMBasic",
-                              WSTYLE_DIALOG | WF_FULLSCREENABLE,
+                              WSTYLE_DIALOG | WF_FULLSCREENABLE | WF_HIDE_CURSOR,
                               basic_event, basic_paint);
     printf("[basic] g_hwnd: %p\n", (void*)(uintptr_t)g_hwnd);
     if (g_hwnd == HWND_NULL) {

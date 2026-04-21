@@ -187,8 +187,6 @@ bool slider_event(slider_t *sl, const window_event_t *event, int32_t *new_val);
  * Combobox (text field + dropdown)
  *=========================================================================*/
 
-#define COMBOBOX_MAX_ITEMS 10
-
 typedef struct {
     textfield_t  field;
     int16_t      drop_btn_w;

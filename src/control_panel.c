@@ -505,44 +505,190 @@ static void cp_open_display(void) {
  * System Properties
  *=========================================================================*/
 
+#include "ff.h"
+#include "timers.h"
+extern bool sdcard_is_mounted(void);
+
+#define SYS_W  280
+#define SYS_H  310
+
+#define STARTUP_PATH   "/fos/.startup"
+
+/* Focus: 0=textfield, 1=checkbox, 2=Save, 3=Cancel */
+#define SYS_FOCUS_FIELD  0
+#define SYS_FOCUS_CB     1
+#define SYS_FOCUS_SAVE   2
+#define SYS_FOCUS_CANCEL 3
+#define SYS_FOCUS_COUNT  4
+
 typedef struct {
-    hwnd_t hwnd;
+    hwnd_t        hwnd;
+    textfield_t   field;
+    checkbox_t    fullscreen;
+    char          field_buf[64];
+    uint8_t       focus;
+    TimerHandle_t blink_timer;
 } sys_applet_t;
 
 static sys_applet_t sys_app;
 
-#define SYS_W  260
-#define SYS_H  270
+static void sys_blink_cb(TimerHandle_t xTimer) {
+    (void)xTimer;
+    if (!sys_app.hwnd) return;
+    textfield_blink(&sys_app.field);
+}
+
+static void sys_blink_reset(void) {
+    sys_app.field.cursor_visible = true;
+    if (sys_app.blink_timer) xTimerReset(sys_app.blink_timer, 0);
+    wm_invalidate(sys_app.hwnd);
+}
+
+static void sys_close(sys_applet_t *s) {
+    if (s->blink_timer) {
+        xTimerStop(s->blink_timer, 0);
+        xTimerDelete(s->blink_timer, 0);
+    }
+    wm_destroy_window(s->hwnd);
+    memset(s, 0, sizeof(*s));
+}
+
+static void sys_load_startup(sys_applet_t *s) {
+    s->fullscreen.checked = false;
+    textfield_set_text(&s->field, "");
+
+    if (!sdcard_is_mounted()) return;
+    FIL f;
+    if (f_open(&f, STARTUP_PATH, FA_READ) != FR_OK) return;
+
+    char buf[96];
+    UINT br;
+    if (f_read(&f, buf, sizeof(buf) - 1, &br) != FR_OK || br == 0) {
+        f_close(&f);
+        return;
+    }
+    f_close(&f);
+    buf[br] = '\0';
+
+    char *nl = strchr(buf, '\n');
+    if (nl) {
+        *nl = '\0';
+        if (nl > buf && *(nl - 1) == '\r') *(nl - 1) = '\0';
+    }
+    if (buf[0])
+        textfield_set_text(&s->field, buf);
+
+    if (nl) {
+        char *opts = nl + 1;
+        char *cr = strchr(opts, '\n');
+        if (cr) *cr = '\0';
+        cr = strchr(opts, '\r');
+        if (cr) *cr = '\0';
+        if (strcmp(opts, "fullscreen") == 0)
+            s->fullscreen.checked = true;
+    }
+}
+
+static void sys_save_startup(sys_applet_t *s) {
+    if (!sdcard_is_mounted()) return;
+
+    const char *path = textfield_get_text(&s->field);
+    if (!path || !path[0]) {
+        f_unlink(STARTUP_PATH);
+        return;
+    }
+
+    FIL f;
+    if (f_open(&f, STARTUP_PATH, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK)
+        return;
+    UINT bw;
+    f_write(&f, path, strlen(path), &bw);
+    f_write(&f, "\n", 1, &bw);
+    if (s->fullscreen.checked)
+        f_write(&f, "fullscreen\n", 11, &bw);
+    f_close(&f);
+}
 
 static bool sys_event(hwnd_t hwnd, const window_event_t *ev) {
     sys_applet_t *s = &sys_app;
     int client_w = SYS_W - THEME_BORDER_WIDTH * 2;
     int client_h = SYS_H - THEME_TITLE_HEIGHT - THEME_BORDER_WIDTH * 2;
     int btn_y = client_h - APPLET_BTN_H - 8;
-    int ok_x = client_w - APPLET_BTN_W - 10;
+    int save_x = client_w - APPLET_BTN_W * 2 - APPLET_BTN_GAP - 10;
+    int cancel_x = save_x + APPLET_BTN_W + APPLET_BTN_GAP;
+
+    if (s->focus == SYS_FOCUS_FIELD && textfield_event(&s->field, ev)) {
+        sys_blink_reset();
+        return true;
+    }
 
     switch (ev->type) {
     case WM_CLOSE:
-        wm_destroy_window(hwnd);
-        memset(s, 0, sizeof(*s));
+        sys_close(s);
         return true;
+
+    case WM_LBUTTONDOWN: {
+        int16_t mx = ev->mouse.x, my = ev->mouse.y;
+        if (mx >= s->field.x && mx < s->field.x + s->field.w &&
+            my >= s->field.y && my < s->field.y + s->field.h) {
+            s->focus = SYS_FOCUS_FIELD;
+            s->field.focused = true;
+            sys_blink_reset();
+            return true;
+        }
+        bool changed;
+        if (checkbox_event(&s->fullscreen, ev, &changed)) {
+            s->focus = SYS_FOCUS_CB;
+            s->field.focused = false;
+            wm_invalidate(hwnd);
+            return true;
+        }
+        return false;
+    }
 
     case WM_LBUTTONUP: {
         int16_t mx = ev->mouse.x, my = ev->mouse.y;
-        if (btn_hit(mx, my, ok_x, btn_y, APPLET_BTN_W, APPLET_BTN_H)) {
-            wm_destroy_window(hwnd);
-            memset(s, 0, sizeof(*s));
+        if (btn_hit(mx, my, save_x, btn_y, APPLET_BTN_W, APPLET_BTN_H)) {
+            sys_save_startup(s);
+            sys_close(s);
+            return true;
+        }
+        if (btn_hit(mx, my, cancel_x, btn_y, APPLET_BTN_W, APPLET_BTN_H)) {
+            sys_close(s);
+            return true;
         }
         return true;
     }
 
-    case WM_KEYDOWN:
-        if (ev->key.scancode == 0x29 || ev->key.scancode == 0x28) {
-            wm_destroy_window(hwnd);
-            memset(s, 0, sizeof(*s));
+    case WM_KEYDOWN: {
+        uint8_t sc = ev->key.scancode;
+        if (sc == 0x29) { /* Esc */
+            sys_close(s);
+            return true;
+        }
+        if (sc == 0x28) { /* Enter */
+            sys_save_startup(s);
+            sys_close(s);
+            return true;
+        }
+        if (sc == 0x2B) { /* Tab */
+            s->field.focused = false;
+            s->focus = (s->focus + 1) % SYS_FOCUS_COUNT;
+            if (s->focus == SYS_FOCUS_FIELD) {
+                s->field.focused = true;
+                sys_blink_reset();
+            } else {
+                wm_invalidate(hwnd);
+            }
+            return true;
+        }
+        if (s->focus == SYS_FOCUS_CB && sc == 0x2C) { /* Space toggles checkbox */
+            s->fullscreen.checked = !s->fullscreen.checked;
+            wm_invalidate(hwnd);
             return true;
         }
         break;
+    }
 
     default:
         break;
@@ -551,6 +697,7 @@ static bool sys_event(hwnd_t hwnd, const window_event_t *ev) {
 }
 
 static void sys_paint(hwnd_t hwnd) {
+    sys_applet_t *s = &sys_app;
     int client_w = SYS_W - THEME_BORDER_WIDTH * 2;
     int client_h = SYS_H - THEME_TITLE_HEIGHT - THEME_BORDER_WIDTH * 2;
 
@@ -568,7 +715,6 @@ static void sys_paint(hwnd_t hwnd) {
     wd_text_ui(x, y, "github.com/rh1tech/frank-os", COLOR_DARK_GRAY, THEME_BUTTON_FACE);
     y += FONT_UI_HEIGHT + 10;
 
-    /* Separator line */
     wd_hline(x, y, client_w - x * 2, COLOR_DARK_GRAY);
     y += 8;
 
@@ -599,11 +745,26 @@ static void sys_paint(hwnd_t hwnd) {
     snprintf(buf, sizeof(buf), "Kernel: FreeRTOS %s",
              tskKERNEL_VERSION_NUMBER);
     wd_text_ui(x, y, buf, COLOR_BLACK, THEME_BUTTON_FACE);
+    y += FONT_UI_HEIGHT + 12;
 
-    /* OK button */
+    wd_hline(x, y, client_w - x * 2, COLOR_DARK_GRAY);
+    y += 8;
+
+    wd_text_ui(x, y, L(STR_STARTUP_APP), COLOR_BLACK, THEME_BUTTON_FACE);
+    y += FONT_UI_HEIGHT + 4;
+
+    textfield_paint(&s->field);
+    y = s->field.y + s->field.h + 6;
+
+    checkbox_paint(&s->fullscreen);
+
     int btn_y = client_h - APPLET_BTN_H - 8;
-    int ok_x = client_w - APPLET_BTN_W - 10;
-    wd_button(ok_x, btn_y, APPLET_BTN_W, APPLET_BTN_H, L(STR_OK), true, false);
+    int save_x = client_w - APPLET_BTN_W * 2 - APPLET_BTN_GAP - 10;
+    int cancel_x = save_x + APPLET_BTN_W + APPLET_BTN_GAP;
+    wd_button(save_x, btn_y, APPLET_BTN_W, APPLET_BTN_H,
+              L(STR_SAVE), s->focus == SYS_FOCUS_SAVE, false);
+    wd_button(cancel_x, btn_y, APPLET_BTN_W, APPLET_BTN_H,
+              L(STR_CANCEL), s->focus == SYS_FOCUS_CANCEL, false);
 
     wd_end();
 }
@@ -624,6 +785,23 @@ static void cp_open_system(void) {
     window_t *win = wm_get_window(hwnd);
     if (win) win->bg_color = THEME_BUTTON_FACE;
     sys_app.hwnd = hwnd;
+
+    textfield_init(&sys_app.field, sys_app.field_buf,
+                   sizeof(sys_app.field_buf), hwnd);
+    textfield_set_rect(&sys_app.field, 16, 174,
+                       SYS_W - THEME_BORDER_WIDTH * 2 - 32, 20);
+    sys_app.field.focused = true;
+
+    checkbox_init(&sys_app.fullscreen, 16, 200, L(STR_FULLSCREEN_MODE));
+
+    sys_load_startup(&sys_app);
+
+    sys_app.focus = SYS_FOCUS_FIELD;
+
+    sys_app.blink_timer = xTimerCreate("sysblink", pdMS_TO_TICKS(500),
+                                        pdTRUE, NULL, sys_blink_cb);
+    if (sys_app.blink_timer) xTimerStart(sys_app.blink_timer, 0);
+
     wm_set_focus(hwnd);
     taskbar_invalidate();
 }

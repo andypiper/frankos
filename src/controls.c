@@ -1801,8 +1801,7 @@ void combobox_set_rect(combobox_t *cb, int16_t x, int16_t y,
 
 void combobox_set_items(combobox_t *cb, char (*items)[64], int8_t count) {
     cb->items = items;
-    cb->item_count = count > COMBOBOX_MAX_ITEMS ?
-                     COMBOBOX_MAX_ITEMS : count;
+    cb->item_count = count;
 }
 
 void combobox_paint(combobox_t *cb) {

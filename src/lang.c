@@ -219,8 +219,9 @@ static const char *str_en[] = {
     [STR_APP_PASTE]        = "Paste",
     [STR_APP_SELECT_ALL]   = "Select All",
 
-
-
+    [STR_STARTUP_APP]      = "Startup app",
+    [STR_FULLSCREEN_MODE]  = "Fullscreen mode",
+    [STR_NONE]             = "(none)",
 
 
 
@@ -441,8 +442,9 @@ static const char *str_ru[] = {
     [STR_APP_PASTE]        = "Вставить",
     [STR_APP_SELECT_ALL]   = "Выделить всё",
 
-
-
+    [STR_STARTUP_APP]      = "Автозапуск",
+    [STR_FULLSCREEN_MODE]  = "Полноэкранный режим",
+    [STR_NONE]             = "(нет)",
 
 
 

@@ -24,6 +24,9 @@
 #include "task.h"
 #include <string.h>
 #include <stdio.h>
+#ifdef USB_HID_ENABLED
+#include "usbhid.h"
+#endif
 
 //=============================================================================
 // HID Key Codes (subset used by the scancode tables)
@@ -476,6 +479,9 @@ static void process_scancode(uint8_t byte) {
 //=============================================================================
 
 static void mos2_feed_scancode(uint8_t byte); /* defined below */
+#ifdef USB_HID_ENABLED
+void usbhid_feed_mos2(uint8_t hid_keycode, int down); /* defined below */
+#endif
 
 void keyboard_poll(void) {
     int byte;
@@ -486,6 +492,20 @@ void keyboard_poll(void) {
         /* Feed to FRANK OS windowing system (PS/2 set 2 → HID) */
         process_scancode((uint8_t)byte);
     }
+
+#ifdef USB_HID_ENABLED
+    uint8_t hid_keycode;
+    int down;
+    while (usbhid_get_key_action(&hid_keycode, &down)) {
+        uint8_t mod_bit = hid_to_mod_bit(hid_keycode);
+        if (mod_bit) {
+            if (down) modifiers |= mod_bit;
+            else      modifiers &= ~mod_bit;
+        }
+        enqueue_event(hid_keycode, down != 0, modifiers);
+        usbhid_feed_mos2(hid_keycode, down);
+    }
+#endif
 }
 
 bool keyboard_get_event(key_event_t *ev) {
@@ -960,3 +980,154 @@ static void mos2_feed_scancode(uint8_t byte) {
      * then calls the app's custom scancode_handler at the end) */
     default_mos2_handler(xt_code);
 }
+
+#ifdef USB_HID_ENABLED
+/*==========================================================================
+ * USB HID → MOS2 bridge
+ *
+ * HID keycodes → XT scancodes → default_mos2_handler().
+ * This is the reverse of what the PS/2 path does (PS/2 → XT → MOS2).
+ *=========================================================================*/
+
+static uint32_t hid_to_xt_code(uint8_t hid, int down) {
+    uint8_t xt = 0;
+    int extended = 0;
+
+    switch (hid) {
+        /* Modifier keys */
+        case 0xE0: xt = 0x1D; break; /* Left Ctrl */
+        case 0xE1: xt = 0x2A; break; /* Left Shift */
+        case 0xE2: xt = 0x38; break; /* Left Alt */
+        case 0xE3: xt = 0x5B; extended = 1; break; /* Left GUI */
+        case 0xE4: xt = 0x1D; extended = 1; break; /* Right Ctrl */
+        case 0xE5: xt = 0x36; break; /* Right Shift */
+        case 0xE6: xt = 0x38; extended = 1; break; /* Right Alt */
+        case 0xE7: xt = 0x5C; extended = 1; break; /* Right GUI */
+
+        /* Letters A-Z (HID 0x04–0x1D) → XT scan codes */
+        case 0x04: xt = 0x1E; break; /* A */
+        case 0x05: xt = 0x30; break; /* B */
+        case 0x06: xt = 0x2E; break; /* C */
+        case 0x07: xt = 0x20; break; /* D */
+        case 0x08: xt = 0x12; break; /* E */
+        case 0x09: xt = 0x21; break; /* F */
+        case 0x0A: xt = 0x22; break; /* G */
+        case 0x0B: xt = 0x23; break; /* H */
+        case 0x0C: xt = 0x17; break; /* I */
+        case 0x0D: xt = 0x24; break; /* J */
+        case 0x0E: xt = 0x25; break; /* K */
+        case 0x0F: xt = 0x26; break; /* L */
+        case 0x10: xt = 0x32; break; /* M */
+        case 0x11: xt = 0x31; break; /* N */
+        case 0x12: xt = 0x18; break; /* O */
+        case 0x13: xt = 0x19; break; /* P */
+        case 0x14: xt = 0x10; break; /* Q */
+        case 0x15: xt = 0x13; break; /* R */
+        case 0x16: xt = 0x1F; break; /* S */
+        case 0x17: xt = 0x14; break; /* T */
+        case 0x18: xt = 0x16; break; /* U */
+        case 0x19: xt = 0x2F; break; /* V */
+        case 0x1A: xt = 0x11; break; /* W */
+        case 0x1B: xt = 0x2D; break; /* X */
+        case 0x1C: xt = 0x15; break; /* Y */
+        case 0x1D: xt = 0x2C; break; /* Z */
+
+        /* Numbers 1-0 (HID 0x1E–0x27) */
+        case 0x1E: xt = 0x02; break; /* 1 */
+        case 0x1F: xt = 0x03; break; /* 2 */
+        case 0x20: xt = 0x04; break; /* 3 */
+        case 0x21: xt = 0x05; break; /* 4 */
+        case 0x22: xt = 0x06; break; /* 5 */
+        case 0x23: xt = 0x07; break; /* 6 */
+        case 0x24: xt = 0x08; break; /* 7 */
+        case 0x25: xt = 0x09; break; /* 8 */
+        case 0x26: xt = 0x0A; break; /* 9 */
+        case 0x27: xt = 0x0B; break; /* 0 */
+
+        /* Special keys */
+        case 0x28: xt = 0x1C; break; /* Enter */
+        case 0x29: xt = 0x01; break; /* Escape */
+        case 0x2A: xt = 0x0E; break; /* Backspace */
+        case 0x2B: xt = 0x0F; break; /* Tab */
+        case 0x2C: xt = 0x39; break; /* Space */
+        case 0x2D: xt = 0x0C; break; /* - */
+        case 0x2E: xt = 0x0D; break; /* = */
+        case 0x2F: xt = 0x1A; break; /* [ */
+        case 0x30: xt = 0x1B; break; /* ] */
+        case 0x31: xt = 0x2B; break; /* \ */
+        case 0x33: xt = 0x27; break; /* ; */
+        case 0x34: xt = 0x28; break; /* ' */
+        case 0x35: xt = 0x29; break; /* ` */
+        case 0x36: xt = 0x33; break; /* , */
+        case 0x37: xt = 0x34; break; /* . */
+        case 0x38: xt = 0x35; break; /* / */
+        case 0x39: xt = 0x3A; break; /* CapsLock */
+
+        /* Function keys F1-F12 */
+        case 0x3A: xt = 0x3B; break; /* F1 */
+        case 0x3B: xt = 0x3C; break; /* F2 */
+        case 0x3C: xt = 0x3D; break; /* F3 */
+        case 0x3D: xt = 0x3E; break; /* F4 */
+        case 0x3E: xt = 0x3F; break; /* F5 */
+        case 0x3F: xt = 0x40; break; /* F6 */
+        case 0x40: xt = 0x41; break; /* F7 */
+        case 0x41: xt = 0x42; break; /* F8 */
+        case 0x42: xt = 0x43; break; /* F9 */
+        case 0x43: xt = 0x44; break; /* F10 */
+        case 0x44: xt = 0x57; break; /* F11 */
+        case 0x45: xt = 0x58; break; /* F12 */
+
+        /* Navigation (all extended) */
+        case 0x46: xt = 0x37; extended = 1; break; /* PrintScreen */
+        case 0x47: xt = 0x46; break;                /* ScrollLock */
+        case 0x49: xt = 0x52; extended = 1; break; /* Insert */
+        case 0x4A: xt = 0x47; extended = 1; break; /* Home */
+        case 0x4B: xt = 0x49; extended = 1; break; /* PageUp */
+        case 0x4C: xt = 0x53; extended = 1; break; /* Delete */
+        case 0x4D: xt = 0x4F; extended = 1; break; /* End */
+        case 0x4E: xt = 0x51; extended = 1; break; /* PageDown */
+        case 0x4F: xt = 0x4D; extended = 1; break; /* Right Arrow */
+        case 0x50: xt = 0x4B; extended = 1; break; /* Left Arrow */
+        case 0x51: xt = 0x50; extended = 1; break; /* Down Arrow */
+        case 0x52: xt = 0x48; extended = 1; break; /* Up Arrow */
+
+        /* Numpad */
+        case 0x53: xt = 0x45; break; /* NumLock */
+        case 0x54: xt = 0x35; extended = 1; break; /* Keypad / */
+        case 0x55: xt = 0x37; break; /* Keypad * */
+        case 0x56: xt = 0x4A; break; /* Keypad - */
+        case 0x57: xt = 0x4E; break; /* Keypad + */
+        case 0x58: xt = 0x1C; extended = 1; break; /* Keypad Enter */
+        case 0x59: xt = 0x4F; break; /* Keypad 1 */
+        case 0x5A: xt = 0x50; break; /* Keypad 2 */
+        case 0x5B: xt = 0x51; break; /* Keypad 3 */
+        case 0x5C: xt = 0x4B; break; /* Keypad 4 */
+        case 0x5D: xt = 0x4C; break; /* Keypad 5 */
+        case 0x5E: xt = 0x4D; break; /* Keypad 6 */
+        case 0x5F: xt = 0x47; break; /* Keypad 7 */
+        case 0x60: xt = 0x48; break; /* Keypad 8 */
+        case 0x61: xt = 0x49; break; /* Keypad 9 */
+        case 0x62: xt = 0x52; break; /* Keypad 0 */
+        case 0x63: xt = 0x53; break; /* Keypad . */
+
+        default: return 0;
+    }
+
+    uint32_t code;
+    if (extended)
+        code = 0xE000 | xt;
+    else
+        code = xt;
+
+    if (!down)
+        code |= 0x80;
+
+    return code;
+}
+
+void usbhid_feed_mos2(uint8_t hid_keycode, int down) {
+    uint32_t xt_code = hid_to_xt_code(hid_keycode, down);
+    if (xt_code)
+        default_mos2_handler(xt_code);
+}
+#endif

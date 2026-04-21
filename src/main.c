@@ -17,6 +17,9 @@
 #include "hardware/dma.h"
 #include "hardware/structs/pio.h"
 #include "tusb.h"
+#ifdef USB_HID_ENABLED
+#include "usbhid.h"
+#endif
 #include "FreeRTOS.h"
 #include "task.h"
 #include "board_config.h"
@@ -37,6 +40,7 @@
 #include "sysmenu.h"
 #include "filemanager.h"
 #include "cursor.h"
+#include "window_theme.h"
 #include "font.h"
 #include "disphstx.h"
 #include "psram.h"
@@ -207,6 +211,12 @@ static volatile bool g_spawn_network_settings_pending = false;
  * stamping the cursor while hidden. */
 volatile bool boot_cursor_hidden = false;
 
+/* Deferred fullscreen: set before launching an ELF app so the compositor
+ * can toggle the app's window fullscreen once it appears. */
+static volatile bool g_pending_fullscreen = false;
+
+static void startup_app_launch(void);
+
 /*==========================================================================
  * Crash dump — stored in .uninitialized_data so it survives warm resets
  * (watchdog, soft reset) but is random on power-on.
@@ -362,7 +372,11 @@ void __attribute__((used)) hardfault_c_handler(uint32_t *stack, uint32_t lr_val)
 static void usb_service_task(void *params) {
     (void)params;
     for (;;) {
+#ifdef USB_HID_ENABLED
+        tuh_task();
+#else
         tud_task();
+#endif
         vTaskDelay(1);
     }
 }
@@ -392,6 +406,9 @@ static void compositor_task(void *params) {
             do { vTaskDelay(pdMS_TO_TICKS(10)); }
             while (display_video_mode == VIDEO_MODE_320x240x256);
             display_compositor_idle = 0;
+            boot_cursor_hidden = false;
+            cursor_set_visible(true);
+            cursor_overlay_reset();
             wm_force_full_repaint();
             g_video_dirty = true;
             continue;
@@ -411,6 +428,7 @@ static void compositor_task(void *params) {
             wm_force_full_repaint();
             /* Focus desktop if shortcuts exist and no windows are open */
             if (desktop_has_shortcuts()) desktop_focus();
+            startup_app_launch();
         }
 
         /* Process deferred swap resumes — an exiting app sets a flag,
@@ -462,6 +480,16 @@ static void compositor_task(void *params) {
             network_settings_create();
         }
 
+        /* Deferred fullscreen for startup app */
+        if (g_pending_fullscreen) {
+            hwnd_t hw = wm_get_focus();
+            if (hw != HWND_NULL) {
+                g_pending_fullscreen = false;
+                wm_toggle_fullscreen(hw);
+                g_video_dirty = true;
+            }
+        }
+
         /* Update clock in taskbar every minute (even without input) */
         taskbar_tick();
 
@@ -502,6 +530,81 @@ void spawn_terminal_window(void) {
     }
     wm_set_focus(hwnd);
     taskbar_invalidate();
+}
+
+/*==========================================================================
+ * Startup app — read /fos/.startup and launch if valid
+ *=========================================================================*/
+extern void launch_elf_app(const char *path);
+
+static void startup_app_launch(void) {
+    if (!sdcard_is_mounted()) return;
+
+    FIL f;
+    if (f_open(&f, "/fos/.startup", FA_READ) != FR_OK) return;
+
+    char buf[96];
+    UINT br;
+    if (f_read(&f, buf, sizeof(buf) - 1, &br) != FR_OK || br == 0) {
+        f_close(&f);
+        return;
+    }
+    f_close(&f);
+    buf[br] = '\0';
+
+    char *nl = strchr(buf, '\n');
+    if (nl) {
+        *nl = '\0';
+        if (nl > buf && *(nl - 1) == '\r') *(nl - 1) = '\0';
+    }
+    char *cmd = buf;
+    if (!cmd[0]) return;
+
+    bool fullscreen = false;
+    if (nl) {
+        char *opts = nl + 1;
+        char *cr = strchr(opts, '\n');
+        if (cr) *cr = '\0';
+        cr = strchr(opts, '\r');
+        if (cr) *cr = '\0';
+        if (strcmp(opts, "fullscreen") == 0)
+            fullscreen = true;
+    }
+
+    /* Built-in apps */
+    if (strcmp(cmd, "terminal") == 0) {
+        spawn_terminal_window();
+        if (fullscreen) {
+            hwnd_t hw = wm_get_focus();
+            if (hw != HWND_NULL) wm_toggle_fullscreen(hw);
+        }
+        return;
+    }
+    if (strcmp(cmd, "navigator") == 0) {
+        spawn_filemanager_window();
+        if (fullscreen) {
+            hwnd_t hw = wm_get_focus();
+            if (hw != HWND_NULL) wm_toggle_fullscreen(hw);
+        }
+        return;
+    }
+
+    /* Resolve path: try as-is, then /fos/<cmd> */
+    char path[64];
+    FILINFO fno;
+    if (cmd[0] == '/' && f_stat(cmd, &fno) == FR_OK) {
+        strncpy(path, cmd, sizeof(path) - 1);
+        path[sizeof(path) - 1] = '\0';
+    } else {
+        snprintf(path, sizeof(path), "/fos/%s", cmd);
+        if (f_stat(path, &fno) != FR_OK)
+            return;
+    }
+
+    if (fullscreen)
+        g_pending_fullscreen = true;
+
+    launch_elf_app(path);
 }
 
 /*==========================================================================
@@ -767,11 +870,27 @@ static void input_task(void *params) {
             g_video_dirty = true;
         }
 
-        /* Poll mouse */
-        int16_t dx, dy;
-        int8_t wheel;
-        uint8_t buttons;
-        if (ps2_mouse_get_state(&dx, &dy, &wheel, &buttons)) {
+        /* Poll mouse — merge PS/2 and USB HID sources */
+        int16_t dx = 0, dy = 0;
+        int8_t wheel = 0;
+        uint8_t buttons = 0;
+        bool mouse_activity = ps2_mouse_get_state(&dx, &dy, &wheel, &buttons);
+
+#ifdef USB_HID_ENABLED
+        {
+            usbhid_mouse_state_t usb_mouse;
+            usbhid_get_mouse_state(&usb_mouse);
+            if (usb_mouse.has_motion) {
+                dx += usb_mouse.dx;
+                dy -= usb_mouse.dy; /* USB HID dy is positive=down; PS/2 convention is positive=up */
+                wheel += usb_mouse.wheel;
+                buttons |= usb_mouse.buttons;
+                mouse_activity = true;
+            }
+        }
+#endif
+
+        if (mouse_activity) {
             /* First mouse movement after boot: show the arrow cursor */
             if (boot_cursor_hidden) {
                 boot_cursor_hidden = false;
@@ -793,6 +912,22 @@ static void input_task(void *params) {
             /* Route all mouse events through the WM handler for
              * hit-testing, focus management, and title-bar dragging */
             wm_handle_mouse_input(WM_MOUSEMOVE, cur_x, cur_y, buttons);
+
+            /* Hide cursor over client area of WF_HIDE_CURSOR windows */
+            {
+                bool hide = false;
+                hwnd_t hover = wm_window_at_point(cur_x, cur_y);
+                if (hover != HWND_NULL) {
+                    window_t *hw = wm_get_window(hover);
+                    if (hw && (hw->flags & WF_HIDE_CURSOR)) {
+                        uint8_t zone = theme_hit_test(&hw->frame,
+                                                      hw->flags,
+                                                      cur_x, cur_y);
+                        if (zone == HT_CLIENT) hide = true;
+                    }
+                }
+                cursor_set_visible(!hide);
+            }
 
             /* Detect button transitions */
             uint8_t changed = buttons ^ prev_buttons;
@@ -920,7 +1055,11 @@ int main(void) {
     printf("\n== FRANK OS ==\n");
     printf("CPU: %lu MHz\n", (unsigned long)(clock_get_hz(clk_sys) / 1000000));
     printf("Scheduler: FreeRTOS\n");
+#if DISPHSTX_USE_DVI
     printf("Display: DispHSTX DVI\n");
+#else
+    printf("Display: DispHSTX VGA\n");
+#endif
     stdio_flush();
 
     printf("Initializing display...\n"); stdio_flush();
@@ -1005,7 +1144,16 @@ int main(void) {
     /* One-shot composite: desktop + hourglass, no taskbar yet */
     wm_composite();
 
+#ifdef USB_HID_ENABLED
+    printf("Initializing USB HID Host...\n"); stdio_flush();
+    usbhid_init();
+#endif
+
+#ifdef USB_HID_ENABLED
+    xTaskCreate(usb_service_task, "usb", 512, NULL, configMAX_PRIORITIES - 1, NULL);
+#else
     xTaskCreate(usb_service_task, "usb", 256, NULL, configMAX_PRIORITIES - 1, NULL);
+#endif
     xTaskCreate(input_task, "input", 1024, NULL, 3, NULL);
     xTaskCreate(compositor_task, "compositor", 4096, NULL, 2, NULL);
 

@@ -135,7 +135,7 @@ hwnd_t wm_create_window(int16_t x, int16_t y, int16_t w, int16_t h,
         if (!(windows[i].flags & WF_ALIVE)) {
             window_t *win = &windows[i];
             memset(win, 0, sizeof(*win));
-            win->flags = WF_ALIVE | WF_VISIBLE | WF_DIRTY | WF_FRAME_DIRTY | (style & 0x978);
+            win->flags = WF_ALIVE | WF_VISIBLE | WF_DIRTY | WF_FRAME_DIRTY | (style & 0x1978);
             win->state = WS_NORMAL;
             win->frame = (rect_t){ x, y, w, h };
             win->restore_rect = win->frame;
@@ -915,7 +915,7 @@ static void draw_window_decorations(hwnd_t hwnd, window_t *win) {
     }
     if (max_title_w > 0) {
         gfx_text_ui_bold_clipped(text_x, text_y, win->title, title_fg, title_bg,
-                                  tb_x, tb_y, max_title_w, THEME_TITLE_HEIGHT);
+                                  text_x, tb_y, max_title_w, THEME_TITLE_HEIGHT);
     }
 
     /* Title bar buttons */
@@ -1298,6 +1298,8 @@ void wm_composite(void) {
         int16_t mx, my;
         wm_get_cursor_pos(&mx, &my);
         cursor_overlay_stamp(mx, my);
+    } else if (!cursor_is_visible()) {
+        cursor_overlay_erase();
     }
 
     cursor_overlay_unlock();

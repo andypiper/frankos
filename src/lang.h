@@ -140,6 +140,9 @@ enum {
     STR_APP_UNDO, STR_APP_CUT, STR_APP_COPY, STR_APP_PASTE,
     STR_APP_SELECT_ALL,
 
+    /* System Properties — Startup app */
+    STR_STARTUP_APP, STR_FULLSCREEN_MODE, STR_NONE,
+
     STR_COUNT
 };
 

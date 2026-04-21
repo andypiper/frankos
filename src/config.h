@@ -27,11 +27,18 @@
 #define USE_RAND            0
 #define USE_TEXT            0
 
-// DVI only, no VGA
+// Display output: DVI or VGA (enable exactly one)
+// Override via cmake: -DFRANK_DISPLAY=VGA
+#ifdef FRANK_DISPLAY_VGA
+#define DISPHSTX_USE_DVI    0
+#define DISPHSTX_USE_VGA    1
+#else
 #define DISPHSTX_USE_DVI    1
 #define DISPHSTX_USE_VGA    0
+#endif
 
 // M2 DVI pinout: CLK-=12, CLK+=13, D0-=14, D0+=15, D1-=16, D1+=17, D2-=18, D2+=19
+#define DISPHSTX_VGA_PINOUT 0       // VGA
 #define DISPHSTX_DVI_PINOUT 2       // order CLK-..D2+
 
 // Disable unused formats to save RAM

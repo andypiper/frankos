@@ -527,7 +527,7 @@ int main(int argc, char **argv) {
 
     /* Icon is set by the launcher (Start Menu / file manager) from .ico file */
     G->app_hwnd = wm_create_window(x, y, fw, fh, "ZX Spectrum",
-                                    WSTYLE_DIALOG | WF_MENUBAR | WF_FULLSCREENABLE,
+                                    WSTYLE_DIALOG | WF_MENUBAR | WF_FULLSCREENABLE | WF_HIDE_CURSOR,
                                     zx_event, zx_paint);
     if (G->app_hwnd == HWND_NULL) {
         vPortFree(zx);

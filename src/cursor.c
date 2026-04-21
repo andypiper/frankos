@@ -167,7 +167,7 @@ static const cursor_def_t cursors[CURSOR_COUNT] = {
 };
 
 static cursor_type_t current_cursor = CURSOR_ARROW;
-static bool cursor_visible = true;
+static volatile bool cursor_visible = true;
 
 void cursor_set_type(cursor_type_t type) {
     if (type < CURSOR_COUNT)
@@ -249,6 +249,7 @@ static struct {
 } overlay;
 
 void cursor_overlay_stamp(int16_t x, int16_t y) {
+    if (!cursor_visible) { overlay.valid = false; return; }
     const cursor_def_t *c = &cursors[current_cursor];
     int16_t ox = x - c->hotspot_x;
     int16_t oy = y - c->hotspot_y;
@@ -337,6 +338,12 @@ void cursor_overlay_erase(void) {
 
 void cursor_overlay_move(int16_t new_x, int16_t new_y) {
     if (overlay.locked) return;
+
+    if (!cursor_visible) {
+        cursor_overlay_erase();
+        return;
+    }
+
     /* No-op if position and cursor type are unchanged */
     if (overlay.valid &&
         new_x == overlay.stamp_x && new_y == overlay.stamp_y &&
